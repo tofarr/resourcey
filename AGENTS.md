@@ -1,0 +1,98 @@
+# AGENTS.md — rules for agents and contributors working in `resourcey`
+
+This file is the persistent memory for this repository. Agents (human or AI)
+must follow these rules when producing or reviewing code.
+
+Domain-specific and activity-specific rules live in on-demand skills
+(`.agents/skills/`). Invoke the relevant skill before starting work on that
+area. The always-on rules below apply to all code in this repo.
+
+## Stack & tooling
+
+* Python ≥ 3.11, asyncio-first. Never use blocking I/O on the request path.
+* Manage dependencies with `uv`. Never hand-edit `uv.lock`; use
+  `uv add/remove/sync`.
+* FastAPI for HTTP. Pydantic v2 for all request/response schemas.
+* SQLAlchemy 2 async ORM + asyncpg. Alembic for migrations.
+* Quint for formal specs; every behavioral change to a resource must be
+  reflected in `specs/` and verified with `quint typecheck` / `quint test`.
+
+## Core design principles
+
+* **Resource-oriented.** A resource is the central unit. One declaration
+  drives Pydantic schemas, SQLAlchemy models, the REST service, migrations,
+  and permission checks.
+* **Progressive enhancement.** Each layer is opt-in and composable. The
+  generated service can be replaced by a hand-written route that calls the
+  repository, or by raw SQLAlchemy — nothing breaks when you drop a rung.
+* **Escape hatches.** FastAPI, SQLAlchemy, and Alembic are first-class. Never
+  hide them behind an abstraction that cannot be bypassed.
+
+## On-demand skills
+
+Invoke these via `invoke_skill(name="...")` when working in the relevant area:
+
+* `pr-quality-checks` — lint/type/coverage gates to run before opening a PR.
+* `rest-api-routes` — REST API naming, verbs, batch endpoints, error shapes.
+* `testing` — hermetic test setup, transaction isolation, coverage rules.
+* `quint-specs` — when to update specs and how to verify them.
+* `resources` — resource metadata, service generation, field annotations.
+* `migrations` — Alembic autogeneration and transient dev mode.
+* `auth-rbac` — users, groups, roles, per-action permission computation.
+* `config` — env parser usage and `DiscriminatedUnionMixin`.
+* `pr-review-checklist` — checklist for agents reviewing PRs.
+
+## Code structure — reusable & testable
+
+* Methods are short and single-purpose. If a method exceeds ~40 lines or does
+  more than one thing, split it into named, individually testable helpers.
+* Prefer pure functions for logic; isolate I/O at the edges.
+* No business logic in route handlers — handlers validate, call a service, and
+  serialize. Services contain logic; repositories contain data access.
+* Layering: `routers → services → repositories → models`. Do not skip layers
+  (a router must not query the DB directly).
+* Shared behavior goes in a common module; do not copy-paste across resources.
+
+### File & directory layout
+
+* One flat directory per feature, directly under `src/resourcey/` (e.g.
+  `user/`, `rbac/`). No `models/`/`routes/`/`services/` subfolders.
+* Files inside a feature directory are flat and prefixed with the feature name
+  for global uniqueness: `user_models.py`, `user_schemas.py`,
+  `user_router.py`, `user_service.py`.
+* No `__init__.py` unless it performs real package-level work. Default to
+  namespace packages — convention over configuration.
+* Genuinely shared, cross-cutting code lives in `src/resourcey/util/`,
+  outside the per-feature pattern.
+
+## Comments
+
+* Concise but explicit. Describe only what is not obvious from reading the
+  code.
+* Do not restate the code, narrate changes, or describe nearby behavior.
+* Valid uses: non-obvious invariants, workarounds, subtle ordering/locking,
+  deliberate trade-offs.
+* Docstrings: one-line summary for trivial functions; summary + args/returns
+  only when types don't make it obvious.
+
+### No `__all__` exports lists
+
+Do not add `__all__` to modules. The codebase uses no wildcard imports
+(`from x import *`), so an explicit exports list is pure repetition of the
+names already defined at module scope. Keep the public API implicit: every
+non-underscore-prefixed name is importable, and consumers import the names
+they need directly.
+
+## Vendored utilities
+
+`resourcey.util.env_parser` and `resourcey.util.models` (including
+`DiscriminatedUnionMixin`) are vendored from the OpenHands Software Agent SDK.
+They must remain self-contained: **no `openhands` import may be introduced**.
+When upgrading behaviour from upstream, copy the logic, do not add a
+dependency.
+
+## Issue tracking & roadmap
+
+Work is tracked via [GitHub issues](https://github.com/tofarr/resourcey/issues).
+Create an issue before starting non-trivial work; reference it in commits and
+PRs.
