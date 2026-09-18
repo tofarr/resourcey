@@ -20,7 +20,7 @@ from config_lazy_helpers import Animal, Cat, Dog, NotAnAnimal
 
 from resourcey.config.config_base import BaseConfig
 from resourcey.config.config_framework import DbConfig, FrameworkConfig
-from resourcey.config.config_loader import _unquote, load_dotenv
+from resourcey.config.config_loader import _strip_inline_comment, _unquote, load_dotenv
 from resourcey.config.lazy_field import LazyField, _unwrap_classvar
 from resourcey.resource.errors import ResourceyConfigError, ResourceyError
 
@@ -309,6 +309,40 @@ class TestLoadDotenv:
         assert _unquote("plain") == "plain"
         assert _unquote('"unmatched') == '"unmatched'
         assert _unquote('""') == ""
+
+    def test_inline_comment_stripped(self, monkeypatch, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text("KEY=val # a comment\nNUM=42 #another\n")
+        monkeypatch.delenv("KEY", raising=False)
+        monkeypatch.delenv("NUM", raising=False)
+        load_dotenv(path)
+        assert os.environ["KEY"] == "val"
+        assert os.environ["NUM"] == "42"
+
+    def test_inline_comment_requires_preceding_whitespace(self, monkeypatch, tmp_path):
+        # `#` not preceded by whitespace is part of the value (e.g. a password).
+        path = tmp_path / ".env"
+        path.write_text("PW=p#ass\nURL=https://x/#frag\n")
+        monkeypatch.delenv("PW", raising=False)
+        monkeypatch.delenv("URL", raising=False)
+        load_dotenv(path)
+        assert os.environ["PW"] == "p#ass"
+        assert os.environ["URL"] == "https://x/#frag"
+
+    def test_inline_comment_inside_quotes_preserved(self, monkeypatch, tmp_path):
+        path = tmp_path / ".env"
+        path.write_text('MSG="hi # there"\n')
+        monkeypatch.delenv("MSG", raising=False)
+        load_dotenv(path)
+        assert os.environ["MSG"] == "hi # there"
+
+    def test_strip_inline_comment_helpers(self):
+        assert _strip_inline_comment("val # comment") == "val"
+        assert _strip_inline_comment("val#comment") == "val#comment"
+        assert _strip_inline_comment("p#ass") == "p#ass"
+        assert _strip_inline_comment('"a # b"') == '"a # b"'
+        assert _strip_inline_comment("plain") == "plain"
+        assert _strip_inline_comment("") == ""
 
     def test_line_without_equals_skipped(self, monkeypatch, tmp_path):
         path = tmp_path / ".env"

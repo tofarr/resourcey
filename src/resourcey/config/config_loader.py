@@ -46,9 +46,24 @@ def _load_line(line: str) -> None:
     key = key.strip()
     if not key:
         return
-    value = _unquote(value.strip())
+    value = _unquote(_strip_inline_comment(value.strip()))
     # Real env vars win over file values.
     os.environ.setdefault(key, value)
+
+
+def _strip_inline_comment(value: str) -> str:
+    """Strip an unquoted inline ``# comment`` (whitespace + ``#`` to end of line).
+
+    A ``#`` is treated as a comment only when preceded by whitespace, matching
+    the common ``python-dotenv`` convention — so ``KEY=p#ass`` is preserved
+    while ``KEY=val # comment`` becomes ``val``. Quoted values are left intact
+    (the comment, if any, is inside the quotes).
+    """
+    if value and value[0] not in ('"', "'", "`"):
+        for i, ch in enumerate(value):
+            if ch == "#" and i > 0 and value[i - 1].isspace():
+                return value[:i].rstrip()
+    return value
 
 
 def _unquote(value: str) -> str:
