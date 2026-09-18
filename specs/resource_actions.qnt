@@ -83,6 +83,15 @@ module resource_actions {
   // Invariant: nextId is always greater than every stored key.
   val keysAreBelowCounter = entities.keys().forall(k => k < nextId)
 
+  // Nondeterministic step driving the simulator for invariant checking.
+  // The mutating runs below assert keysAreBelowCounter after each transition;
+  // this noop step lets `quint run --invariant` verify init establishes it.
+  action step: bool = all {
+    entities' = entities,
+    nextId' = nextId,
+    true
+  }
+
   // Tests
 
   run createThenRead = {
