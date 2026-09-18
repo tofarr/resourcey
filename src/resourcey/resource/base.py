@@ -21,7 +21,7 @@ from functools import reduce
 from typing import Annotated, Any, cast, get_args, get_origin
 from uuid import UUID
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, SecretStr, create_model, field_serializer, field_validator
 from pydantic.fields import FieldInfo
 from sqlalchemy import (
     JSON,
@@ -42,6 +42,7 @@ from sqlalchemy.orm import DeclarativeBase, registry
 from resourcey.resource.config import ResourceyConfig
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.missing import MISSING
+from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
 
 
 class ResourceyBase(DeclarativeBase):
@@ -61,8 +62,14 @@ class ResourceyBase(DeclarativeBase):
 # ``get_column_for_field``. Any type not present here raises
 # ``ResourceyConfigError`` so the developer supplies an explicit
 # ``ResourceyConfig.column``.
+#
+# ``SecretStr`` maps to ``String``: a sensitive field stores JWE ciphertext
+# (variable length, no fixed-length assumption) at rest. Encryption /
+# decryption happens at the storage boundary via the secret-serialization
+# convention wired onto the generated Pydantic models.
 _SCALAR_COLUMN_TYPES: dict[Any, Any] = {
     str: String,
+    SecretStr: String,
     int: Integer,
     bool: Boolean,
     float: Float,
@@ -153,12 +160,16 @@ class BaseResource(BaseModel):
 
         Required fields (no original default) stay required. Optional fields
         get ``Field(default=MISSING, validate_default=False)`` so the service
-        can tell whether a value was explicitly supplied.
+        can tell whether a value was explicitly supplied. Secret-bearing
+        (``SecretStr``) fields gain the ``dump_secret_str`` serializer and
+        ``load_secret_str`` validator so encryption / redaction happens at the
+        storage boundary driven by the serialization context.
         """
         cached = cls.__dict__.get("_create_model")
         if cached is not None:
             return cast(type[BaseModel], cached)
         fields: dict[str, Any] = {}
+        secret_names: set[str] = set()
         for name, field in cls.model_fields.items():
             config = cls.get_config_for_field(name, field)
             if not config.creatable:
@@ -168,9 +179,11 @@ class BaseResource(BaseModel):
                 fields[name] = (annotation, _clean_field(field))
             else:
                 fields[name] = (annotation, _missing_field())
+            if _resolve_scalar_type(field.annotation) is SecretStr:
+                secret_names.add(name)
         model = create_model(
             f"{cls.__name__}Create",
-            __base__=BaseModel,
+            __base__=_secret_base(secret_names),
             **fields,
         )
         cls._create_model = model
@@ -178,19 +191,27 @@ class BaseResource(BaseModel):
 
     @classmethod
     def get_read_model(cls) -> type[BaseModel]:
-        """Build (and cache) the read model: only ``readable`` fields."""
+        """Build (and cache) the read model: only ``readable`` fields.
+
+        Secret-bearing (``SecretStr``) fields gain the ``dump_secret_str``
+        serializer and ``load_secret_str`` validator so encryption / redaction
+        happens at the storage boundary driven by the serialization context.
+        """
         cached = cls.__dict__.get("_read_model")
         if cached is not None:
             return cast(type[BaseModel], cached)
         fields: dict[str, Any] = {}
+        secret_names: set[str] = set()
         for name, field in cls.model_fields.items():
             config = cls.get_config_for_field(name, field)
             if not config.readable:
                 continue
             fields[name] = (_strip_config(field.annotation), _clean_field(field))
+            if _resolve_scalar_type(field.annotation) is SecretStr:
+                secret_names.add(name)
         model = create_model(
             f"{cls.__name__}Read",
-            __base__=BaseModel,
+            __base__=_secret_base(secret_names),
             **fields,
         )
         cls._read_model = model
@@ -203,20 +224,26 @@ class BaseResource(BaseModel):
         Every field is optional: each gets
         ``Field(default=MISSING, validate_default=False)`` (original
         default / default_factory dropped) so omitted fields are
-        distinguishable from explicitly-supplied ones.
+        distinguishable from explicitly-supplied ones. Secret-bearing
+        (``SecretStr``) fields gain the ``dump_secret_str`` serializer and
+        ``load_secret_str`` validator so encryption / redaction happens at the
+        storage boundary driven by the serialization context.
         """
         cached = cls.__dict__.get("_update_model")
         if cached is not None:
             return cast(type[BaseModel], cached)
         fields: dict[str, Any] = {}
+        secret_names: set[str] = set()
         for name, field in cls.model_fields.items():
             config = cls.get_config_for_field(name, field)
             if not config.updatable:
                 continue
             fields[name] = (_strip_config(field.annotation), _missing_field())
+            if _resolve_scalar_type(field.annotation) is SecretStr:
+                secret_names.add(name)
         model = create_model(
             f"{cls.__name__}Update",
-            __base__=BaseModel,
+            __base__=_secret_base(secret_names),
             **fields,
         )
         cls._update_model = model
@@ -310,6 +337,59 @@ class BaseResource(BaseModel):
 def _missing_field() -> Any:
     """A field defaulting to ``MISSING`` without validating the sentinel."""
     return Field(default=MISSING, validate_default=False)
+
+
+def _secret_base(secret_names: set[str]) -> type[BaseModel]:
+    """Build a transient base class carrying secret serializers / validators.
+
+    For each name in ``secret_names`` a ``field_serializer`` (dump via
+    :func:`dump_secret_str`) and a ``before`` ``field_validator`` (load via
+    :func:`load_secret_str`, rewrapped in :class:`SecretStr`) are attached.
+    ``check_fields=False`` lets the decorators be defined on the base class
+    before the fields exist (they are added by ``create_model``). The base
+    class is fresh per call so distinct generated models never share decorator
+    bindings. With no secret fields the plain :class:`BaseModel` is returned,
+    preserving the #1 generation contract.
+    """
+    if not secret_names:
+        return BaseModel
+    namespace: dict[str, Any] = {}
+    for name in secret_names:
+        namespace[f"_serialize_secret_{name}"] = field_serializer(name, check_fields=False)(
+            _make_secret_serializer(name)
+        )
+        namespace[f"_validate_secret_{name}"] = field_validator(
+            name, mode="before", check_fields=False
+        )(_make_secret_validator(name))
+    return type("_SecretFieldsBase", (BaseModel,), namespace)
+
+
+def _make_secret_serializer(name: str) -> Any:
+    """Return a ``field_serializer`` function bound to ``name`` (closure per field)."""
+
+    def _serialize(self: Any, value: Any, info: Any) -> str:
+        if value is None or value is MISSING:
+            return value  # type: ignore[return-value]
+        if isinstance(value, SecretStr):
+            return dump_secret_str(value, info)
+        return dump_secret_str(SecretStr(str(value)), info)
+
+    _serialize.__name__ = f"_serialize_secret_{name}"
+    return _serialize
+
+
+def _make_secret_validator(name: str) -> Any:
+    """Return a ``field_validator`` function bound to ``name`` (closure per field)."""
+
+    def _validate(value: Any, info: Any) -> Any:
+        if value is None or value is MISSING:
+            return value
+        if isinstance(value, SecretStr):
+            return value
+        return SecretStr(load_secret_str(str(value), info))
+
+    _validate.__name__ = f"_validate_secret_{name}"
+    return _validate
 
 
 def _clean_field(field: FieldInfo) -> FieldInfo:
