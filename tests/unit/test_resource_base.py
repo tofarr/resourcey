@@ -6,10 +6,12 @@ from typing import Annotated
 from uuid import UUID
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import JSON, Column, DateTime, ForeignKey, Integer, String, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from resourcey.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
+from resourcey.encryption.encryption_service import EncryptionService
 from resourcey.resource.base import BaseResource, ResourceyBase
 from resourcey.resource.config import ResourceyConfig
 from resourcey.resource.errors import ResourceyConfigError
@@ -95,6 +97,21 @@ class WithUuidId(BaseResource):
 class WithUnmappedType(BaseResource):
     id: int
     thing: complex = complex(0)
+
+
+class SecretResource(BaseResource):
+    id: int
+    name: str
+    token: SecretStr
+    optional_token: SecretStr | None = None
+
+
+def _encryption_service() -> EncryptionService:
+    return EncryptionService(
+        EncryptionKeysConfig(
+            encryption_key=EncryptionKeyConfig(id="k1", value=SecretStr("test-secret")),
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -474,3 +491,165 @@ async def test_sql_alchemy_model_round_trip():
             assert [(r.id, r.label) for r in rows] == [(1, "gadget")]
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Secret-field (SecretStr) handling — issue #7
+# ---------------------------------------------------------------------------
+
+
+def test_column_for_secret_str_is_string():
+    col = SecretResource.get_column_for_field("token", SecretResource.model_fields["token"])
+    assert isinstance(col.type, String)
+    assert col.nullable is False  # token is required
+
+
+def test_column_for_optional_secret_str_is_nullable_string():
+    col = SecretResource.get_column_for_field(
+        "optional_token", SecretResource.model_fields["optional_token"]
+    )
+    assert isinstance(col.type, String)
+    assert col.nullable is True
+
+
+def test_secret_str_field_no_longer_raises_unmapped_type():
+    # Before issue #7 a SecretStr field raised ResourceyConfigError because it
+    # was absent from _SCALAR_COLUMN_TYPES. Now it maps to a String column.
+    sqla_model = SecretResource.get_sql_alchemy_model()
+    names = {c.name for c in sqla_model.__table__.columns}
+    assert {"id", "name", "token", "optional_token"} == names
+
+
+def test_create_model_with_secret_field_redacts_on_default_dump():
+    create_model = SecretResource.get_create_model()
+    instance = create_model(
+        name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
+    )
+    dumped = instance.model_dump()
+    assert dumped["token"] == "**********"
+    assert dumped["optional_token"] == "**********"
+    assert dumped["name"] == "svc"
+
+
+def test_create_model_with_secret_field_redacts_on_json_dump():
+    create_model = SecretResource.get_create_model()
+    instance = create_model(
+        name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
+    )
+    assert (
+        instance.model_dump_json()
+        == '{"name":"svc","token":"**********","optional_token":"**********"}'
+    )
+
+
+def test_create_model_secret_field_encrypts_with_context():
+    enc = _encryption_service()
+    create_model = SecretResource.get_create_model()
+    instance = create_model(
+        name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
+    )
+    dumped = instance.model_dump(context={"encryption_service": enc})
+    assert dumped["token"] != "plain-token"
+    assert dumped["token"] != "**********"
+    # The ciphertext round-trips through the service.
+    assert enc.decrypt_value(dumped["token"]) == "plain-token"
+
+
+def test_create_model_secret_field_exposes_plaintext_with_context():
+    create_model = SecretResource.get_create_model()
+    instance = create_model(
+        name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
+    )
+    dumped = instance.model_dump(context={"expose_secrets": True})
+    assert dumped["token"] == "plain-token"
+    assert dumped["optional_token"] == "opt"
+
+
+def test_create_model_non_secret_field_is_not_encrypted():
+    enc = _encryption_service()
+    create_model = SecretResource.get_create_model()
+    instance = create_model(
+        name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
+    )
+    dumped = instance.model_dump(context={"encryption_service": enc})
+    # A plain str field is never touched by the secret convention.
+    assert dumped["name"] == "svc"
+
+
+def test_read_model_secret_field_round_trip_with_encryption_context():
+    enc = _encryption_service()
+    create_model = SecretResource.get_create_model()
+    read_model = SecretResource.get_read_model()
+    instance = create_model(
+        name="svc", token=SecretStr("round-trip-value"), optional_token=SecretStr("opt")
+    )
+    dumped = instance.model_dump(context={"encryption_service": enc})
+    # Validate the ciphertext back into a read model with the same service.
+    loaded = read_model.model_validate(
+        {
+            "id": 1,
+            "name": "svc",
+            "token": dumped["token"],
+            "optional_token": dumped["optional_token"],
+        },
+        context={"encryption_service": enc},
+    )
+    assert isinstance(loaded.token, SecretStr)
+    assert loaded.token.get_secret_value() == "round-trip-value"
+    assert loaded.optional_token.get_secret_value() == "opt"
+
+
+def test_read_model_secret_field_passes_through_without_encryption_context():
+    read_model = SecretResource.get_read_model()
+    # Without a service the stored value is treated as plaintext pass-through.
+    loaded = read_model.model_validate(
+        {"id": 1, "name": "svc", "token": "raw", "optional_token": "rawopt"},
+        context={},
+    )
+    assert loaded.token.get_secret_value() == "raw"
+    assert loaded.optional_token.get_secret_value() == "rawopt"
+
+
+def test_update_model_secret_field_encrypts_with_context():
+    enc = _encryption_service()
+    update_model = SecretResource.get_update_model()
+    instance = update_model(token=SecretStr("new-token"))
+    dumped = instance.model_dump(
+        context={"encryption_service": enc}, exclude={"name", "optional_token"}
+    )
+    assert enc.decrypt_value(dumped["token"]) == "new-token"
+
+
+def test_update_model_secret_field_missing_when_omitted():
+    # An omitted secret field defaults to MISSING (the service distinguishes
+    # omitted from explicitly-supplied), matching the non-secret update contract.
+    update_model = SecretResource.get_update_model()
+    instance = update_model()
+    assert instance.token is MISSING
+
+
+def test_resource_without_secret_fields_uses_plain_basemodel():
+    # No secret fields -> the generated model's base is plain BaseModel
+    # (the #1 generation contract is preserved).
+    create_model = Widget.get_create_model()
+    assert create_model.__bases__[0] is BaseModel
+    instance = create_model(label="gadget")
+    assert instance.model_dump() == {"label": "gadget"}
+
+
+def test_secret_field_optional_value_encrypts_when_set():
+    enc = _encryption_service()
+    create_model = SecretResource.get_create_model()
+    instance = create_model(name="svc", token=SecretStr("req"), optional_token=SecretStr("opt"))
+    dumped = instance.model_dump(context={"encryption_service": enc})
+    assert enc.decrypt_value(dumped["optional_token"]) == "opt"
+
+
+def test_secret_field_validator_accepts_secret_str_input():
+    # A SecretStr passed directly to validation is preserved as-is.
+    read_model = SecretResource.get_read_model()
+    loaded = read_model.model_validate(
+        {"id": 1, "name": "svc", "token": SecretStr("direct"), "optional_token": None},
+        context={},
+    )
+    assert loaded.token.get_secret_value() == "direct"
