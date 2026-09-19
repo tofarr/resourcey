@@ -11,6 +11,7 @@ from datetime import datetime
 from pydantic import Field
 
 from resourcey.resource.base import BaseResource
+from resourcey.resource.registry import register_resource
 
 
 class Widget(BaseResource):
@@ -19,3 +20,6 @@ class Widget(BaseResource):
     id: int
     label: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+register_resource(Widget)

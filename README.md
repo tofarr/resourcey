@@ -90,14 +90,29 @@ resourcey migrate upgrade          # to head
 resourcey migrate downgrade -1     # one step back
 ```
 
-The migrations directory and the resource modules to import before
-autogeneration are configured under the `migrations` key of
-`FrameworkConfig` (env prefix `RESOURCEY_MIGRATIONS_`):
+The migrations directory is configured under the `migrations` key of
+`FrameworkConfig` (env prefix `RESOURCEY_MIGRATIONS_`); the resource modules
+are configured at the **app level** on `FrameworkConfig.resource_modules`
+(env prefix `RESOURCEY_`), since they are an app concern shared by the REST
+service layer, RBAC, and migrations alike:
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
+| `RESOURCEY_RESOURCE_MODULES` | `[]` | Modules that call `register_resource` for every resource in the app (JSON array, or `RESOURCEY_RESOURCE_MODULES_0`, `_1`, ...). Imported by any framework consumer that needs the full resource set. |
 | `RESOURCEY_MIGRATIONS_MIGRATIONS_DIR` | `migrations` | Directory holding `env.py` and `versions/`. |
-| `RESOURCEY_MIGRATIONS_RESOURCE_MODULES` | `[]` | Modules whose `BaseResource` subclasses populate metadata (JSON array, or `RESOURCEY_MIGRATIONS_RESOURCE_MODULES_0`, `_1`, ...). |
+
+A resource module imports each resource class and registers it:
+
+```python
+# myapp/resources.py
+from resourcey.resource.base import BaseResource
+from resourcey.resource.registry import register_resource
+from myapp.user import User
+from myapp.widget import Widget
+
+register_resource(User)
+register_resource(Widget)
+```
 
 **Generated revisions are drafts.** Alembic's autogeneration cannot detect
 table or column *renames* — a rename looks like a drop followed by a create,

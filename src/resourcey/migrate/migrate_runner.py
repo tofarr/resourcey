@@ -50,8 +50,8 @@ from resourcey.resource.base import ResourceyBase
 config = context.config
 
 # Import + materialise resource models so their tables are in metadata before
-# the autogenerate diff runs. Reads RESOURCEY_MIGRATION_RESOURCE_MODULES* env
-# vars set by build_alembic_config().
+# the autogenerate diff runs. Reads RESOURCEY_RESOURCE_MODULES* env vars set
+# by build_alembic_config().
 import_resource_modules()
 
 target_metadata = ResourceyBase.metadata
@@ -91,74 +91,67 @@ else:
 
 
 def import_resource_modules() -> None:
-    """Import modules named in ``RESOURCEY_MIGRATION_RESOURCE_MODULES``(+``_*``).
+    """Import modules named in ``RESOURCEY_RESOURCE_MODULES``(+``_*``).
 
     Reads the env directly so ``env.py`` (which has no access to a config
-    instance) can populate ``ResourceyBase.metadata`` before Alembic diffs.
-    Sequential indices (``RESOURCEY_MIGRATION_RESOURCE_MODULES_0`` ...) are
-    supported, mirroring the env parser's list convention. An unimportable
-    module raises :class:`ResourceyConfigError` naming the offender.
+    instance) can populate the resource registry before Alembic diffs.
+    Sequential indices (``RESOURCEY_RESOURCE_MODULES_0`` ...) are supported,
+    mirroring the env parser's list convention. An unimportable module raises
+    :class:`ResourceyConfigError` naming the offender.
 
-    After importing, the :class:`~resourcey.resource.base.BaseResource`
-    subclasses *defined in the named modules* have their SQLAlchemy model
-    materialised (:meth:`~resourcey.resource.base.BaseResource.get_sql_alchemy_model`)
-    so the derived tables are registered in ``ResourceyBase.metadata``.
-    Importing a module only *defines* the class; the table is built lazily on
-    first call, so this step is what actually makes autogeneration see the
-    tables. Only classes whose ``__module__`` is one of the named modules are
-    materialised, so resources defined elsewhere (e.g. other test modules
-    still loaded in the process) are left untouched.
+    Each named module is expected to call
+    :func:`resourcey.resource.registry.register_resource` for every resource it
+    defines. ``register_resource`` eagerly builds the SQLAlchemy model, so the
+    derived tables are in :data:`ResourceyBase.metadata` by the time this
+    returns — autogeneration sees them all without a separate materialisation
+    pass.
     """
     import importlib
 
+    from resourcey.resource.base import BaseResource
+    from resourcey.resource.registry import get_registered_resources, register_resource
+
     modules: list[str] = []
-    if "RESOURCEY_MIGRATION_RESOURCE_MODULES" in os.environ:
-        raw = os.environ["RESOURCEY_MIGRATION_RESOURCE_MODULES"].strip()
+    if "RESOURCEY_RESOURCE_MODULES" in os.environ:
+        raw = os.environ["RESOURCEY_RESOURCE_MODULES"].strip()
         if raw:
             modules.extend(m.strip() for m in raw.split(",") if m.strip())
     i = 0
     while True:
-        key = f"RESOURCEY_MIGRATION_RESOURCE_MODULES_{i}"
+        key = f"RESOURCEY_RESOURCE_MODULES_{i}"
         if key not in os.environ:
             break
         modules.append(os.environ[key].strip())
         i += 1
 
-    module_set = set(modules)
     for name in modules:
         try:
-            importlib.import_module(name)
+            mod = importlib.import_module(name)
         except ImportError as exc:
             raise ResourceyConfigError(
                 f"Could not import resource module {name!r} for migrations: {exc}"
             ) from exc
+        # ``import_module`` returns the cached module without re-executing the
+        # body on a second import, so module-level ``register_resource`` calls
+        # won't re-fire. Re-register every ``BaseResource`` subclass defined in
+        # the named module so the registry is current regardless of import
+        # state. ``register_resource`` is idempotent, so freshly-imported
+        # modules (whose body already called it) are unaffected.
+        for attr_name in dir(mod):
+            obj = getattr(mod, attr_name)
+            if (
+                isinstance(obj, type)
+                and obj is not BaseResource
+                and issubclass(obj, BaseResource)
+                and obj.__module__ == name
+            ):
+                register_resource(obj)
 
-    _materialise_resource_models(module_set)
-
-
-def _materialise_resource_models(module_set: set[str] | None = None) -> None:
-    """Build the SQLAlchemy model for loaded ``BaseResource`` subclasses.
-
-    When ``module_set`` is given, only classes whose ``__module__`` is in it
-    are materialised; otherwise every loaded subclass is. Restricting to the
-    named modules avoids collisions when multiple loaded modules define
-    resources with the same class name (e.g. test fixtures).
-    """
-    from resourcey.resource.base import BaseResource
-
-    for cls in _all_subclasses(BaseResource):
-        if module_set is not None and cls.__module__ not in module_set:
-            continue
-        cls.get_sql_alchemy_model()  # type: ignore[attr-defined]
-
-
-def _all_subclasses(cls: type) -> list[type]:
-    """Recursively collect every subclass of ``cls`` currently loaded."""
-    found: list[type] = []
-    for sub in cls.__subclasses__():
-        found.append(sub)
-        found.extend(_all_subclasses(sub))
-    return found
+    # ``register_resource`` materialises each class on registration, so the
+    # registry is already populated. Touch the result so a static analyser
+    # sees the import is used and so a future lazy-registration scheme would
+    # still be exercised here.
+    get_registered_resources()
 
 
 def build_alembic_config(
@@ -166,6 +159,7 @@ def build_alembic_config(
     *,
     database_url: str,
     migrations_dir: str | Path | None = None,
+    resource_modules: list[str] | None = None,
 ) -> AlembicConfig:
     """Build an in-memory Alembic :class:`Config` (no ``alembic.ini`` needed).
 
@@ -174,6 +168,10 @@ def build_alembic_config(
     ``asyncpg`` / ``aiosqlite`` are stripped to their sync counterpart by
     :func:`_sync_database_url`), and records the resource modules in the
     environment so ``env.py`` can re-read them without a config instance.
+    ``resource_modules`` comes from
+    :attr:`FrameworkConfig.resource_modules` (an app-level concern); when
+    ``None`` the existing ``RESOURCEY_RESOURCE_MODULES`` env var is left
+    untouched.
     """
     directory = (
         Path(migrations_dir)
@@ -199,8 +197,8 @@ def build_alembic_config(
     config.set_main_option("sqlalchemy.url", _sync_database_url(database_url))
     # Carry the resource-module list into the environment so env.py's
     # import_resource_modules() picks it up without a config instance.
-    modules = list(migration_config.resource_modules)
-    os.environ["RESOURCEY_MIGRATION_RESOURCE_MODULES"] = ",".join(modules)
+    if resource_modules is not None:
+        os.environ["RESOURCEY_RESOURCE_MODULES"] = ",".join(resource_modules)
     return config
 
 
@@ -234,14 +232,24 @@ def _default_script_template_source() -> str:
     return Path(_default_script_template()).read_text(encoding="utf-8")
 
 
-def generate(migration_config: MigrationConfig, *, database_url: str, message: str) -> str:
+def generate(
+    migration_config: MigrationConfig,
+    *,
+    database_url: str,
+    message: str,
+    resource_modules: list[str] | None = None,
+) -> str:
     """Autogenerate a draft Alembic revision and return its file path.
 
     The revision is a draft — review it (and the rename-as-drop-create caveat)
     before applying. ``database_url`` is the async URL from
     :class:`~resourcey.config.config_framework.DbConfig`.
+    ``resource_modules`` comes from
+    :attr:`FrameworkConfig.resource_modules`.
     """
-    config = build_alembic_config(migration_config, database_url=database_url)
+    config = build_alembic_config(
+        migration_config, database_url=database_url, resource_modules=resource_modules
+    )
     script = alembic_command.revision(config, message=message, autogenerate=True)
     path = _script_path(script)
     if path is None:
@@ -250,29 +258,48 @@ def generate(migration_config: MigrationConfig, *, database_url: str, message: s
 
 
 def upgrade(
-    migration_config: MigrationConfig, *, database_url: str, revision: str = "head"
+    migration_config: MigrationConfig,
+    *,
+    database_url: str,
+    revision: str = "head",
+    resource_modules: list[str] | None = None,
 ) -> None:
     """Apply migrations up to ``revision`` (default ``head``)."""
-    config = build_alembic_config(migration_config, database_url=database_url)
+    config = build_alembic_config(
+        migration_config, database_url=database_url, resource_modules=resource_modules
+    )
     alembic_command.upgrade(config, revision)
 
 
 def downgrade(
-    migration_config: MigrationConfig, *, database_url: str, revision: str = "-1"
+    migration_config: MigrationConfig,
+    *,
+    database_url: str,
+    revision: str = "-1",
+    resource_modules: list[str] | None = None,
 ) -> None:
     """Roll back migrations to ``revision`` (default ``-1``, one step back)."""
-    config = build_alembic_config(migration_config, database_url=database_url)
+    config = build_alembic_config(
+        migration_config, database_url=database_url, resource_modules=resource_modules
+    )
     alembic_command.downgrade(config, revision)
 
 
-def init(migration_config: MigrationConfig, *, database_url: str) -> str:
+def init(
+    migration_config: MigrationConfig,
+    *,
+    database_url: str,
+    resource_modules: list[str] | None = None,
+) -> str:
     """Materialise ``env.py`` + ``versions/`` + ``script.py.mako`` and return the dir.
 
     Idempotent: existing files are not overwritten. Unlike ``alembic init``,
     no ``alembic.ini`` is created — :func:`build_alembic_config` builds the
     config in memory.
     """
-    config = build_alembic_config(migration_config, database_url=database_url)
+    config = build_alembic_config(
+        migration_config, database_url=database_url, resource_modules=resource_modules
+    )
     return config.get_main_option("script_location") or ""
 
 

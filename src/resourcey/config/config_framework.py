@@ -46,22 +46,15 @@ class MigrationConfig(BaseModel):
 
     ``migrations_dir`` is the directory (relative to the working directory
     unless absolute) that holds ``env.py`` and the ``versions/`` revisions.
-    ``resource_modules`` names the modules whose resource subclasses populate
-    :data:`ResourceyBase.metadata`; ``env.py`` imports them (via
-    :func:`resourcey.migrate.runner.import_resource_modules`) so Alembic's
-    autogeneration sees every table before diffing.
+    Resource modules are named on :class:`FrameworkConfig.resource_modules`
+    (an app-level concern) — migrations import them via
+    :func:`resourcey.migrate.migrate_runner.import_resource_modules` so
+    Alembic's autogeneration sees every table before diffing.
     """
 
     migrations_dir: str = Field(
         default=MIGRATIONS_DIR_DEFAULT,
         description="Directory holding alembic env.py and versions/ (relative or absolute).",
-    )
-    resource_modules: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Modules to import before autogeneration so their BaseResource "
-            "subclasses populate metadata (JSON array or sequential indices)."
-        ),
     )
 
 
@@ -77,6 +70,15 @@ class FrameworkConfig(BaseConfig):
     )
     migrations: MigrationConfig = Field(
         default_factory=MigrationConfig, description="Alembic migration configuration."
+    )
+    resource_modules: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Modules that call register_resource for every resource in the app "
+            "(JSON array or sequential indices). Imported by any framework "
+            "consumer that needs the full resource set — the REST service "
+            "layer, RBAC, and Alembic autogeneration."
+        ),
     )
     debug: bool = Field(default=False, description="Enable debug mode.")
     transient_mode: bool = Field(

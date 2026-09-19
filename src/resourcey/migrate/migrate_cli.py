@@ -81,25 +81,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     framework_config = cast(FrameworkConfig, config)
     database_url = framework_config.database.database_url
     migration_config = framework_config.migrations
+    resource_modules = framework_config.resource_modules
 
     cmd = args.migrate_command
     if cmd == "init":
-        directory = migrate_runner.init(migration_config, database_url=database_url)
+        directory = migrate_runner.init(
+            migration_config,
+            database_url=database_url,
+            resource_modules=resource_modules,
+        )
         print(f"Initialised migrations in {directory}")
     elif cmd == "autogenerate":
         path = migrate_runner.generate(
-            migration_config, database_url=database_url, message=args.message
+            migration_config,
+            database_url=database_url,
+            message=args.message,
+            resource_modules=resource_modules,
         )
         print(
             f"Generated draft revision: {path}\n"
             "Review it before applying (renames look like drop+create)."
         )
     elif cmd == "upgrade":
-        migrate_runner.upgrade(migration_config, database_url=database_url, revision=args.revision)
+        migrate_runner.upgrade(
+            migration_config,
+            database_url=database_url,
+            revision=args.revision,
+            resource_modules=resource_modules,
+        )
         print(f"Upgraded to {args.revision}")
     elif cmd == "downgrade":
         migrate_runner.downgrade(
-            migration_config, database_url=database_url, revision=args.revision
+            migration_config,
+            database_url=database_url,
+            revision=args.revision,
+            resource_modules=resource_modules,
         )
         print(f"Downgraded to {args.revision}")
     else:  # pragma: no cover — argparse enforces a subcommand

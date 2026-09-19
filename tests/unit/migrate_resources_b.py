@@ -10,6 +10,7 @@ modules and materialises both tables.
 from __future__ import annotations
 
 from resourcey.resource.base import BaseResource
+from resourcey.resource.registry import register_resource
 
 
 class Gadget(BaseResource):
@@ -17,3 +18,6 @@ class Gadget(BaseResource):
 
     id: int
     name: str
+
+
+register_resource(Gadget)
