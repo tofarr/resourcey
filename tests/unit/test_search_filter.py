@@ -128,6 +128,19 @@ class TestMatchesInMemory:
         assert g.matches(new_user("a@x.com")) is True
         assert g.matches(new_user("c@x.com")) is False
 
+    def test_in_null_attribute_in_memory_matches_when_list_has_none(self) -> None:
+        # In-memory: ``None in [None]`` is True, so a NULL attribute value
+        # matches when the accepted-values list contains None. This diverges
+        # from the SQL path (see test_in_null_attribute_sql_never_matches).
+        f = UserSearchFilter(nickname__in=[None])
+        assert f.matches(new_user("a@x.com", nickname=None)) is True
+        assert f.matches(new_user("b@x.com", nickname="bob")) is False
+
+    def test_in_null_attribute_in_memory_no_match_when_list_lacks_none(self) -> None:
+        f = UserSearchFilter(nickname__in=["bob"])
+        assert f.matches(new_user("a@x.com", nickname=None)) is False
+        assert f.matches(new_user("b@x.com", nickname="bob")) is True
+
     def test_multiple_clauses_are_anded(self) -> None:
         f = UserSearchFilter(email__contains="example", email__eq="alice@example.com")
         assert f.matches(new_user("alice@example.com")) is True
@@ -247,6 +260,28 @@ class TestFilterSqlExecuted:
         stmt = f.filter_sql(select(User))
         result = await session.execute(stmt)
         assert list(result.scalars().all()) == []
+
+    async def test_in_null_attribute_sql_never_matches(self, session: AsyncSession) -> None:
+        # SQL ``NULL IN (NULL)`` evaluates to NULL (not True), so a row whose
+        # attribute is NULL is never selected by an ``in`` filter -- even when
+        # the accepted-values list contains None. This diverges from the
+        # in-memory path (see test_in_null_attribute_in_memory_matches...).
+        session.add(new_user("a@x.com", nickname=None))
+        session.add(new_user("b@x.com", nickname="bob"))
+        await session.commit()
+
+        rows = await session.scalars(UserSearchFilter(nickname__in=[None]).filter_sql(select(User)))
+        assert list(rows) == []
+
+        # A NULL row is excluded even when the list mixes None and real values;
+        # only the non-NULL match is returned.
+        rows = await session.scalars(
+            UserSearchFilter(nickname__in=[None, "bob"]).filter_sql(
+                select(User).order_by(User.email)
+            )
+        )
+        matched = [u.nickname for u in rows]
+        assert matched == ["bob"]
 
     async def test_empty_filter_returns_all(self, session: AsyncSession) -> None:
         session.add(new_user("a@example.com", "a"))

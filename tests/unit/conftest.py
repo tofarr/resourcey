@@ -32,6 +32,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(init=False, primary_key=True, autoincrement=True)
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Nullable on purpose: exercises the NULL ``in`` divergence between the
+    # in-memory and SQL paths (see test_in_null_*).
+    nickname: Mapped[str | None] = mapped_column(String(64), default=None)
     enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(init=False, default_factory=lambda: datetime.now())
 
@@ -50,6 +53,7 @@ class UserSearchFilter(BaseSearchFilter[User]):
     username__contains: str | None = None
     username__eq: str | None = None
     username__in: list[str] | None = None
+    nickname__in: list[str | None] | None = None
     enabled__eq: bool | None = None
     enabled__ne: bool | None = None
     created_at__gte: datetime | None = None
@@ -70,12 +74,12 @@ async def session() -> AsyncSession:
     await engine.dispose()
 
 
-def new_user(email: str, username: str | None = None) -> User:
+def new_user(email: str, username: str | None = None, nickname: str | None = None) -> User:
     """Construct a transient User for in-memory filter tests."""
-    return User(email=email, username=username or email.split("@")[0])
+    return User(email=email, username=username or email.split("@")[0], nickname=nickname)
 
 
 # Make new_user available as a pytest fixture for convenience.
 @pytest.fixture
-def make_user() -> Callable[[str, str | None], User]:
+def make_user() -> Callable[..., User]:
     return new_user
