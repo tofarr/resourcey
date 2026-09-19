@@ -43,6 +43,7 @@ from resourcey.resource.config import ResourceyConfig
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.missing import MISSING
 from resourcey.util.naming import camel_to_snake, pluralize
+from resourcey.util.search_filter import SearchFilter
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
 
 
@@ -118,7 +119,7 @@ class BaseResource(BaseModel):
         ``ResourceyConfig(sortable=True)`` -- a deliberate, visible opt-out
         of the safe default. (Filtering is gated per-resource by a declared
         search filter class, not by a per-field flag; see
-        :meth:`get_search_filter`.)
+        :meth:`get_search_filter_type`.)
         """
         explicit = False
         for meta in field.metadata:
@@ -152,7 +153,7 @@ class BaseResource(BaseModel):
         return config
 
     @classmethod
-    def get_search_filter(cls) -> type[Any] | None:
+    def get_search_filter_type(cls) -> type[SearchFilter[Any]] | None:
         """Return the declared search filter class for this resource, or ``None``.
 
         When ``None`` (the default) the ``search`` action exposes **no**
@@ -161,8 +162,8 @@ class BaseResource(BaseModel):
         only. Filtering is opt-in per resource: a developer declares a
         :class:`~resourcey.util.search_filter.SearchFilter` subclass (typically
         a ``BaseSearchFilter[<SqlAlchemyModel>]`` whose ``<attr>__<op>`` fields
-        name exactly the filterable fields/operators) and returns it here.
-        The declared class is the single source of truth for what is
+        name exactly the filterable fields/operators) and returns its type
+        here. The declared class is the single source of truth for what is
         filterable -- it doubles as the validation schema for the incoming
         query params and supplies the SQL ``WHERE`` via ``filter_sql``.
 

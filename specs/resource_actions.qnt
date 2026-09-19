@@ -4,6 +4,12 @@
 // batch_edit. This spec models the state transitions and invariants that
 // every generated service must satisfy.
 //
+// search is modelled with an opt-in filter: a resource declares a filter type
+// via get_search_filter_type(); when no filter type is declared the search
+// action refuses any non-empty filter (the endpoint serves pagination + sort
+// only). A filter combines attribute predicates (equality and `in`-membership);
+// an empty `in` list matches nothing, mirroring the portable SQL `false()`.
+//
 // Invariants:
 //   - keysAreBelowCounter: nextId is always greater than every stored key.
 //   - readRequiresExisting: read fails for absent ids.
@@ -15,6 +21,22 @@ module resource_actions {
 
   // A stored entity is keyed by an id and carries a value.
   type Entity = int
+
+  // A predicate over an entity. Equality matches a specific value; `in`
+  // matches membership in an accepted set (empty set => matches nothing).
+  // None means "no restriction on this attribute".
+  type Predicate = Eq(int) | In(Set[int]) | None
+
+  // A search filter maps each attribute name to a predicate. The keys of the
+  // map are exactly the filterable attributes a resource declares; an empty
+  // map means "match everything". This mirrors the declared SearchFilter
+  // subclass being the single source of truth for filterable fields/ops.
+  type Filter = str -> Predicate
+
+  // Whether this resource has declared a filter type (get_search_filter_type()).
+  // Kept out of the mutable state machine so create/update/delete need not
+  // mention it; search takes it as an explicit argument to test both regimes.
+  pure def defaultHasFilterType: bool = true
 
   // The resource state: a map from id to entity, plus a monotonic counter.
   var entities: int -> Entity
@@ -29,7 +51,7 @@ module resource_actions {
   action create(value: Entity): bool = {
     val id = nextId
     all {
-      entities' = entities.set(id, value),
+      entities' = entities.put(id, value),
       nextId' = nextId + 1,
       true,
     }
@@ -41,7 +63,7 @@ module resource_actions {
   // update: replace the value at id; fail if absent.
   action update(id: int, value: Entity): bool = all {
     assert(entities.keys().contains(id)),
-    entities' = entities.set(id, value),
+    entities' = entities.put(id, value),
     nextId' = nextId,
     true,
   }
@@ -51,20 +73,41 @@ module resource_actions {
     assert(entities.keys().contains(id)),
     entities' = entities.keys().filter(k => k != id).fold(
       Map(),
-      (acc, k) => acc.set(k, entities.get(k))
+      (acc, k) => acc.put(k, entities.get(k))
     ),
     nextId' = nextId,
     true,
   }
 
-  // search: return all entity keys (paginated in the implementation).
-  pure def search: Set[int] = entities.keys()
+  // Whether a single entity value satisfies one predicate.
+  pure def matchesPredicate(value: Entity, p: Predicate): bool =
+    match p {
+      Eq(v) => value == v |
+      In(accepted) => accepted.contains(value) |
+      None => true
+    }
+
+  // Whether an entity satisfies every predicate in a filter (logical AND).
+  pure def matchesFilter(value: Entity, flt: Filter): bool =
+    flt.keys().forall(attr => matchesPredicate(value, flt.get(attr)))
+
+  // search: return the keys of entities matching the filter.
+  // When no filter type is declared (hasFilterType=false), a non-empty filter
+  // is refused (the endpoint serves pagination + sort only); otherwise
+  // matching reduces to AND over the filter's predicates. An empty filter
+  // always matches everything.
+  def search(hasFilterType: bool, flt: Filter): Set[int] =
+    if (not(hasFilterType) and flt.keys().size() > 0)
+      // No filter declared -> reject any field__op=value param.
+      Set()
+    else
+      entities.keys().filter(k => matchesFilter(entities.get(k), flt))
 
   // batch_read: return entities for a set of ids; missing ids are omitted.
   def batch_read(ids: Set[int]): int -> Entity =
     entities.keys().filter(k => ids.contains(k)).fold(
       Map(),
-      (acc, k) => acc.set(k, entities.get(k))
+      (acc, k) => acc.put(k, entities.get(k))
     )
 
   // batch_edit: apply a set of updates; absent ids are skipped.
@@ -73,7 +116,7 @@ module resource_actions {
     all {
       entities' = appliedKeys.fold(
         entities,
-        (acc, k) => acc.set(k, updates.get(k))
+        (acc, k) => acc.put(k, updates.get(k))
       ),
       nextId' = nextId,
       true,
@@ -120,7 +163,7 @@ module resource_actions {
       })
       .then(delete(1))
       .then(all {
-        assert(search.size() == 0),
+        assert(search(defaultHasFilterType, Map()).size() == 0),
         entities' = entities,
         nextId' = nextId,
       })
@@ -153,6 +196,91 @@ module resource_actions {
       })
       .then(all {
         assert(keysAreBelowCounter),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // search filtering: an empty filter matches every entity.
+  run searchEmptyFilterMatchesAll = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(search(defaultHasFilterType, Map()).size() == 2),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // search filtering: an `Eq` predicate narrows to the matching entity.
+  run searchEqualityPredicate = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(search(defaultHasFilterType, Map("value" -> Eq(10))) == Set(1)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // search filtering: an `In` predicate narrows to members of the set.
+  run searchInPredicate = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(create(30))
+      .then(all {
+        assert(search(defaultHasFilterType, Map("value" -> In(Set(10, 30)))) == Set(1, 3)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // search filtering: an empty `In` set matches nothing (portable `false()`).
+  run searchEmptyInMatchesNothing = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(search(defaultHasFilterType, Map("value" -> In(Set()))) == Set()),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // search filtering: multiple predicates are combined with logical AND.
+  run searchAndCombinesPredicates = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(create(10))
+      .then(all {
+        // Eq(10) AND In({10}) both constrain the same int value, so the
+        // conjunction still matches ids 1 and 3 (both value 10) and excludes
+        // id 2 (value 20): this is the logical-AND combination of predicates.
+        assert(search(defaultHasFilterType, Map("value" -> Eq(10), "other" -> In(Set(10)))) == Set(1, 3)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // search filtering: with no filter type declared, a non-empty filter is
+  // refused (returns nothing) even when entities exist — the endpoint serves
+  // pagination + sort only. An empty filter still returns all keys.
+  run searchNoFilterDeclaredRejectsNonEmptyFilter = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(search(false, Map("value" -> Eq(10))) == Set()),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        // No filter declared but empty filter -> all keys returned.
+        assert(search(false, Map()) == Set(1, 2)),
         entities' = entities,
         nextId' = nextId,
       })

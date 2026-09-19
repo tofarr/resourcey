@@ -2,7 +2,7 @@
 
 import enum
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 import pytest
@@ -261,17 +261,17 @@ def test_config_for_secret_str_explicit_override_is_respected():
 
 
 # ---------------------------------------------------------------------------
-# get_search_filter (issue #2)
+# get_search_filter_type (issue #2)
 # ---------------------------------------------------------------------------
 
 
-def test_get_search_filter_defaults_to_none():
+def test_get_search_filter_type_defaults_to_none():
     """No filter class declared by default -> no filtering is available."""
-    assert User.get_search_filter() is None
-    assert SecretResource.get_search_filter() is None
+    assert User.get_search_filter_type() is None
+    assert SecretResource.get_search_filter_type() is None
 
 
-def test_get_search_filter_overridable():
+def test_get_search_filter_type_overridable():
     from resourcey.util.search_filter import SearchFilter
 
     class CustomFilter(SearchFilter):
@@ -281,10 +281,10 @@ def test_get_search_filter_overridable():
         id: int
 
         @classmethod
-        def get_search_filter(cls) -> type[SearchFilter] | None:
+        def get_search_filter_type(cls) -> type[SearchFilter[Any]] | None:
             return CustomFilter
 
-    assert CustomResource.get_search_filter() is CustomFilter
+    assert CustomResource.get_search_filter_type() is CustomFilter
 
 
 # ---------------------------------------------------------------------------
