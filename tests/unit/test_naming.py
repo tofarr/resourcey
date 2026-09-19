@@ -2,7 +2,7 @@
 
 import pytest
 
-from resourcey.util.naming import camel_to_snake, pluralize
+from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
 
 
 @pytest.mark.parametrize(
@@ -22,6 +22,25 @@ from resourcey.util.naming import camel_to_snake, pluralize
 )
 def test_camel_to_snake(value, expected):
     assert camel_to_snake(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("User", "user"),
+        ("UserRole", "user-role"),
+        ("BankAccount", "bank-account"),
+        ("HTTPServer", "http-server"),
+        ("HTTPSConnection", "https-connection"),
+        ("simple", "simple"),
+        ("already-kebab", "already-kebab"),
+        ("OAuth2Client", "o-auth2-client"),
+        ("ABC", "abc"),
+        ("", ""),
+    ],
+)
+def test_camel_to_kebab(value, expected):
+    assert camel_to_kebab(value) == expected
 
 
 @pytest.mark.parametrize(

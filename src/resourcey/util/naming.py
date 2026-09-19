@@ -27,6 +27,11 @@ def camel_to_snake(name: str) -> str:
     return _CAMEL_BOUNDARY.sub("_", name).lower()
 
 
+def camel_to_kebab(name: str) -> str:
+    """Convert a CamelCase / PascalCase identifier to ``kebab-case``."""
+    return _CAMEL_BOUNDARY.sub("-", name).lower()
+
+
 def pluralize(name: str) -> str:
     """Append a simple English plural suffix to ``name``.
 

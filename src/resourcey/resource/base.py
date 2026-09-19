@@ -42,7 +42,7 @@ from sqlalchemy.orm import DeclarativeBase, registry
 from resourcey.resource.config import ResourceyConfig
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.missing import MISSING
-from resourcey.util.naming import camel_to_snake, pluralize
+from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
 from resourcey.util.search_filter import SearchFilter
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
 
@@ -304,15 +304,15 @@ class BaseResource(BaseModel):
 
     @classmethod
     def get_resource_path(cls) -> str:
-        """Derive the plural, lower-case, snake_case REST path segment.
+        """Derive the plural, lower-case, kebab-case REST path segment.
 
         Independent of :meth:`get_table_name` so an override of one never
         silently changes the other: the SQL table name and the URL path are
         separate concerns and may legitimately diverge. Defaults to the
-        plural snake_case class name (``UserRole`` -> ``user_roles``).
+        plural kebab-case class name (``UserRole`` -> ``user-roles``).
         Overridable.
         """
-        return pluralize(camel_to_snake(cls.__name__))
+        return pluralize(camel_to_kebab(cls.__name__))
 
     @classmethod
     def get_column_for_field(cls, field_name: str, field: FieldInfo) -> Column[Any]:

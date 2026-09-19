@@ -437,9 +437,9 @@ def test_get_table_name_overridable():
     [
         (User, "users"),
         (Box, "boxes"),
-        (UserRole, "user_roles"),
-        (BankAccount, "bank_accounts"),
-        (HttpServer, "http_servers"),
+        (UserRole, "user-roles"),
+        (BankAccount, "bank-accounts"),
+        (HttpServer, "http-servers"),
     ],
 )
 def test_get_resource_path(resource, expected):
@@ -451,7 +451,7 @@ def test_get_resource_path_independent_of_table_name_override():
 
     The two naming concerns are independent hooks: a table-name override
     (e.g. to an irregular ``custom_table``) must not leak into the URL path,
-    which stays the default plural snake_case class name.
+    which stays the default plural kebab-case class name.
     """
 
     class Custom(BaseResource):
