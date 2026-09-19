@@ -21,5 +21,4 @@ Before approving a PR, verify:
   `resourcey.util.*`.
 * **Style** — `ruff` and `mypy --strict` clean; methods short and
   single-purpose; no `__all__`; comments only for the non-obvious.
-* **Migrations** — schema changes produce a reviewed Alembic migration (or
-  are gated behind transient dev mode with a flag).
+* **Migrations** — schema changes produce a reviewed Alembic migration.
