@@ -17,6 +17,9 @@ dependencies = [
     "joserfc>=1.7.5",
 ]
 
+[project.scripts]
+resourcey = "resourcey.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.2",
