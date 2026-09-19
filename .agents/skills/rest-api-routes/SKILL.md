@@ -15,12 +15,18 @@ Every generated resource service exposes the **standard actions** over REST:
 | `update` | PATCH | `/{resource}/{id}` | partial payload | updated entity |
 | `delete` | DELETE | `/{resource}/{id}` | — | 204 |
 | `search` | GET | `/{resource}` | query params | page of entities |
-| `batch_read` | POST | `/{resource}/batch_read` | list of ids | list of entities |
-| `batch_edit` | POST | `/{resource}/batch_edit` | list of edits | list of entities |
+| `batch_read` | GET | `/{resource}/batch-read` | `ids` query param (comma-separated) | list of entities |
+| `batch_edit` | POST | `/{resource}/batch-edit` | list of edits | list of entities |
 
 ## Conventions
 
-* Resource names are plural, lowercase, snake_case in URLs.
+* All URL paths use **dashes**, never underscores. The `{resource}` segment
+  is plural, lower-case, kebab-case (from `get_resource_path()`); action
+  sub-paths are dash-separated too (`batch-read`, `batch-edit`). Python
+  method names stay snake_case (`batch_read`, `batch_edit`) — only the URL
+  is dash-separated.
+* `batch_read` is a `GET` (a pure read with no side-effects), so its ids are
+  passed as an `ids` query parameter (`?ids=1,2,3`) rather than a request body.
 * `search` uses query parameters for filtering, sorting, and pagination:
   `?limit=20&offset=0&sort=-created_at&field__eq=value`. Filter operators
   follow the `field__op=value` convention (`eq`, `ne`, `lt`, `lte`, `gt`,
