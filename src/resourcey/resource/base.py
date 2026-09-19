@@ -297,10 +297,10 @@ class BaseResource(BaseModel):
 
         Snake-case the class name (``UserRole`` -> ``user_role``), then
         pluralize — appending ``"s"`` or ``"es"`` per the common endings
-        (``s`` / ``x`` / ``z`` / ``ch`` / ``sh``). Irregular plurals are left
-        to an override. Overridable.
+        (``s`` / ``x`` / ``z`` / ``ch`` / ``sh``) — and lowercase. Irregular
+        plurals are left to an override. Overridable.
         """
-        return pluralize(camel_to_snake(cls.__name__))
+        return pluralize(camel_to_snake(cls.__name__)).lower()
 
     @classmethod
     def get_resource_path(cls) -> str:
@@ -312,7 +312,7 @@ class BaseResource(BaseModel):
         plural kebab-case class name (``UserRole`` -> ``user-roles``).
         Overridable.
         """
-        return pluralize(camel_to_kebab(cls.__name__))
+        return pluralize(camel_to_kebab(cls.__name__)).lower()
 
     @classmethod
     def get_column_for_field(cls, field_name: str, field: FieldInfo) -> Column[Any]:

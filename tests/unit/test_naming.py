@@ -8,15 +8,15 @@ from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("User", "user"),
-        ("UserRole", "user_role"),
-        ("BankAccount", "bank_account"),
-        ("HTTPServer", "http_server"),
-        ("HTTPSConnection", "https_connection"),
+        ("User", "User"),
+        ("UserRole", "User_Role"),
+        ("BankAccount", "Bank_Account"),
+        ("HTTPServer", "HTTP_Server"),
+        ("HTTPSConnection", "HTTPS_Connection"),
         ("simple", "simple"),
         ("already_snake", "already_snake"),
-        ("OAuth2Client", "o_auth2_client"),
-        ("ABC", "abc"),
+        ("OAuth2Client", "O_Auth2_Client"),
+        ("ABC", "ABC"),
         ("", ""),
     ],
 )
@@ -27,15 +27,15 @@ def test_camel_to_snake(value, expected):
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("User", "user"),
-        ("UserRole", "user-role"),
-        ("BankAccount", "bank-account"),
-        ("HTTPServer", "http-server"),
-        ("HTTPSConnection", "https-connection"),
+        ("User", "User"),
+        ("UserRole", "User-Role"),
+        ("BankAccount", "Bank-Account"),
+        ("HTTPServer", "HTTP-Server"),
+        ("HTTPSConnection", "HTTPS-Connection"),
         ("simple", "simple"),
         ("already-kebab", "already-kebab"),
-        ("OAuth2Client", "o-auth2-client"),
-        ("ABC", "abc"),
+        ("OAuth2Client", "O-Auth2-Client"),
+        ("ABC", "ABC"),
         ("", ""),
     ],
 )
@@ -54,6 +54,9 @@ def test_camel_to_kebab(value, expected):
         ("role", "roles"),
         ("class", "classes"),
         ("data", "datas"),
+        # case is preserved, not lowercased by pluralize
+        ("Box", "Boxes"),
+        ("CLASS", "CLASSes"),
     ],
 )
 def test_pluralize(value, expected):
