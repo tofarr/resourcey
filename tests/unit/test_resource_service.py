@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from resourcey.resource.base import BaseResource, ResourceyBase
-from resourcey.resource.config import ResourceyConfig
+from resourcey.resource.config import ResourceyField
 from resourcey.resource.errors import InvalidInputError, NotFoundError
 from resourcey.resource.repository import ResourceRepository
 from resourcey.resource.service import (
@@ -59,7 +59,7 @@ class SvcGadget(BaseResource):
     """A resource with a unique constraint to exercise the 409 conflict path."""
 
     id: int
-    serial: Annotated[str, ResourceyConfig(column=Column("serial", String(64), unique=True))]
+    serial: Annotated[str, ResourceyField(column=Column("serial", String(64), unique=True))]
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

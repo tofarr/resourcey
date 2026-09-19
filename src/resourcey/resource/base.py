@@ -1,15 +1,24 @@
 """``BaseResource`` and the resourcey async SQLAlchemy declarative base.
 
-A resource is the central unit of resourcey. ``BaseResource`` extends a
-Pydantic ``BaseModel`` and is designed to be subclassed: a single resource
-declaration drives the Pydantic create / read / update models and the
-SQLAlchemy ORM model. Every generation step is a single-purpose, overridable
-hook so a subtype can replace any piece without touching the rest
-(progressive enhancement / escape hatches).
+A resource is the central unit of resourcey. ``BaseResource`` is a plain
+declaration class (not a Pydantic model): a subclass declares fields with the
+ordinary annotation + ``Field()`` / default syntax, and the framework
+introspects that declaration to drive the generated Pydantic create / read /
+update models and the SQLAlchemy ORM model. Every generation step is a
+single-purpose, overridable hook so a subtype can replace any piece without
+touching the rest (progressive enhancement / escape hatches).
+
+Field metadata is collected at subclass-creation time into
+:attr:`BaseResource.model_fields` -- a mapping of name to Pydantic
+:class:`~pydantic.fields.FieldInfo`, the same type the generation hooks
+already consume. Building it ourselves (rather than inheriting it from
+``BaseModel``) is what lets ``BaseResource`` be a declaration rather than a
+data record: it is never instantiated, never validated, and carries no
+Pydantic model machinery.
 
 Generated models and resolved values are cached on the class so repeated calls
-are cheap. The caches are non-annotated class attributes (so Pydantic does
-not treat them as model fields) and are stored per-subclass.
+are cheap. The caches are non-annotated class attributes (so they are not
+treated as declared fields) and are stored per-subclass.
 """
 
 from __future__ import annotations
@@ -18,7 +27,7 @@ import enum
 import types
 from datetime import date, datetime, time
 from functools import reduce
-from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_origin, get_type_hints
 from uuid import UUID
 
 from pydantic import BaseModel, Field, SecretStr, create_model, field_serializer, field_validator
@@ -39,7 +48,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, registry
 
-from resourcey.resource.config import ResourceyConfig
+from resourcey.resource.config import ResourceyField
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.missing import MISSING
 from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
@@ -69,7 +78,7 @@ class ResourceyBase(DeclarativeBase):
 # Default scalar type -> SQLAlchemy column type mapping used by
 # ``get_column_for_field``. Any type not present here raises
 # ``ResourceyConfigError`` so the developer supplies an explicit
-# ``ResourceyConfig.column``.
+# ``ResourceyField.column``.
 #
 # ``SecretStr`` maps to ``String``: a sensitive field stores JWE ciphertext
 # (variable length, no fixed-length assumption) at rest. Encryption /
@@ -91,50 +100,63 @@ _SCALAR_COLUMN_TYPES: dict[Any, Any] = {
 }
 
 
-class BaseResource(BaseModel):
+class BaseResource:
     """Base class for resource declarations.
 
-    Subclass it and declare Pydantic fields; the framework derives the create
-    / read / update models and the SQLAlchemy ORM model from that single
-    declaration. Each public generation method is an overridable hook.
+    A *declaration* class, not a data model: subclass it and declare fields
+    with the ordinary annotation + ``Field()`` / default syntax, and the
+    framework derives the create / read / update Pydantic models and the
+    SQLAlchemy ORM model from that single declaration. Each public generation
+    method is an overridable hook.
+
+    ``BaseResource`` is intentionally not a Pydantic ``BaseModel``. Field
+    metadata is collected into :attr:`model_fields` at subclass-creation time
+    by :meth:`__init_subclass__`, so the generation hooks introspect a
+    registry the framework owns rather than Pydantic's model machinery.
     """
 
-    # Per-subclass caches. Non-annotated so Pydantic ignores them; stored on
-    # each subclass's own ``__dict__`` so subclasses don't share caches.
+    # Per-subclass field registry and caches. Non-annotated so they are not
+    # treated as declared fields; stored on each subclass's own ``__dict__``
+    # so subclasses don't share them.
+    model_fields: dict[str, FieldInfo]
     _id_field: str
     _create_model: type[BaseModel]
     _read_model: type[BaseModel]
     _update_model: type[BaseModel]
     _sqlalchemy_model: Any
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.model_fields = _collect_field_infos(cls)
+
     # ------------------------------------------------------------------
     # Field config resolution
     # ------------------------------------------------------------------
 
     @classmethod
-    def get_config_for_field(cls, field_name: str, field: FieldInfo) -> ResourceyConfig:
-        """Return the ``ResourceyConfig`` for a field.
+    def get_config_for_field(cls, field_name: str, field: FieldInfo) -> ResourceyField:
+        """Return the ``ResourceyField`` for a field.
 
-        Reads it from the field metadata if an explicit ``ResourceyConfig`` is
+        Reads it from the field metadata if an explicit ``ResourceyField`` is
         attached via ``Annotated``; otherwise builds a default config. Then
         applies the id / timestamp / secret conventions.
 
         The ``SecretStr`` default-off convention (``sortable`` -> ``False``)
-        is applied only when no explicit ``ResourceyConfig`` is attached: a
+        is applied only when no explicit ``ResourceyField`` is attached: a
         developer who wants a secret sortable must attach an explicit
-        ``ResourceyConfig(sortable=True)`` -- a deliberate, visible opt-out
+        ``ResourceyField(sortable=True)`` -- a deliberate, visible opt-out
         of the safe default. (Filtering is gated per-resource by a declared
         search filter class, not by a per-field flag; see
         :meth:`get_search_filter_type`.)
         """
         explicit = False
         for meta in field.metadata:
-            if isinstance(meta, ResourceyConfig):
+            if isinstance(meta, ResourceyField):
                 config = meta
                 explicit = True
                 break
         else:
-            config = ResourceyConfig()
+            config = ResourceyField()
 
         if field_name == "id":
             # The DB / resource owns the id; REST methods pass the id separately
@@ -147,12 +169,12 @@ class BaseResource(BaseModel):
                 raise ResourceyConfigError(
                     f"Field '{field_name}' on {cls.__name__} is a timestamp and must declare a "
                     "default_factory (e.g. default_factory=datetime.utcnow). A fixed default or no "
-                    "default is ambiguous; supply an explicit ResourceyConfig override if intended."
+                    "default is ambiguous; supply an explicit ResourceyField override if intended."
                 )
         # SecretStr fields are not sortable by default: allowing `sort=field`
         # against a secret lets a client infer the relative ordering of secret
         # values even when the field is excluded from the read model. Skipped
-        # when an explicit ResourceyConfig is attached so a developer can
+        # when an explicit ResourceyField is attached so a developer can
         # deliberately opt a secret into sortability.
         if not explicit and _resolve_scalar_type(field.annotation) is SecretStr:
             config = config.model_copy(update={"sortable": False})
@@ -324,7 +346,7 @@ class BaseResource(BaseModel):
     def get_column_for_field(cls, field_name: str, field: FieldInfo) -> Column[Any]:
         """Generate a SQLAlchemy ``Column`` for a field.
 
-        Honours an explicit ``ResourceyConfig.column`` when provided. Otherwise
+        Honours an explicit ``ResourceyField.column`` when provided. Otherwise
         applies the default rules: id -> primary key (int id -> Integer with
         autoincrement), timestamps -> indexed, ``*_id`` -> ambiguous error,
         enums -> String, nested models -> JSON, scalars per the default
@@ -352,7 +374,7 @@ class BaseResource(BaseModel):
             raise ResourceyConfigError(
                 f"Field '{field_name}' on {cls.__name__} ends in '_id'; the framework cannot infer "
                 "its column semantics (foreign key? on-delete behaviour?). Define an explicit "
-                "ResourceyConfig(column=Column(...)) for this field."
+                "ResourceyField(column=Column(...)) for this field."
             )
 
         py_type = _resolve_scalar_type(field.annotation)
@@ -391,6 +413,90 @@ class BaseResource(BaseModel):
 def _missing_field() -> Any:
     """A field defaulting to ``MISSING`` without validating the sentinel."""
     return Field(default=MISSING, validate_default=False)
+
+
+def _collect_field_infos(cls: type[BaseResource]) -> dict[str, FieldInfo]:
+    """Build ``model_fields`` for a ``BaseResource`` subclass from its declaration.
+
+    ``BaseResource`` is a plain class, so it has no Pydantic-generated
+    ``model_fields``. This walks the subclass's annotations (plus inherited
+    ones, so a resource may derive from another resource) in declaration
+    order and turns each declared field into a Pydantic :class:`FieldInfo` --
+    the same type the generation hooks consume -- honouring class-level
+    ``Field()`` / default values and ``Annotated[..., ResourceyField(...)]``
+    metadata.
+
+    String annotations (from ``from __future__ import annotations``) are
+    resolved to real types via :func:`typing.get_type_hints`. Framework
+    infrastructure attributes declared on ``BaseResource`` itself
+    (:data:`_INFRA_ATTRS`) are excluded so they are never treated as fields.
+
+    A field with no class attribute is required; one with a value (a plain
+    default or a ``Field(...)``) is optional and the value supplies the
+    default / default_factory / metadata.
+    """
+    resolved = _resolve_annotations(cls)
+    fields: dict[str, FieldInfo] = {}
+    for name, annotation in _ordered_annotations(cls):
+        if name in fields:
+            continue
+        default = cls.__dict__.get(name, _NO_DEFAULT)
+        ann_type = resolved.get(name, annotation)
+        if default is _NO_DEFAULT:
+            fields[name] = FieldInfo.from_annotation(ann_type)
+        else:
+            fields[name] = FieldInfo.from_annotated_attribute(ann_type, default)
+    return fields
+
+
+_NO_DEFAULT: Any = object()
+
+# Attributes declared (with annotations) on ``BaseResource`` itself that must
+# never be treated as resource fields. Because ``BaseResource`` is a plain
+# class, its own ``model_fields`` / cache annotations would otherwise be
+# collected by the annotation walk.
+_INFRA_ATTRS: frozenset[str] = frozenset(
+    {
+        "model_fields",
+        "_id_field",
+        "_create_model",
+        "_read_model",
+        "_update_model",
+        "_sqlalchemy_model",
+    }
+)
+
+
+def _resolve_annotations(cls: type[BaseResource]) -> dict[str, Any]:
+    """Resolve string annotations on ``cls`` (and bases) to real types.
+
+    Mirrors what Pydantic does for a ``BaseModel``: ``get_type_hints`` with
+    ``include_extras=True`` so ``Annotated[..., ResourceyField(...)]`` metadata
+    is preserved. Names that fail to resolve are left as their raw annotation.
+    """
+    try:
+        return get_type_hints(cls, include_extras=True)
+    except Exception:  # fall back to raw annotations for callers
+        return {}
+
+
+def _ordered_annotations(cls: type[BaseResource]) -> list[tuple[str, Any]]:
+    """Merged, declaration-ordered ``(name, raw annotation)`` pairs for ``cls``.
+
+    Walks the MRO base-first so a subclass's own annotations override an
+    inherited field of the same name while preserving first-seen order.
+    Framework infrastructure attributes are skipped.
+    """
+    seen: set[str] = set()
+    ordered: list[tuple[str, Any]] = []
+    for klass in reversed(cls.__mro__):
+        anns = getattr(klass, "__annotations__", {})
+        for name, annotation in anns.items():
+            if name in seen or name in _INFRA_ATTRS:
+                continue
+            seen.add(name)
+            ordered.append((name, annotation))
+    return ordered
 
 
 def _secret_base(secret_names: set[str]) -> type[BaseModel]:
@@ -447,14 +553,14 @@ def _make_secret_validator(name: str) -> Any:
 
 
 def _clean_field(field: FieldInfo) -> FieldInfo:
-    """Return a copy of ``field`` with ``ResourceyConfig`` metadata removed.
+    """Return a copy of ``field`` with ``ResourceyField`` metadata removed.
 
-    ``ResourceyConfig`` carries a SQLAlchemy ``Column`` that is not
+    ``ResourceyField`` carries a SQLAlchemy ``Column`` that is not
     JSON-schema serializable, so it must not appear on fields that are
     carried verbatim into generated models (e.g. required create-model
     fields and all read-model fields).
     """
-    cleaned_meta = [m for m in field.metadata if not isinstance(m, ResourceyConfig)]
+    cleaned_meta = [m for m in field.metadata if not isinstance(m, ResourceyField)]
     if len(cleaned_meta) == len(field.metadata):
         return field
     new_field = field._copy()
@@ -463,9 +569,9 @@ def _clean_field(field: FieldInfo) -> FieldInfo:
 
 
 def _strip_config(annotation: Any) -> Any:
-    """Remove ``ResourceyConfig`` (and other non-type) metadata from an annotation.
+    """Remove ``ResourceyField`` (and other non-type) metadata from an annotation.
 
-    ``ResourceyConfig`` carries a SQLAlchemy ``Column`` which is not
+    ``ResourceyField`` carries a SQLAlchemy ``Column`` which is not
     JSON-schema serializable, so it must not leak into generated Pydantic
     models. For ``Annotated[T, ...]`` this returns the bare ``T``; unions
     are rebuilt with stripped members (preserving the ``None`` branch).
@@ -510,6 +616,6 @@ def _column_type_for(field_name: str, annotation: Any, py_type: Any) -> Any:
     if col_type is None:
         raise ResourceyConfigError(
             f"No default SQLAlchemy column type for field '{field_name}' of type {py_type}. "
-            "Supply an explicit ResourceyConfig(column=Column(...)) for this field."
+            "Supply an explicit ResourceyField(column=Column(...)) for this field."
         )
     return col_type
