@@ -37,7 +37,7 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
 * `testing` — hermetic test setup, transaction isolation, coverage rules.
 * `quint-specs` — when to update specs and how to verify them.
 * `resources` — resource metadata, service generation, field annotations.
-* `migrations` — Alembic autogeneration and transient dev mode.
+* `migrations` — Alembic autogeneration from resource models.
 * `auth-rbac` — users, groups, roles, per-action permission computation.
 * `config` — env parser usage and `DiscriminatedUnionMixin`.
 * `pr-review-checklist` — checklist for agents reviewing PRs.

@@ -179,7 +179,6 @@ class TestFrameworkConfig:
     def test_defaults_only(self):
         cfg = FrameworkConfig()
         assert cfg.debug is False
-        assert cfg.transient_mode is False
         assert cfg.host == "127.0.0.1"
         assert cfg.port == 8000
         assert cfg.cors_origins == []
