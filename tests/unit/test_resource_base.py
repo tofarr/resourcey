@@ -63,6 +63,26 @@ class Box(BaseResource):
     size: int
 
 
+class UserRole(BaseResource):
+    id: int
+    label: str
+
+
+class BankAccount(BaseResource):
+    id: int
+    balance: int
+
+
+class HttpServer(BaseResource):
+    id: int
+    host: str
+
+
+class OAuth2Client(BaseResource):
+    id: int
+    name: str
+
+
 class WithFk(BaseResource):
     id: int
     role_id: Annotated[
@@ -156,6 +176,7 @@ def test_config_for_id_field():
     assert cfg.creatable is False
     assert cfg.updatable is False
     assert cfg.readable is True
+    assert cfg.sortable is True
 
 
 def test_config_for_email_field_defaults():
@@ -163,6 +184,7 @@ def test_config_for_email_field_defaults():
     assert cfg.creatable is True
     assert cfg.updatable is True
     assert cfg.readable is True
+    assert cfg.sortable is True
     assert cfg.column is None
 
 
@@ -206,6 +228,68 @@ def test_get_config_for_field_overridable():
 
     cfg = Override.get_config_for_field("x", Override.model_fields["x"])
     assert cfg.creatable is False
+
+
+# ---------------------------------------------------------------------------
+# get_config_for_field -- SecretStr sortable default (issue #2 / #7)
+# ---------------------------------------------------------------------------
+
+
+def test_config_for_secret_str_defaults_not_sortable():
+    cfg = SecretResource.get_config_for_field("token", SecretResource.model_fields["token"])
+    assert cfg.sortable is False
+    # Other flags are unaffected -- secrets stay creatable/updatable/readable
+    # (readability is governed by redaction/encryption at the storage boundary,
+    # not by excluding the field from the read model).
+    assert cfg.creatable is True
+    assert cfg.updatable is True
+    assert cfg.readable is True
+
+
+def test_config_for_optional_secret_str_defaults_not_sortable():
+    cfg = SecretResource.get_config_for_field(
+        "optional_token", SecretResource.model_fields["optional_token"]
+    )
+    assert cfg.sortable is False
+
+
+def test_config_for_secret_str_explicit_override_is_respected():
+    """An explicit ResourceyConfig(sortable=True) on a SecretStr wins over the
+    default-off convention -- the override is the documented escape hatch."""
+
+    class SecretWithOverride(BaseResource):
+        id: int
+        token: Annotated[SecretStr, ResourceyConfig(sortable=True)]
+
+    cfg = SecretWithOverride.get_config_for_field("token", SecretWithOverride.model_fields["token"])
+    assert cfg.sortable is True
+
+
+# ---------------------------------------------------------------------------
+# get_search_filter_type (issue #2)
+# ---------------------------------------------------------------------------
+
+
+def test_get_search_filter_type_defaults_to_none():
+    """No filter class declared by default -> no filtering is available."""
+    assert User.get_search_filter_type() is None
+    assert SecretResource.get_search_filter_type() is None
+
+
+def test_get_search_filter_type_overridable():
+    from resourcey.util.search_filter import SearchFilter
+
+    class CustomFilter(SearchFilter):
+        pass
+
+    class CustomResource(BaseResource):
+        id: int
+
+        @classmethod
+        def get_search_filter_type(cls) -> type[SearchFilter] | None:
+            return CustomFilter
+
+    assert CustomResource.get_search_filter_type() is CustomFilter
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +412,10 @@ def test_update_model_cached():
         (Box, "boxes"),
         (Widget, "widgets"),
         (Role, "roles"),
+        (UserRole, "user_roles"),
+        (BankAccount, "bank_accounts"),
+        (HttpServer, "http_servers"),
+        (OAuth2Client, "oauth2_clients"),
     ],
 )
 def test_get_table_name(resource, expected):
@@ -343,6 +431,58 @@ def test_get_table_name_overridable():
             return "custom_table"
 
     assert Custom.get_table_name() == "custom_table"
+
+
+# ---------------------------------------------------------------------------
+# get_resource_path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("resource", "expected"),
+    [
+        (User, "users"),
+        (Box, "boxes"),
+        (UserRole, "user-roles"),
+        (BankAccount, "bank-accounts"),
+        (HttpServer, "http-servers"),
+        (OAuth2Client, "oauth2-clients"),
+    ],
+)
+def test_get_resource_path(resource, expected):
+    assert resource.get_resource_path() == expected
+
+
+def test_get_resource_path_independent_of_table_name_override():
+    """Overriding get_table_name must not change the default resource path.
+
+    The two naming concerns are independent hooks: a table-name override
+    (e.g. to an irregular ``custom_table``) must not leak into the URL path,
+    which stays the default plural kebab-case class name.
+    """
+
+    class Custom(BaseResource):
+        id: int
+
+        @classmethod
+        def get_table_name(cls) -> str:
+            return "custom_table"
+
+    assert Custom.get_table_name() == "custom_table"
+    # Not "custom_table" / "custom_tables" -- derived independently from the
+    # class name, so the URL path is unaffected by the table-name override.
+    assert Custom.get_resource_path() == "customs"
+
+
+def test_get_resource_path_overridable():
+    class Custom(BaseResource):
+        id: int
+
+        @classmethod
+        def get_resource_path(cls) -> str:
+            return "custom-path"
+
+    assert Custom.get_resource_path() == "custom-path"
 
 
 # ---------------------------------------------------------------------------

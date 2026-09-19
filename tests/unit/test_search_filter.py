@@ -111,6 +111,36 @@ class TestMatchesInMemory:
         assert UserSearchFilter(created_at__lte=cutoff).matches(old_user) is True
         assert UserSearchFilter(created_at__lte=cutoff).matches(later_user) is False
 
+    def test_in_matches_membership(self) -> None:
+        f = UserSearchFilter(email__in=["alice@example.com", "bob@example.com"])
+        assert f.matches(new_user("alice@example.com")) is True
+        assert f.matches(new_user("bob@example.com")) is True
+        assert f.matches(new_user("charlie@example.com")) is False
+
+    def test_in_empty_list_matches_nothing(self) -> None:
+        f = UserSearchFilter(email__in=[])
+        assert f.matches(new_user("alice@example.com")) is False
+
+    def test_in_with_attribute_filter(self) -> None:
+        g = AttributeFilter[User](
+            attribute="email", value=["a@x.com", "b@x.com"], condition=Condition.IN
+        )
+        assert g.matches(new_user("a@x.com")) is True
+        assert g.matches(new_user("c@x.com")) is False
+
+    def test_in_null_attribute_in_memory_matches_when_list_has_none(self) -> None:
+        # In-memory: ``None in [None]`` is True, so a NULL attribute value
+        # matches when the accepted-values list contains None. This diverges
+        # from the SQL path (see test_in_null_attribute_sql_never_matches).
+        f = UserSearchFilter(nickname__in=[None])
+        assert f.matches(new_user("a@x.com", nickname=None)) is True
+        assert f.matches(new_user("b@x.com", nickname="bob")) is False
+
+    def test_in_null_attribute_in_memory_no_match_when_list_lacks_none(self) -> None:
+        f = UserSearchFilter(nickname__in=["bob"])
+        assert f.matches(new_user("a@x.com", nickname=None)) is False
+        assert f.matches(new_user("b@x.com", nickname="bob")) is True
+
     def test_multiple_clauses_are_anded(self) -> None:
         f = UserSearchFilter(email__contains="example", email__eq="alice@example.com")
         assert f.matches(new_user("alice@example.com")) is True
@@ -209,6 +239,49 @@ class TestFilterSqlExecuted:
         users = list(result.scalars().all())
         assert len(users) == 1
         assert users[0].email == "alice@example.com"
+
+    async def test_in_filter_selects_members(self, session: AsyncSession) -> None:
+        session.add(new_user("alice@example.com", "alice"))
+        session.add(new_user("bob@example.com", "bob"))
+        session.add(new_user("charlie@other.org", "charlie"))
+        await session.commit()
+
+        f = UserSearchFilter(email__in=["alice@example.com", "bob@example.com"])
+        stmt = f.filter_sql(select(User).order_by(User.email))
+        result = await session.execute(stmt)
+        emails = {u.email for u in result.scalars().all()}
+        assert emails == {"alice@example.com", "bob@example.com"}
+
+    async def test_in_filter_empty_list_selects_none(self, session: AsyncSession) -> None:
+        session.add(new_user("alice@example.com", "alice"))
+        await session.commit()
+
+        f = UserSearchFilter(email__in=[])
+        stmt = f.filter_sql(select(User))
+        result = await session.execute(stmt)
+        assert list(result.scalars().all()) == []
+
+    async def test_in_null_attribute_sql_never_matches(self, session: AsyncSession) -> None:
+        # SQL ``NULL IN (NULL)`` evaluates to NULL (not True), so a row whose
+        # attribute is NULL is never selected by an ``in`` filter -- even when
+        # the accepted-values list contains None. This diverges from the
+        # in-memory path (see test_in_null_attribute_in_memory_matches...).
+        session.add(new_user("a@x.com", nickname=None))
+        session.add(new_user("b@x.com", nickname="bob"))
+        await session.commit()
+
+        rows = await session.scalars(UserSearchFilter(nickname__in=[None]).filter_sql(select(User)))
+        assert list(rows) == []
+
+        # A NULL row is excluded even when the list mixes None and real values;
+        # only the non-NULL match is returned.
+        rows = await session.scalars(
+            UserSearchFilter(nickname__in=[None, "bob"]).filter_sql(
+                select(User).order_by(User.email)
+            )
+        )
+        matched = [u.nickname for u in rows]
+        assert matched == ["bob"]
 
     async def test_empty_filter_returns_all(self, session: AsyncSession) -> None:
         session.add(new_user("a@example.com", "a"))

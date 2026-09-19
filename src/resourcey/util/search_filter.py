@@ -33,6 +33,7 @@ lt          strictly less than
 lte         less than or equal
 gt          strictly greater than
 gte         greater than or equal
+in          membership in a list of accepted values
 =========== =============================================================
 
 Example::
@@ -87,6 +88,7 @@ class Condition(Enum):
     LTE = "lte"
     GT = "gt"
     GTE = "gte"
+    IN = "in"
 
 
 # A SQL boolean expression (the WHERE clause fragment a filter contributes).
@@ -134,6 +136,23 @@ def _in_mem_contains(attr_value: Any, value: Any) -> bool:
         return False
 
 
+def _sql_in(column: Any, value: Any) -> Any:
+    # ``value`` is the parsed list of accepted values. An empty list matches
+    # nothing (consistent with SQL ``IN ()`` semantics, which SQLite/Postgres
+    # reject syntactically -- ``false()`` expresses "match no row" portably).
+    values = list(value) if not isinstance(value, (str, bytes)) else [value]
+    if not values:
+        return false()
+    return column.in_(values)
+
+
+def _in_mem_in(attr_value: Any, value: Any) -> bool:
+    values = list(value) if not isinstance(value, (str, bytes)) else [value]
+    if not values:
+        return False
+    return attr_value in values
+
+
 _OPS: dict[str, tuple[Callable[[Any, Any], Any], Callable[[Any, Any], bool]]] = {
     "contains": (_sql_contains, _in_mem_contains),
     "eq": (lambda c, v: c == _naive(v), operator.eq),
@@ -142,6 +161,7 @@ _OPS: dict[str, tuple[Callable[[Any, Any], Any], Callable[[Any, Any], bool]]] = 
     "lte": (lambda c, v: c <= _naive(v), operator.le),
     "gt": (lambda c, v: c > _naive(v), operator.gt),
     "gte": (lambda c, v: c >= _naive(v), operator.ge),
+    "in": (_sql_in, _in_mem_in),
 }
 
 _SEPARATOR = "__"
