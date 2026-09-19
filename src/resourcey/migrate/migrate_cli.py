@@ -1,7 +1,7 @@
-"""``resourcey ...`` CLI (issue #3).
+"""``resourcey migrate`` subcommand (issue #3).
 
-The ``resourcey`` entry point currently fronts the ``migrate`` subcommand,
-which wraps Alembic via :mod:`resourcey.migrate.migrate_runner`:
+Wired into the top-level :mod:`resourcey.cli` dispatcher as the ``migrate``
+subcommand. Wraps Alembic via :mod:`resourcey.migrate.migrate_runner`:
 
 * ``resourcey migrate init``                  — materialise ``env.py`` + ``versions/``.
 * ``resourcey migrate autogenerate -m "..."`` — autogenerate a draft revision
@@ -11,32 +11,27 @@ which wraps Alembic via :mod:`resourcey.migrate.migrate_runner`:
 
 It resolves the active config
 (:func:`resourcey.config.config_runtime.get_config`) for the database URL and
-migration settings. Generated revisions are drafts — review them before
-applying (see the ``migrations`` skill and the README for the
-rename-as-drop-create caveat). Run ``alembic`` directly to escape the wrapper.
+migration settings. Resource classes are read from
+:attr:`FrameworkConfig.resources` (env ``RESOURCEY_RESOURCES``); ``env.py``
+resolves and registers them itself, so no resource list is passed to the
+runner. Generated revisions are drafts — review them before applying (see the
+``migrations`` skill and the README for the rename-as-drop-create caveat).
+Run ``alembic`` directly to escape the wrapper.
 """
 
 from __future__ import annotations
 
 import argparse
-import sys
-from collections.abc import Sequence
-from typing import cast
+from typing import Any, cast
 
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import get_config
 from resourcey.migrate import migrate_runner
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Construct the ``resourcey`` top-level argument parser."""
-    parser = argparse.ArgumentParser(
-        prog="resourcey",
-        description="resourcey framework CLI.",
-    )
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    migrate = sub.add_parser(
+def add_subparser(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register the ``migrate`` subparser under the top-level CLI dispatcher."""
+    migrate = subparsers.add_parser(
         "migrate",
         help="Alembic migration generation and apply/rollback.",
         description=(
@@ -61,17 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     down = msub.add_parser("downgrade", help="Roll back migrations.")
     down.add_argument("revision", help="Target revision (e.g. -1 or a revision id).")
 
-    return parser
 
-
-def main(argv: Sequence[str] | None = None) -> int:
-    """Entry point for ``resourcey``. Returns a process exit code."""
-    parser = build_parser()
-    args = parser.parse_args(argv)
-
-    if args.command != "migrate":  # pragma: no cover — argparse enforces a subcommand
-        parser.error(f"Unknown command: {args.command}")
-
+def run(args: Any) -> int:
+    """Execute the parsed ``migrate`` subcommand. Returns a process exit code."""
     config = get_config()
     # ``get_config`` is typed as ``BaseConfig`` (it may return an app subclass),
     # but the migrate commands read ``database`` / ``migrations`` which are
@@ -81,47 +68,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     framework_config = cast(FrameworkConfig, config)
     database_url = framework_config.database.database_url
     migration_config = framework_config.migrations
-    resource_modules = framework_config.resource_modules
 
     cmd = args.migrate_command
+    # ``generate`` is an alias for ``autogenerate`` (argparse keeps the alias
+    # name on the namespace).
+    if cmd == "generate":
+        cmd = "autogenerate"
     if cmd == "init":
-        directory = migrate_runner.init(
-            migration_config,
-            database_url=database_url,
-            resource_modules=resource_modules,
-        )
+        directory = migrate_runner.init(migration_config, database_url=database_url)
         print(f"Initialised migrations in {directory}")
     elif cmd == "autogenerate":
         path = migrate_runner.generate(
-            migration_config,
-            database_url=database_url,
-            message=args.message,
-            resource_modules=resource_modules,
+            migration_config, database_url=database_url, message=args.message
         )
         print(
             f"Generated draft revision: {path}\n"
             "Review it before applying (renames look like drop+create)."
         )
     elif cmd == "upgrade":
-        migrate_runner.upgrade(
-            migration_config,
-            database_url=database_url,
-            revision=args.revision,
-            resource_modules=resource_modules,
-        )
+        migrate_runner.upgrade(migration_config, database_url=database_url, revision=args.revision)
         print(f"Upgraded to {args.revision}")
     elif cmd == "downgrade":
         migrate_runner.downgrade(
-            migration_config,
-            database_url=database_url,
-            revision=args.revision,
-            resource_modules=resource_modules,
+            migration_config, database_url=database_url, revision=args.revision
         )
         print(f"Downgraded to {args.revision}")
     else:  # pragma: no cover — argparse enforces a subcommand
-        parser.error(f"Unknown migrate command: {cmd}")
+        raise SystemExit(f"Unknown migrate command: {cmd}")
     return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
