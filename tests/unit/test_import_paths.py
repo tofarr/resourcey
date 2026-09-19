@@ -133,6 +133,14 @@ class TestLazyFieldResources:
         with pytest.raises(ResourceyConfigError):
             _ = instance.resources
 
+    def test_non_list_json_raises_config_error(self, monkeypatch):
+        # A JSON string (not an array) used to surface as a bare AssertionError
+        # from ListEnvParser's internal assert; it must map to ResourceyConfigError.
+        monkeypatch.setenv("TESTCFG_RESOURCES", '"not-a-list"')
+        instance = _ResourcesConfig()
+        with pytest.raises(ResourceyConfigError, match="resources"):
+            _ = instance.resources
+
     def test_access_from_class_returns_descriptor(self):
         assert isinstance(_ResourcesConfig.resources, LazyField)
 

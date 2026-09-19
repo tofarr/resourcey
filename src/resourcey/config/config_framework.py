@@ -7,12 +7,13 @@ each component can be injected independently — e.g. a secret store populates
 ``password`` while the rest comes from plaintext env vars.
 
 The :attr:`resources` field carries the registered ``BaseResource`` subclasses
-this app serves. Its env representation is a list of dotted import paths
-(``RESOURCEY_RESOURCES=myapp.user.User,myapp.rbac.Role``), resolved to the
-classes lazily on first access via :class:`LazyField` — never at import time.
-This makes the config the single source of truth for "what does this app
-serve", and doubles as the mechanism the migrations CLI (#3) needs to ensure
-all resource modules are imported before ``env.py`` runs.
+this app serves. Its env representation is a list of dotted import paths — a
+JSON array (``RESOURCEY_RESOURCES=["myapp.user.User","myapp.rbac.Role"]``) or
+the sequential form (``RESOURCEY_RESOURCES_0`` / ``RESOURCEY_RESOURCES_1`` …)
+— resolved to the classes lazily on first access via :class:`LazyField`, never
+at import time. This makes the config the single source of truth for "what
+does this app serve", and doubles as the mechanism the migrations CLI (#3)
+needs to ensure all resource modules are imported before ``env.py`` runs.
 """
 
 from __future__ import annotations
@@ -69,6 +70,7 @@ class FrameworkConfig(BaseConfig):
     )
     # LazyField is resolved on first access (get_type_hints + env read), so
     # importing this module never imports the resource modules. The env
-    # representation is ``RESOURCEY_RESOURCES`` (JSON array) or
-    # ``RESOURCEY_RESOURCES_0`` / ``_1`` … of dotted import paths.
+    # representation is a JSON array (``RESOURCEY_RESOURCES``) or the
+    # sequential form (``RESOURCEY_RESOURCES_0`` / ``_1`` …) of dotted
+    # import paths.
     resources: ClassVar[list[type[BaseResource]]] = LazyField()  # type: ignore[assignment]

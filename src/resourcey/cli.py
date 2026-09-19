@@ -31,8 +31,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # No subcommand given — synthesize the run namespace (argparse leaves
         # a bare Namespace without run's host/port/reload defaults).
         args = argparse.Namespace(command="run", host=None, port=None, reload=False)
-    handler = _COMMANDS.get(args.command, _run)
-    return int(handler(args) or 0)
+    return int(_COMMANDS[args.command](args) or 0)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -74,7 +73,3 @@ def run(args: Any) -> int:
 
 # ``run`` is the default command and is registered under its name too.
 _COMMANDS["run"] = run
-
-
-def _run(args: Any) -> int:
-    return run(args)

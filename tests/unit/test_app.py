@@ -25,7 +25,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from resourcey.app import create_app, reset_app_config_cache
+from resourcey.app import create_app
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import clear_config_cache, get_config, set_config
 from resourcey.resource.base import ResourceyBase
@@ -163,6 +163,17 @@ class TestCreateAppStructure:
         set_config(FrameworkConfig())
         app = create_app(resources=[], session_factory=sqlite_factory)
         assert not _cors_middleware_present(app)
+
+    def test_wildcard_origin_disables_credentials(self, sqlite_factory):
+        # The CORS spec forbids credentials with a wildcard origin; browsers
+        # would otherwise silently reject credentialed responses.
+        set_config(FrameworkConfig().model_copy(update={"cors_origins": ["*"]}))
+        app = create_app(resources=[], session_factory=sqlite_factory)
+        mw = next(
+            m for m in app.user_middleware if getattr(m.cls, "__name__", "") == "CORSMiddleware"
+        )
+        assert mw.kwargs["allow_origins"] == ["*"]
+        assert mw.kwargs["allow_credentials"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -364,14 +375,14 @@ class TestAppHttpCrud:
 
 
 # ---------------------------------------------------------------------------
-# reset_app_config_cache helper
+# clear_config_cache helper
 # ---------------------------------------------------------------------------
 
 
-class TestResetAppConfigCache:
+class TestClearConfigCache:
     def test_clears_override(self):
         cfg = FrameworkConfig()
         set_config(cfg)
         assert get_config() is cfg
-        reset_app_config_cache()
+        clear_config_cache()
         assert get_config() is not cfg

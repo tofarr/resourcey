@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast, get_args, get_origin, get
 from pydantic import ValidationError
 
 from resourcey.resource.errors import ResourceyConfigError
-from resourcey.util.env_parser import ListEnvParser, StrEnvParser, from_env
+from resourcey.util.env_parser import MISSING, ListEnvParser, StrEnvParser, from_env
 from resourcey.util.import_paths import resolve_import_paths
 
 if TYPE_CHECKING:
@@ -108,12 +108,24 @@ class LazyField:
         base = _list_item_base(annotation)
         prefix = f"{self._owner.get_prefix()}_{self._name.upper()}"
         env_var = prefix
-        paths = ListEnvParser(StrEnvParser(), str).from_env(env_var)
-        fqns: list[str] = []
-        if isinstance(paths, list):
+        try:
+            paths = ListEnvParser(StrEnvParser(), str).from_env(env_var)
+        except (ValueError, AssertionError) as exc:
+            # ValueError: malformed JSON. AssertionError: ListEnvParser's
+            # internal ``assert isinstance(result, list)`` when the env value
+            # is valid JSON of the wrong shape (a string/object). Map both to
+            # the config-error contract instead of surfacing a bare error.
+            raise ResourceyConfigError(
+                f"Invalid configuration for lazy field '{self._name}' (prefix '{prefix}'): "
+                f"expected a JSON array of import paths — {exc}"
+            ) from exc
+        # ListEnvParser returns a list or MISSING (unset).
+        if paths is MISSING:
+            fqns: list[str] = []
+        elif isinstance(paths, list):
             fqns = [p for p in paths if isinstance(p, str)]
-        elif isinstance(paths, str):
-            fqns = [paths]
+        else:
+            fqns = []
         try:
             return resolve_import_paths(fqns, base=base)
         except (ValueError, TypeError, ImportError, AttributeError) as exc:

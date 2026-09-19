@@ -32,7 +32,6 @@ from sqlalchemy.ext.asyncio import (
 from resourcey.config.config_base import BaseConfig
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import (
-    clear_config_cache,
     get_config_as,
     set_config,
 )
@@ -136,24 +135,18 @@ def _configure_cors(app: FastAPI, cors_origins: list[str]) -> None:
     """Add CORS middleware when origins are configured.
 
     When ``cors_origins`` is empty no middleware is added (the app serves
-    same-origin only). A wildcard ``["*"]`` is passed through verbatim.
+    same-origin only). A wildcard ``["*"]`` is passed through verbatim, but
+    ``allow_credentials`` is forced to ``False`` in that case: the CORS spec
+    forbids credentialed responses with a wildcard origin, and Starlette does
+    not rewrite it, so browsers would otherwise silently reject them.
     """
     if not cors_origins:
         return
+    allow_credentials = "*" not in cors_origins
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-
-def reset_app_config_cache() -> None:
-    """Drop the runtime config cache (test isolation helper).
-
-    Thin alias for :func:`clear_config_cache` so app-layer tests can reset the
-    config override / cached instance set by :func:`create_app` between cases.
-    Not for runtime use.
-    """
-    clear_config_cache()
