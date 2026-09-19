@@ -48,8 +48,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, registry
 
-from resourcey.resource.config import ResourceyField
 from resourcey.resource.errors import ResourceyConfigError
+from resourcey.resource.field import ResourceyField
 from resourcey.resource.missing import MISSING
 from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str

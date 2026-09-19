@@ -30,8 +30,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import StaticPool
 
 from resourcey.resource.base import BaseResource, ResourceyBase
-from resourcey.resource.config import ResourceyField
 from resourcey.resource.errors import InvalidInputError, NotFoundError
+from resourcey.resource.field import ResourceyField
 from resourcey.resource.repository import ResourceRepository
 from resourcey.resource.service import (
     Page,
