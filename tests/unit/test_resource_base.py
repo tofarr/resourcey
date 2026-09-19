@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from resourcey.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.encryption.encryption_service import EncryptionService
 from resourcey.resource.base import BaseResource, ResourceyBase
-from resourcey.resource.config import ResourceyConfig
+from resourcey.resource.config import ResourceyField
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.missing import MISSING
 
@@ -86,7 +86,7 @@ class OAuth2Client(BaseResource):
 class WithFk(BaseResource):
     id: int
     role_id: Annotated[
-        int, ResourceyConfig(column=Column("role_id", Integer, ForeignKey("roles.id")))
+        int, ResourceyField(column=Column("role_id", Integer, ForeignKey("roles.id")))
     ]
 
 
@@ -254,12 +254,12 @@ def test_config_for_optional_secret_str_defaults_not_sortable():
 
 
 def test_config_for_secret_str_explicit_override_is_respected():
-    """An explicit ResourceyConfig(sortable=True) on a SecretStr wins over the
+    """An explicit ResourceyField(sortable=True) on a SecretStr wins over the
     default-off convention -- the override is the documented escape hatch."""
 
     class SecretWithOverride(BaseResource):
         id: int
-        token: Annotated[SecretStr, ResourceyConfig(sortable=True)]
+        token: Annotated[SecretStr, ResourceyField(sortable=True)]
 
     cfg = SecretWithOverride.get_config_for_field("token", SecretWithOverride.model_fields["token"])
     assert cfg.sortable is True
@@ -353,7 +353,7 @@ def test_read_model_contains_readable_fields():
 def test_read_model_excludes_unreadable_field():
     class Secret(BaseResource):
         id: int
-        token: Annotated[str, ResourceyConfig(readable=False)] = "x"
+        token: Annotated[str, ResourceyField(readable=False)] = "x"
 
     read_model = Secret.get_read_model()
     assert "token" not in read_model.model_fields
@@ -793,3 +793,50 @@ def test_secret_field_validator_accepts_secret_str_input():
         context={},
     )
     assert loaded.token.get_secret_value() == "direct"
+
+
+# ---------------------------------------------------------------------------
+# Declaration-class semantics (BaseResource is not a Pydantic model)
+# ---------------------------------------------------------------------------
+
+
+def test_base_resource_is_not_a_pydantic_model():
+    assert not issubclass(BaseResource, BaseModel)
+
+
+def test_model_fields_built_from_declaration():
+    # The framework-owned model_fields registry carries the same FieldInfo
+    # semantics the generation hooks rely on: required vs optional, defaults,
+    # default_factory, and Annotated ResourceyField metadata.
+    assert set(User.model_fields) == {
+        "id",
+        "email",
+        "name",
+        "age",
+        "score",
+        "active",
+        "payload",
+        "tags",
+        "blob",
+        "color",
+        "address",
+        "created_at",
+        "updated_at",
+    }
+    assert User.model_fields["email"].is_required()
+    assert not User.model_fields["name"].is_required()
+    assert User.model_fields["name"].default is None
+    assert User.model_fields["payload"].default_factory is dict
+    assert any(isinstance(m, ResourceyField) for m in WithFk.model_fields["role_id"].metadata)
+
+
+def test_resource_inherits_parent_fields():
+    # A resource may derive from another resource; the subclass's own
+    # annotations extend (and may override) the inherited field set.
+    class Admin(User):
+        is_admin: bool = True
+
+    assert set(Admin.model_fields) == set(User.model_fields) | {"is_admin"}
+    # Inherited required field stays required; the override is optional.
+    assert Admin.model_fields["email"].is_required()
+    assert not Admin.model_fields["is_admin"].is_required()
