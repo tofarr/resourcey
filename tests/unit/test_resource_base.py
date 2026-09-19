@@ -78,6 +78,11 @@ class HttpServer(BaseResource):
     host: str
 
 
+class OAuth2Client(BaseResource):
+    id: int
+    name: str
+
+
 class WithFk(BaseResource):
     id: int
     role_id: Annotated[
@@ -410,6 +415,7 @@ def test_update_model_cached():
         (UserRole, "user_roles"),
         (BankAccount, "bank_accounts"),
         (HttpServer, "http_servers"),
+        (OAuth2Client, "oauth2_clients"),
     ],
 )
 def test_get_table_name(resource, expected):
@@ -440,6 +446,7 @@ def test_get_table_name_overridable():
         (UserRole, "user-roles"),
         (BankAccount, "bank-accounts"),
         (HttpServer, "http-servers"),
+        (OAuth2Client, "oauth2-clients"),
     ],
 )
 def test_get_resource_path(resource, expected):

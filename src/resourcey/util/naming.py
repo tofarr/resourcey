@@ -19,9 +19,11 @@ from __future__ import annotations
 import re
 
 # Boundary before an uppercase letter that follows a lowercase letter or
-# digit ("userRole" -> "user_role"), and before a run of uppercase letters
+# digit ("userRole" -> "user_role"), and before a run of 2+ uppercase letters
 # that is followed by a lowercase letter ("HTTPServer" -> "http_server").
-_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+# The {2} lookbehind avoids splitting a single leading uppercase char off a
+# following word, so "OAuth2Client" -> "oauth2_client" (not "o_auth2_client").
+_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z]{2})(?=[A-Z][a-z])")
 
 
 def camel_to_snake(name: str) -> str:
