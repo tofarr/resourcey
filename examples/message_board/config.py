@@ -47,9 +47,13 @@ class SqliteDbConfig(DbConfig):
 class MessageBoardConfig(FrameworkConfig):
     """Framework config for the message-board example (prefix ``RESOURCEY``).
 
-    Overrides the database config to default to SQLite. All other framework
-    behaviour (host, port, CORS, resources, migrations) is inherited from
+    Overrides the database config to default to SQLite and the app server to
+    bind on all interfaces (``0.0.0.0``) at port 8081, so the example does not
+    collide with a framework dev server on the stock ``127.0.0.1:8000``. All
+    other behaviour (CORS, resources, migrations) is inherited from
     :class:`FrameworkConfig` and configured via env vars or the ``.env`` file.
     """
 
     database: SqliteDbConfig = SqliteDbConfig()
+    host: str = "0.0.0.0"
+    port: int = 8081

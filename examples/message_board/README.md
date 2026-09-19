@@ -55,7 +55,7 @@ RESOURCEY_MIGRATIONS_DIR=migrations \
 
 # 3. Start the server
 ../../.venv/bin/resourcey run
-# → Uvicorn running on http://127.0.0.1:8000
+# → Uvicorn running on http://127.0.0.1:8081
 ```
 
 Or with uvicorn directly (reload mode):
@@ -64,7 +64,7 @@ Or with uvicorn directly (reload mode):
 PYTHONPATH=../.. ../../.venv/bin/uvicorn examples.message_board.app:create_app --factory --reload
 ```
 
-Interactive API docs are at `http://127.0.0.1:8000/docs`.
+Interactive API docs are at `http://127.0.0.1:8081/docs`.
 
 ### Configuration
 
@@ -76,7 +76,7 @@ defaults to a local SQLite file (`message_board.db`). Override via env vars
 | -------------------------------- | --------------------- | -------------------------------- |
 | `RESOURCEY_DATABASE_PROTOCOL`    | `sqlite+aiosqlite`    | Async SQLAlchemy driver.          |
 | `RESOURCEY_DATABASE_DB_NAME`     | `message_board.db`    | SQLite file path (or `:memory:`). |
-| `RESOURCEY_HOST` / `RESOURCEY_PORT` | `127.0.0.1` / `8000` | App server bind.                |
+| `RESOURCEY_HOST` / `RESOURCEY_PORT` | `0.0.0.0` / `8081` | App server bind.                |
 | `RESOURCEY_RESOURCES`            | _(set in .env)_       | Dotted import paths to resources. |
 
 To target Postgres instead, point `RESOURCEY_DATABASE_*` at your asyncpg
@@ -88,7 +88,7 @@ connection (or drop `RESOURCEY_CONFIG_CLASS` and use the stock
 Create a thread:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/threads \
+curl -s -X POST http://127.0.0.1:8081/threads \
   -H "Content-Type: application/json" \
   -d '{"title":"Hello","description":"first thread"}'
 # → {"id":1,"title":"Hello","description":"first thread","created_at":"…","updated_at":"…"}
@@ -97,12 +97,12 @@ curl -s -X POST http://127.0.0.1:8000/threads \
 Create messages in that thread:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8000/messages \
+curl -s -X POST http://127.0.0.1:8081/messages \
   -H "Content-Type: application/json" \
   -d '{"thread_id":1,"text":"hi there"}'
 # → {"id":1,"thread_id":1,"text":"hi there","created_at":"…","updated_at":"…"}
 
-curl -s -X POST http://127.0.0.1:8000/messages \
+curl -s -X POST http://127.0.0.1:8081/messages \
   -H "Content-Type: application/json" \
   -d '{"thread_id":1,"text":"second message"}'
 ```
@@ -110,31 +110,31 @@ curl -s -X POST http://127.0.0.1:8000/messages \
 List a thread's messages (the `thread_id__eq` filter):
 
 ```bash
-curl -s "http://127.0.0.1:8000/messages?thread_id__eq=1"
+curl -s "http://127.0.0.1:8081/messages?thread_id__eq=1"
 # → {"items":[{…},{…}],"total":2,"limit":20,"offset":0}
 ```
 
 Substring search on the message body:
 
 ```bash
-curl -s "http://127.0.0.1:8000/messages?thread_id__eq=1&text__contains=hi"
+curl -s "http://127.0.0.1:8081/messages?thread_id__eq=1&text__contains=hi"
 # → {"items":[{"id":1,…}],"total":1,"limit":20,"offset":0}
 ```
 
 Read, update, delete:
 
 ```bash
-curl -s http://127.0.0.1:8000/threads/1
-curl -s -X PATCH http://127.0.0.1:8000/messages/1 \
+curl -s http://127.0.0.1:8081/threads/1
+curl -s -X PATCH http://127.0.0.1:8081/messages/1 \
   -H "Content-Type: application/json" -d '{"text":"edited"}'
-curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://127.0.0.1:8000/messages/1
+curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://127.0.0.1:8081/messages/1
 # → 204
 ```
 
 Batch read:
 
 ```bash
-curl -s "http://127.0.0.1:8000/messages/batch-read?id=1&id=2"
+curl -s "http://127.0.0.1:8081/messages/batch-read?id=1&id=2"
 # → [{…},{…}]
 ```
 
