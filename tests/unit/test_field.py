@@ -6,7 +6,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import Column, Integer
 
-from resourcey.resource.config import ResourceyField
+from resourcey.resource.field import ResourceyField
 
 
 def test_default_values():
