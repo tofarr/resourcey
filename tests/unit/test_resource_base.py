@@ -2,7 +2,7 @@
 
 import enum
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import UUID
 
 import pytest
@@ -286,7 +286,7 @@ def test_get_search_filter_type_overridable():
         id: int
 
         @classmethod
-        def get_search_filter_type(cls) -> type[SearchFilter[Any]] | None:
+        def get_search_filter_type(cls) -> type[SearchFilter] | None:
             return CustomFilter
 
     assert CustomResource.get_search_filter_type() is CustomFilter

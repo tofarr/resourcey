@@ -18,7 +18,7 @@ import enum
 import types
 from datetime import date, datetime, time
 from functools import reduce
-from typing import Annotated, Any, cast, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_origin
 from uuid import UUID
 
 from pydantic import BaseModel, Field, SecretStr, create_model, field_serializer, field_validator
@@ -43,8 +43,14 @@ from resourcey.resource.config import ResourceyConfig
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.missing import MISSING
 from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
-from resourcey.util.search_filter import SearchFilter
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
+
+if TYPE_CHECKING:
+    # Used only in the ``get_search_filter_type`` annotation. Kept under
+    # TYPE_CHECKING (with ``from __future__ import annotations``) so the
+    # ``resource`` package never imports ``util.search_filter`` at runtime,
+    # avoiding a potential import cycle.
+    from resourcey.util.search_filter import SearchFilter
 
 
 class ResourceyBase(DeclarativeBase):
@@ -153,7 +159,7 @@ class BaseResource(BaseModel):
         return config
 
     @classmethod
-    def get_search_filter_type(cls) -> type[SearchFilter[Any]] | None:
+    def get_search_filter_type(cls) -> type[SearchFilter] | None:  # type: ignore[type-arg]
         """Return the declared search filter class for this resource, or ``None``.
 
         When ``None`` (the default) the ``search`` action exposes **no**
