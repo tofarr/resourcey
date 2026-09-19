@@ -71,6 +71,44 @@ A `DiscriminatedUnionMixin` is also bundled in `resourcey.util.models` for
 polymorphic models keyed by a `kind` discriminator — likewise vendored from
 the SDK with no dependency.
 
+## Migrations
+
+Database revisions are generated with [Alembic](https://alembic.sqlalchemy.org/)
+from the current resource models. The `resourcey migrate` CLI wraps Alembic so
+you don't need to run `alembic init` or hand-write an `alembic.ini`:
+
+```bash
+# Materialise env.py + versions/ in the migrations directory (idempotent)
+resourcey migrate init
+
+# Autogenerate a draft revision from your resource models
+resourcey migrate autogenerate -m "add widget table"
+
+# Apply / roll back
+resourcey migrate upgrade          # to head
+resourcey migrate downgrade -1     # one step back
+```
+
+The migrations directory is configured under the `migrations` key of
+`FrameworkConfig` (env prefix `RESOURCEY_MIGRATIONS_`). The resource set is the
+**app-level** `FrameworkConfig.resources` field (env `RESOURCEY_RESOURCES`) —
+the same source of truth the REST service layer and RBAC use, so migrations
+never diverge from what the app actually serves:
+
+| Env var | Default | Purpose |
+| --- | --- | --- |
+| `RESOURCEY_RESOURCES` | `[]` | Dotted import paths to the app's `BaseResource` subclasses (JSON array, or `RESOURCEY_RESOURCES_0`, `_1`, ...). Resolved lazily on access; `env.py` resolves + registers them before autogenerating. |
+| `RESOURCEY_MIGRATIONS_MIGRATIONS_DIR` | `migrations` | Directory holding `env.py` and `versions/`. |
+
+```bash
+RESOURCEY_RESOURCES='["myapp.user.User","myapp.widget.Widget"]' resourcey migrate autogenerate -m "init"
+```
+
+**Generated revisions are drafts.** Alembic's autogeneration cannot detect
+table or column *renames* — a rename looks like a drop followed by a create,
+which loses data. Review every generated revision before applying it. Run
+`alembic` directly to escape the wrapper when you need full control.
+
 ## Status
 
 Early-stage. The roadmap is tracked in

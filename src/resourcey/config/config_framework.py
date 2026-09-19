@@ -26,6 +26,8 @@ from resourcey.config.config_base import BaseConfig
 from resourcey.config.lazy_field import LazyField
 from resourcey.resource.base import BaseResource
 
+MIGRATIONS_DIR_DEFAULT = "migrations"
+
 
 class DbConfig(BaseModel):
     """Structured database connection configuration.
@@ -52,6 +54,23 @@ class DbConfig(BaseModel):
         )
 
 
+class MigrationConfig(BaseModel):
+    """Alembic migration configuration.
+
+    ``migrations_dir`` is the directory (relative to the working directory
+    unless absolute) that holds ``env.py`` and the ``versions/`` revisions.
+    The resource set is read from :attr:`FrameworkConfig.resources` (the
+    app-level source of truth) — migrations register those classes via
+    :func:`resourcey.resource.registry.register_resource` so Alembic's
+    autogeneration sees every table before diffing.
+    """
+
+    migrations_dir: str = Field(
+        default=MIGRATIONS_DIR_DEFAULT,
+        description="Directory holding alembic env.py and versions/ (relative or absolute).",
+    )
+
+
 class FrameworkConfig(BaseConfig):
     """Top-level framework configuration (prefix ``RESOURCEY``)."""
 
@@ -61,6 +80,9 @@ class FrameworkConfig(BaseConfig):
 
     database: DbConfig = Field(
         default_factory=DbConfig, description="Database connection configuration."
+    )
+    migrations: MigrationConfig = Field(
+        default_factory=MigrationConfig, description="Alembic migration configuration."
     )
     debug: bool = Field(default=False, description="Enable debug mode.")
     host: str = Field(default="127.0.0.1", description="App server (uvicorn) host.")

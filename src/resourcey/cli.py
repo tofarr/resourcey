@@ -42,6 +42,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--host", default=None, help="Override RESOURCEY_HOST.")
     run.add_argument("--port", type=int, default=None, help="Override RESOURCEY_PORT.")
     run.add_argument("--reload", action="store_true", help="Enable uvicorn reload.")
+
+    # Register the ``migrate`` subcommand (issue #3) into the dispatcher.
+    from resourcey.migrate import migrate_cli
+
+    migrate_cli.add_subparser(subparsers)
     return parser
 
 
@@ -73,3 +78,8 @@ def run(args: Any) -> int:
 
 # ``run`` is the default command and is registered under its name too.
 _COMMANDS["run"] = run
+
+# ``migrate`` delegates to the migrations CLI (issue #3).
+from resourcey.migrate import migrate_cli as _migrate_cli  # noqa: E402
+
+_COMMANDS["migrate"] = _migrate_cli.run
