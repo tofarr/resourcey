@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 from resourcey.config.config_base import BaseConfig
 
+MIGRATIONS_DIR_DEFAULT = "migrations"
+
 
 class DbConfig(BaseModel):
     """Structured database connection configuration.
@@ -39,6 +41,30 @@ class DbConfig(BaseModel):
         )
 
 
+class MigrationConfig(BaseModel):
+    """Alembic migration configuration.
+
+    ``migrations_dir`` is the directory (relative to the working directory
+    unless absolute) that holds ``env.py`` and the ``versions/`` revisions.
+    ``resource_modules`` names the modules whose resource subclasses populate
+    :data:`ResourceyBase.metadata`; ``env.py`` imports them (via
+    :func:`resourcey.migrate.runner.import_resource_modules`) so Alembic's
+    autogeneration sees every table before diffing.
+    """
+
+    migrations_dir: str = Field(
+        default=MIGRATIONS_DIR_DEFAULT,
+        description="Directory holding alembic env.py and versions/ (relative or absolute).",
+    )
+    resource_modules: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Modules to import before autogeneration so their BaseResource "
+            "subclasses populate metadata (JSON array or sequential indices)."
+        ),
+    )
+
+
 class FrameworkConfig(BaseConfig):
     """Top-level framework configuration (prefix ``RESOURCEY``)."""
 
@@ -48,6 +74,9 @@ class FrameworkConfig(BaseConfig):
 
     database: DbConfig = Field(
         default_factory=DbConfig, description="Database connection configuration."
+    )
+    migrations: MigrationConfig = Field(
+        default_factory=MigrationConfig, description="Alembic migration configuration."
     )
     debug: bool = Field(default=False, description="Enable debug mode.")
     transient_mode: bool = Field(
