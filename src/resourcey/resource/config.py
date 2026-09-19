@@ -1,7 +1,7 @@
 """Per-field behavioural metadata for resources.
 
-A ``ResourceyConfig`` is attached to a resource field via
-``Annotated[type, ResourceyConfig(...)]`` and retrieved from
+A ``ResourceyField`` is attached to a resource field via
+``Annotated[type, ResourceyField(...)]`` and retrieved from
 ``FieldInfo.metadata`` -- the canonical Pydantic v2 mechanism for custom field
 metadata (not ``json_schema_extra``, which is for JSON-schema customization
 and is not a general metadata bag).
@@ -24,7 +24,7 @@ from pydantic_core import CoreSchema
 from sqlalchemy import Column
 
 
-class ResourceyConfig(BaseModel):
+class ResourceyField(BaseModel):
     """Per-field behavioural flags for a resource.
 
     Attributes:
@@ -52,7 +52,7 @@ class ResourceyConfig(BaseModel):
 
     @classmethod
     def __get_pydantic_core_schema__(cls, source: Any, handler: Any) -> CoreSchema:
-        # ResourceyConfig is behavioural metadata attached via ``Annotated``;
+        # ResourceyField is behavioural metadata attached via ``Annotated``;
         # it is not a schema source for the annotated field. Because it is a
         # BaseModel subclass, Pydantic asks it for a core schema when it
         # appears as Annotated metadata. Delegate to the inner handler so the
