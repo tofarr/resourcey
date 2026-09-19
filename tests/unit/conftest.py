@@ -46,8 +46,10 @@ class UserSearchFilter(BaseSearchFilter[User]):
 
     email__contains: str | None = None
     email__eq: str | None = None
+    email__in: list[str] | None = None
     username__contains: str | None = None
     username__eq: str | None = None
+    username__in: list[str] | None = None
     enabled__eq: bool | None = None
     enabled__ne: bool | None = None
     created_at__gte: datetime | None = None

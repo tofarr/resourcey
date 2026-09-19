@@ -42,6 +42,7 @@ from sqlalchemy.orm import DeclarativeBase, registry
 from resourcey.resource.config import ResourceyConfig
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.missing import MISSING
+from resourcey.util.naming import camel_to_snake, pluralize
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
 
 
@@ -109,11 +110,21 @@ class BaseResource(BaseModel):
 
         Reads it from the field metadata if an explicit ``ResourceyConfig`` is
         attached via ``Annotated``; otherwise builds a default config. Then
-        applies the id / timestamp conventions.
+        applies the id / timestamp / secret conventions.
+
+        The ``SecretStr`` default-off convention (``sortable`` -> ``False``)
+        is applied only when no explicit ``ResourceyConfig`` is attached: a
+        developer who wants a secret sortable must attach an explicit
+        ``ResourceyConfig(sortable=True)`` -- a deliberate, visible opt-out
+        of the safe default. (Filtering is gated per-resource by a declared
+        search filter class, not by a per-field flag; see
+        :meth:`get_search_filter`.)
         """
+        explicit = False
         for meta in field.metadata:
             if isinstance(meta, ResourceyConfig):
                 config = meta
+                explicit = True
                 break
         else:
             config = ResourceyConfig()
@@ -131,7 +142,33 @@ class BaseResource(BaseModel):
                     "default_factory (e.g. default_factory=datetime.utcnow). A fixed default or no "
                     "default is ambiguous; supply an explicit ResourceyConfig override if intended."
                 )
+        # SecretStr fields are not sortable by default: allowing `sort=field`
+        # against a secret lets a client infer the relative ordering of secret
+        # values even when the field is excluded from the read model. Skipped
+        # when an explicit ResourceyConfig is attached so a developer can
+        # deliberately opt a secret into sortability.
+        if not explicit and _resolve_scalar_type(field.annotation) is SecretStr:
+            config = config.model_copy(update={"sortable": False})
         return config
+
+    @classmethod
+    def get_search_filter(cls) -> type[Any] | None:
+        """Return the declared search filter class for this resource, or ``None``.
+
+        When ``None`` (the default) the ``search`` action exposes **no**
+        filtering: any ``field__op=value`` query parameter is rejected with
+        ``400 invalid_input``; the endpoint serves pure pagination + sort
+        only. Filtering is opt-in per resource: a developer declares a
+        :class:`~resourcey.util.search_filter.SearchFilter` subclass (typically
+        a ``BaseSearchFilter[<SqlAlchemyModel>]`` whose ``<attr>__<op>`` fields
+        name exactly the filterable fields/operators) and returns it here.
+        The declared class is the single source of truth for what is
+        filterable -- it doubles as the validation schema for the incoming
+        query params and supplies the SQL ``WHERE`` via ``filter_sql``.
+
+        Overridable.
+        """
+        return None
 
     @classmethod
     def get_id_field(cls) -> str:
@@ -257,14 +294,24 @@ class BaseResource(BaseModel):
     def get_table_name(cls) -> str:
         """Derive the SQL table name from the class name.
 
-        Lower-case the class name, then append ``"s"`` — or ``"es"`` if the
-        name already ends in ``"s"`` or ``"x"`` (e.g. ``Box`` -> ``boxes``,
-        ``User`` -> ``users``). Overridable.
+        Snake-case the class name (``UserRole`` -> ``user_role``), then
+        pluralize — appending ``"s"`` or ``"es"`` per the common endings
+        (``s`` / ``x`` / ``z`` / ``ch`` / ``sh``). Irregular plurals are left
+        to an override. Overridable.
         """
-        name = cls.__name__.lower()
-        if name.endswith("s") or name.endswith("x"):
-            return name + "es"
-        return name + "s"
+        return pluralize(camel_to_snake(cls.__name__))
+
+    @classmethod
+    def get_resource_path(cls) -> str:
+        """Derive the plural, lower-case, snake_case REST path segment.
+
+        Independent of :meth:`get_table_name` so an override of one never
+        silently changes the other: the SQL table name and the URL path are
+        separate concerns and may legitimately diverge. Defaults to the
+        plural snake_case class name (``UserRole`` -> ``user_roles``).
+        Overridable.
+        """
+        return pluralize(camel_to_snake(cls.__name__))
 
     @classmethod
     def get_column_for_field(cls, field_name: str, field: FieldInfo) -> Column[Any]:
