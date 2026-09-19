@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from resourcey.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.encryption.encryption_service import EncryptionService
 from resourcey.resource.base import BaseResource, ResourceyBase
-from resourcey.resource.field import ResourceyField
 from resourcey.resource.errors import ResourceyConfigError
+from resourcey.resource.field import ResourceyField
 from resourcey.resource.missing import MISSING
 
 # ---------------------------------------------------------------------------
