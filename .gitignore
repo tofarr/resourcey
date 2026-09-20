@@ -28,3 +28,4 @@ build/
 
 # OS
 .DS_Store
+examples/02_mongodb/uv.lock
