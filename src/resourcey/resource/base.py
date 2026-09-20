@@ -120,6 +120,7 @@ class BaseResource:
     # so subclasses don't share them.
     model_fields: dict[str, FieldInfo]
     _id_field: str
+    _sortable_fields: list[str]
     _create_model: type[BaseModel]
     _read_model: type[BaseModel]
     _update_model: type[BaseModel]
@@ -198,6 +199,26 @@ class BaseResource:
         Overridable.
         """
         return None
+
+    @classmethod
+    def get_sortable_fields(cls) -> list[str]:
+        """Names of fields whose ``ResourceyField.sortable`` is ``True``.
+
+        The single source of truth for what the search endpoint's ``sort``
+        enum may contain. Cached on the class. A field is sortable unless it
+        is explicitly opted out (e.g. ``SecretStr`` fields default to
+        ``sortable=False`` -- see :meth:`get_config_for_field`).
+        """
+        cached = cls.__dict__.get("_sortable_fields")
+        if cached is not None:
+            return cast(list[str], cached)
+        sortable = [
+            name
+            for name, field in cls.model_fields.items()
+            if cls.get_config_for_field(name, field).sortable
+        ]
+        cls._sortable_fields = sortable
+        return sortable
 
     @classmethod
     def get_id_field(cls) -> str:
@@ -459,6 +480,7 @@ _INFRA_ATTRS: frozenset[str] = frozenset(
     {
         "model_fields",
         "_id_field",
+        "_sortable_fields",
         "_create_model",
         "_read_model",
         "_update_model",

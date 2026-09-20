@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.sql.elements import ColumnElement
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -180,7 +179,7 @@ class ResourceRepository:
         *,
         limit: int,
         offset: int,
-        sort: list[tuple[str, bool]] | None,
+        sort: tuple[str, bool] | None,
         filters: SearchFilter[Any] | None,
         context: dict[str, Any] | None = None,
     ) -> list[Any]:
@@ -188,8 +187,8 @@ class ResourceRepository:
 
         ``filters`` (a :class:`~resourcey.util.search_filter.SearchFilter` or
         ``None``) contributes its SQL ``WHERE`` via ``filter_sql``.
-        ``sort`` is a list of ``(field_name, ascending)`` tuples already
-        validated by the service.
+        ``sort`` is a ``(field_name, ascending)`` tuple already validated by
+        the service, or ``None`` for no ordering.
         """
         stmt = select(self.model)
         if filters is not None:
@@ -254,13 +253,11 @@ class ResourceRepository:
     def _apply_sort(
         self,
         stmt: Any,
-        sort: list[tuple[str, bool]] | None,
+        sort: tuple[str, bool] | None,
     ) -> Any:
-        """Apply ``order_by`` clauses from validated ``(field, ascending)`` tuples."""
-        if not sort:
+        """Apply an ``order_by`` clause from a validated ``(field, ascending)`` tuple."""
+        if sort is None:
             return stmt
-        clauses: list[ColumnElement[Any]] = []
-        for field_name, ascending in sort:
-            column = getattr(self.model, field_name)
-            clauses.append(column.asc() if ascending else column.desc())
-        return stmt.order_by(*clauses)
+        field_name, ascending = sort
+        column = getattr(self.model, field_name)
+        return stmt.order_by(column.asc() if ascending else column.desc())
