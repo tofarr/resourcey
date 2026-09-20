@@ -16,13 +16,13 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from pydantic import Field
-from resourcey.resource.base import BaseResource
 from resourcey.resource.field import ResourceyField
+from resourcey.resource.sql import SqlResource
 from resourcey.util.search_filter import BaseSearchFilter
 from sqlalchemy import Column, ForeignKey, Integer
 
 
-class Message(BaseResource):
+class Message(SqlResource):
     """A message belonging to a thread.
 
     Fields:

@@ -35,9 +35,9 @@ from resourcey.cache.cache_strategy import (
     LastModifiedCacheStrategy,
     OptimisticCacheStrategy,
 )
-from resourcey.resource.base import BaseResource, ResourceyBase
 from resourcey.resource.field import ResourceyField
 from resourcey.resource.service import ResourceService, register_error_handlers
+from resourcey.resource.sql import ResourceyBase, SqlResource
 
 # ---------------------------------------------------------------------------
 # Pydantic read-model fixtures
@@ -281,18 +281,18 @@ class TestCacheStrategySerialization:
 # ---------------------------------------------------------------------------
 
 
-class HasUpdated(BaseResource):
+class HasUpdated(SqlResource):
     id: int
     label: str
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class NoUpdated(BaseResource):
+class NoUpdated(SqlResource):
     id: int
     label: str
 
 
-class UpdatedUnreadable(BaseResource):
+class UpdatedUnreadable(SqlResource):
     id: int
     label: str
     updated_at: Annotated[
@@ -300,7 +300,7 @@ class UpdatedUnreadable(BaseResource):
     ]
 
 
-class CustomStrategy(BaseResource):
+class CustomStrategy(SqlResource):
     id: int
     label: str
 
@@ -309,7 +309,7 @@ class CustomStrategy(BaseResource):
         return OptimisticCacheStrategy(expire_in=42)
 
 
-class EtagExpiring(BaseResource):
+class EtagExpiring(SqlResource):
     """ETag strategy with a freshness window (Cache-Control + Expires)."""
 
     id: int
@@ -320,7 +320,7 @@ class EtagExpiring(BaseResource):
         return ETagCacheStrategy(expire_in=120)
 
 
-class OptimisticResource(BaseResource):
+class OptimisticResource(SqlResource):
     """Optimistic strategy: freshness only, no validators."""
 
     id: int
@@ -331,7 +331,7 @@ class OptimisticResource(BaseResource):
         return OptimisticCacheStrategy(expire_in=60)
 
 
-class NoCacheResource(BaseResource):
+class NoCacheResource(SqlResource):
     """A resource whose strategy yields nothing (no headers emitted)."""
 
     id: int
@@ -694,9 +694,8 @@ class TestETagSerializationContext:
 
     def test_service_threads_context_into_etag(self, session_factory) -> None:
         """ResourceService.compute_cache_header passes its serialization context."""
-        from resourcey.resource.base import BaseResource
 
-        class CtxResource(BaseResource):
+        class CtxResource(SqlResource):
             id: int
             secret: str = "redacted"
 

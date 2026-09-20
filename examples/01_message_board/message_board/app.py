@@ -13,14 +13,14 @@ or directly with uvicorn::
 
 from __future__ import annotations
 
+from fastapi import FastAPI
+from resourcey.app import create_app as _create_framework_app
+
 # Importing the resources module registers Thread + Message before the app
 # factory reads the resource set, so their tables are in metadata.
 import message_board.resources  # noqa: F401
 from message_board.message import Message
 from message_board.thread import Thread
-from fastapi import FastAPI
-
-from resourcey.app import create_app as _create_framework_app
 
 
 def create_app() -> FastAPI:

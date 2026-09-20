@@ -10,10 +10,10 @@ from datetime import datetime
 
 from pydantic import Field
 
-from resourcey.resource.base import BaseResource
+from resourcey.resource.sql import SqlResource
 
 
-class Widget(BaseResource):
+class Widget(SqlResource):
     """A widget with id, label, and a created_at timestamp."""
 
     id: int

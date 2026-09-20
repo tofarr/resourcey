@@ -11,7 +11,7 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from resourcey.app import create_app
-from resourcey.resource.base import ResourceyBase
+from resourcey.resource.sql import ResourceyBase
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 

@@ -28,8 +28,8 @@ from sqlalchemy.pool import StaticPool
 from resourcey.app import create_app
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import clear_config_cache, get_config, set_config
-from resourcey.resource.base import ResourceyBase
 from resourcey.resource.errors import NotFoundError, ResourceyConfigError
+from resourcey.resource.sql import ResourceyBase
 
 _CONFIG_CLASS_ENV = "RESOURCEY_CONFIG_CLASS"
 

@@ -1,12 +1,18 @@
-"""``BaseResource`` and the resourcey async SQLAlchemy declarative base.
+"""``BaseResource`` ŌĆö the storage-agnostic resource declaration layer.
 
 A resource is the central unit of resourcey. ``BaseResource`` is a plain
 declaration class (not a Pydantic model): a subclass declares fields with the
 ordinary annotation + ``Field()`` / default syntax, and the framework
 introspects that declaration to drive the generated Pydantic create / read /
-update models and the SQLAlchemy ORM model. Every generation step is a
-single-purpose, overridable hook so a subtype can replace any piece without
-touching the rest (progressive enhancement / escape hatches).
+update models. Every generation step is a single-purpose, overridable hook so
+a subtype can replace any piece without touching the rest (progressive
+enhancement / escape hatches).
+
+``BaseResource`` is deliberately storage-agnostic: it knows nothing about
+SQLAlchemy, sessions, or persistence. SQL-backed resources subclass
+:class:`~resourcey.resource.sql.SqlResource`, which adds the ORM model
+generation on top of this base. Non-SQL backends can subclass
+``BaseResource`` directly.
 
 Field metadata is collected at subclass-creation time into
 :attr:`BaseResource.model_fields` -- a mapping of name to Pydantic
@@ -23,35 +29,17 @@ treated as declared fields) and are stored per-subclass.
 
 from __future__ import annotations
 
-import enum
 import types
-from datetime import date, datetime, time
 from functools import reduce
 from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_origin, get_type_hints
-from uuid import UUID
 
 from pydantic import BaseModel, Field, SecretStr, create_model, field_serializer, field_validator
 from pydantic.fields import FieldInfo
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    Column,
-    Date,
-    DateTime,
-    Float,
-    Integer,
-    LargeBinary,
-    String,
-    Table,
-    Time,
-    Uuid,
-)
-from sqlalchemy.orm import DeclarativeBase, registry
 
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.field import ResourceyField
 from resourcey.resource.missing import MISSING
-from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
+from resourcey.util.naming import camel_to_kebab, pluralize
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
 
 if TYPE_CHECKING:
@@ -63,52 +51,17 @@ if TYPE_CHECKING:
     from resourcey.util.search_filter import SearchFilter
 
 
-class ResourceyBase(DeclarativeBase):
-    """resourcey-specific async SQLAlchemy declarative base.
-
-    Generated ORM models extend this. Using a dedicated base (rather than a
-    caller's own ``DeclarativeBase``) keeps generated tables in a single
-    registry owned by the framework while remaining fully compatible with the
-    async SQLAlchemy 2 ORM. Callers can still bring their own declarative base
-    — this one is only used for generated models.
-    """
-
-    registry = registry()
-
-
-# Default scalar type -> SQLAlchemy column type mapping used by
-# ``get_column_for_field``. Any type not present here raises
-# ``ResourceyConfigError`` so the developer supplies an explicit
-# ``ResourceyField.column``.
-#
-# ``SecretStr`` maps to ``String``: a sensitive field stores JWE ciphertext
-# (variable length, no fixed-length assumption) at rest. Encryption /
-# decryption happens at the storage boundary via the secret-serialization
-# convention wired onto the generated Pydantic models.
-_SCALAR_COLUMN_TYPES: dict[Any, Any] = {
-    str: String,
-    SecretStr: String,
-    int: Integer,
-    bool: Boolean,
-    float: Float,
-    bytes: LargeBinary,
-    datetime: DateTime,
-    date: Date,
-    time: Time,
-    UUID: Uuid,
-    dict: JSON,
-    list: JSON,
-}
-
-
 class BaseResource:
     """Base class for resource declarations.
 
     A *declaration* class, not a data model: subclass it and declare fields
     with the ordinary annotation + ``Field()`` / default syntax, and the
-    framework derives the create / read / update Pydantic models and the
-    SQLAlchemy ORM model from that single declaration. Each public generation
-    method is an overridable hook.
+    framework derives the create / read / update Pydantic models from that
+    single declaration. Each public generation method is an overridable hook.
+
+    ``BaseResource`` is storage-agnostic - it does not know about SQLAlchemy,
+    sessions, or persistence. SQL-backed resources subclass
+    :class:`~resourcey.resource.sql.SqlResource` for ORM model generation.
 
     ``BaseResource`` is intentionally not a Pydantic ``BaseModel``. Field
     metadata is collected into :attr:`model_fields` at subclass-creation time
@@ -125,12 +78,26 @@ class BaseResource:
     _create_model: type[BaseModel]
     _read_model: type[BaseModel]
     _update_model: type[BaseModel]
-    _sqlalchemy_model: Any
     _cache_strategy: Any
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         cls.model_fields = _collect_field_infos(cls)
+
+    # ------------------------------------------------------------------
+    # Registration hook
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _on_register(cls) -> None:
+        """Hook invoked by :func:`~resourcey.resource.registry.register_resource`.
+
+        The base implementation is a no-op: a storage-agnostic resource has
+        nothing to materialise. Storage-specific subclasses (e.g.
+        :class:`~resourcey.resource.sql.SqlResource`) override this to eagerly
+        build their backing model so it is available before migrations / table
+        creation run.
+        """
 
     # ------------------------------------------------------------------
     # Field config resolution
@@ -215,7 +182,7 @@ class BaseResource:
 
         Overridable: a developer returns any ``CacheStrategy`` instance (e.g.
         ``OptimisticCacheStrategy(expire_in=60)``) to change the policy. This
-        is the single seam for cache policy — overriding it never touches the
+        is the single seam for cache policy ŌĆö overriding it never touches the
         service or routes.
         """
         cached = cls.__dict__.get("_cache_strategy")
@@ -371,98 +338,21 @@ class BaseResource:
         return model
 
     # ------------------------------------------------------------------
-    # SQLAlchemy model generation
+    # REST path
     # ------------------------------------------------------------------
-
-    @classmethod
-    def get_table_name(cls) -> str:
-        """Derive the SQL table name from the class name.
-
-        Snake-case the class name (``UserRole`` -> ``user_role``), then
-        pluralize — appending ``"s"`` or ``"es"`` per the common endings
-        (``s`` / ``x`` / ``z`` / ``ch`` / ``sh``) — and lowercase. Irregular
-        plurals are left to an override. Overridable.
-        """
-        return pluralize(camel_to_snake(cls.__name__)).lower()
 
     @classmethod
     def get_resource_path(cls) -> str:
         """Derive the plural, lower-case, kebab-case REST path segment.
 
-        Independent of :meth:`get_table_name` so an override of one never
-        silently changes the other: the SQL table name and the URL path are
-        separate concerns and may legitimately diverge. Defaults to the
-        plural kebab-case class name (``UserRole`` -> ``user-roles``).
-        Overridable.
+        Independent of the SQL table name (see
+        :meth:`~resourcey.resource.sql.SqlResource.get_table_name`) so an
+        override of one never silently changes the other: the SQL table name
+        and the URL path are separate concerns and may legitimately diverge.
+        Defaults to the plural kebab-case class name (``UserRole`` ->
+        ``user-roles``). Overridable.
         """
         return pluralize(camel_to_kebab(cls.__name__)).lower()
-
-    @classmethod
-    def get_column_for_field(cls, field_name: str, field: FieldInfo) -> Column[Any]:
-        """Generate a SQLAlchemy ``Column`` for a field.
-
-        Honours an explicit ``ResourceyField.column`` when provided. Otherwise
-        applies the default rules: id -> primary key (int id -> Integer with
-        autoincrement), timestamps -> indexed, ``*_id`` -> ambiguous error,
-        enums -> String, nested models -> JSON, scalars per the default
-        type-mapping table, unmapped types -> ``ResourceyConfigError``.
-        """
-        config = cls.get_config_for_field(field_name, field)
-        if config.column is not None:
-            return config.column
-
-        nullable = not field.is_required()
-
-        if field_name == "id":
-            py_type = _resolve_scalar_type(field.annotation)
-            if py_type is int:
-                return Column("id", Integer, primary_key=True, autoincrement=True, nullable=False)
-            col_type = _column_type_for(field_name, field.annotation, py_type)
-            return Column("id", col_type, primary_key=True, nullable=False)
-
-        if field_name in ("created_at", "updated_at"):
-            py_type = _resolve_scalar_type(field.annotation)
-            col_type = _column_type_for(field_name, field.annotation, py_type)
-            return Column(field_name, col_type, index=True, nullable=nullable)
-
-        if field_name.endswith("_id"):
-            raise ResourceyConfigError(
-                f"Field '{field_name}' on {cls.__name__} ends in '_id'; the framework cannot infer "
-                "its column semantics (foreign key? on-delete behaviour?). Define an explicit "
-                "ResourceyField(column=Column(...)) for this field."
-            )
-
-        py_type = _resolve_scalar_type(field.annotation)
-        col_type = _column_type_for(field_name, field.annotation, py_type)
-        return Column(field_name, col_type, nullable=nullable)
-
-    @classmethod
-    def get_sql_alchemy_model(cls) -> Any:
-        """Build (and cache) a SQLAlchemy ORM model from the resource fields.
-
-        Uses ``get_table_name()`` for the table and ``get_column_for_field()``
-        for each column. The model extends the resourcey async declarative
-        base. Caching is mandatory: the declarative registry keys generated
-        classes by name, so regenerating would clash.
-        """
-        cached = cls.__dict__.get("_sqlalchemy_model")
-        if cached is not None:
-            return cached
-        table_name = cls.get_table_name()
-        id_field = cls.get_id_field()
-        columns: list[Column[Any]] = []
-        for name, field in cls.model_fields.items():
-            columns.append(cls.get_column_for_field(name, field))
-        table = ResourceyBase.metadata.tables.get(table_name)
-        if table is None:
-            table = Table(table_name, ResourceyBase.metadata, *columns)
-        model = type(
-            cls.__name__,
-            (ResourceyBase,),
-            {"__table__": table, "__mapper_args__": {"primary_key": [table.c[id_field]]}},
-        )
-        cls._sqlalchemy_model = model
-        return model
 
 
 def _missing_field() -> Any:
@@ -657,22 +547,3 @@ def _resolve_scalar_type(annotation: Any) -> Any:
         return _resolve_scalar_type(args[0])
     # For multi-typed unions, prefer the first non-None arg we can map.
     return _resolve_scalar_type(args[0]) if args else annotation
-
-
-def _column_type_for(field_name: str, annotation: Any, py_type: Any) -> Any:
-    """Map a Python type to a SQLAlchemy column type, applying the rules."""
-    if py_type is None:
-        raise ResourceyConfigError(
-            f"Cannot resolve a column type for field '{field_name}' (annotation {annotation})."
-        )
-    if isinstance(py_type, type) and issubclass(py_type, enum.Enum):
-        return String
-    if isinstance(py_type, type) and issubclass(py_type, BaseModel):
-        return JSON
-    col_type = _SCALAR_COLUMN_TYPES.get(py_type)
-    if col_type is None:
-        raise ResourceyConfigError(
-            f"No default SQLAlchemy column type for field '{field_name}' of type {py_type}. "
-            "Supply an explicit ResourceyField(column=Column(...)) for this field."
-        )
-    return col_type

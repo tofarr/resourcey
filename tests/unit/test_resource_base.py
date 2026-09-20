@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from resourcey.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.encryption.encryption_service import EncryptionService
-from resourcey.resource.base import BaseResource, ResourceyBase
+from resourcey.resource.base import BaseResource
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.field import ResourceyField
 from resourcey.resource.missing import MISSING
+from resourcey.resource.sql import ResourceyBase, SqlResource
 
 # ---------------------------------------------------------------------------
 # Resource fixtures
@@ -31,7 +32,7 @@ class Address(BaseModel):
     street: str
 
 
-class User(BaseResource):
+class User(SqlResource):
     id: int
     email: str
     name: str | None = None
@@ -47,79 +48,79 @@ class User(BaseResource):
     updated_at: datetime | None = Field(default_factory=datetime.utcnow)
 
 
-class Role(BaseResource):
+class Role(SqlResource):
     id: int
     label: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
-class Widget(BaseResource):
+class Widget(SqlResource):
     id: int
     label: str
 
 
-class Box(BaseResource):
+class Box(SqlResource):
     id: int
     size: int
 
 
-class UserRole(BaseResource):
+class UserRole(SqlResource):
     id: int
     label: str
 
 
-class BankAccount(BaseResource):
+class BankAccount(SqlResource):
     id: int
     balance: int
 
 
-class HttpServer(BaseResource):
+class HttpServer(SqlResource):
     id: int
     host: str
 
 
-class OAuth2Client(BaseResource):
+class OAuth2Client(SqlResource):
     id: int
     name: str
 
 
-class WithFk(BaseResource):
+class WithFk(SqlResource):
     id: int
     role_id: Annotated[
         int, ResourceyField(column=Column("role_id", Integer, ForeignKey("roles.id")))
     ]
 
 
-class NoId(BaseResource):
+class NoId(SqlResource):
     email: str
 
 
-class BadTimestampDefault(BaseResource):
+class BadTimestampDefault(SqlResource):
     id: int
     created_at: datetime = datetime(2020, 1, 1)
 
 
-class BadTimestampNoDefault(BaseResource):
+class BadTimestampNoDefault(SqlResource):
     id: int
     created_at: datetime
 
 
-class WithAmbiguousId(BaseResource):
+class WithAmbiguousId(SqlResource):
     id: int
     owner_id: int
 
 
-class WithUuidId(BaseResource):
+class WithUuidId(SqlResource):
     id: UUID
     name: str
 
 
-class WithUnmappedType(BaseResource):
+class WithUnmappedType(SqlResource):
     id: int
     thing: complex = complex(0)
 
 
-class SecretResource(BaseResource):
+class SecretResource(SqlResource):
     id: int
     name: str
     token: SecretStr
@@ -156,7 +157,7 @@ def test_get_id_field_raises_when_no_id():
 
 
 def test_get_id_field_overridable():
-    class CustomId(BaseResource):
+    class CustomId(SqlResource):
         email: str
 
         @classmethod
@@ -217,7 +218,7 @@ def test_config_reads_explicit_annotated_metadata():
 
 
 def test_get_config_for_field_overridable():
-    class Override(BaseResource):
+    class Override(SqlResource):
         id: int
         x: int
 
@@ -257,7 +258,7 @@ def test_config_for_secret_str_explicit_override_is_respected():
     """An explicit ResourceyField(sortable=True) on a SecretStr wins over the
     default-off convention -- the override is the documented escape hatch."""
 
-    class SecretWithOverride(BaseResource):
+    class SecretWithOverride(SqlResource):
         id: int
         token: Annotated[SecretStr, ResourceyField(sortable=True)]
 
@@ -282,7 +283,7 @@ def test_get_search_filter_type_overridable():
     class CustomFilter(SearchFilter):
         pass
 
-    class CustomResource(BaseResource):
+    class CustomResource(SqlResource):
         id: int
 
         @classmethod
@@ -351,7 +352,7 @@ def test_read_model_contains_readable_fields():
 
 
 def test_read_model_excludes_unreadable_field():
-    class Secret(BaseResource):
+    class Secret(SqlResource):
         id: int
         token: Annotated[str, ResourceyField(readable=False)] = "x"
 
@@ -423,7 +424,7 @@ def test_get_table_name(resource, expected):
 
 
 def test_get_table_name_overridable():
-    class Custom(BaseResource):
+    class Custom(SqlResource):
         id: int
 
         @classmethod
@@ -461,7 +462,7 @@ def test_get_resource_path_independent_of_table_name_override():
     which stays the default plural kebab-case class name.
     """
 
-    class Custom(BaseResource):
+    class Custom(SqlResource):
         id: int
 
         @classmethod
@@ -475,7 +476,7 @@ def test_get_resource_path_independent_of_table_name_override():
 
 
 def test_get_resource_path_overridable():
-    class Custom(BaseResource):
+    class Custom(SqlResource):
         id: int
 
         @classmethod
@@ -558,7 +559,7 @@ def test_column_for_unmapped_type_raises():
 
 
 def test_get_column_for_field_overridable():
-    class Override(BaseResource):
+    class Override(SqlResource):
         id: int
         flag: bool
 

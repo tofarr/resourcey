@@ -29,7 +29,7 @@ from sqlalchemy import Column, String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from resourcey.resource.base import BaseResource, ResourceyBase
+from resourcey.resource.base import BaseResource
 from resourcey.resource.errors import InvalidInputError, NotFoundError
 from resourcey.resource.field import ResourceyField
 from resourcey.resource.repository import ResourceRepository
@@ -39,6 +39,7 @@ from resourcey.resource.service import (
     ResourceServiceError,
     register_error_handlers,
 )
+from resourcey.resource.sql import ResourceyBase, SqlResource
 from resourcey.util.search_filter import BaseSearchFilter
 
 # ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ from resourcey.util.search_filter import BaseSearchFilter
 # ---------------------------------------------------------------------------
 
 
-class SvcWidget(BaseResource):
+class SvcWidget(SqlResource):
     """A simple resource for CRUD tests — int id, required label, optional size."""
 
     id: int
@@ -55,7 +56,7 @@ class SvcWidget(BaseResource):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class SvcGadget(BaseResource):
+class SvcGadget(SqlResource):
     """A resource with a unique constraint to exercise the 409 conflict path."""
 
     id: int
@@ -73,7 +74,7 @@ class GadgetSearchFilter(BaseSearchFilter[_GadgetOrm]):
     serial__contains: str | None = None
 
 
-class SvcFilterableWidget(BaseResource):
+class SvcFilterableWidget(SqlResource):
     """A resource that opts into filtering via a declared search filter class."""
 
     id: int
@@ -95,7 +96,7 @@ class SvcFilterableWidget(BaseResource):
         return _Filter
 
 
-class SvcUnsortableWidget(BaseResource):
+class SvcUnsortableWidget(SqlResource):
     """A resource whose every field is opted out of sorting.
 
     Exercises the ``sort`` / ``desc`` params being omitted from the OpenAPI
@@ -109,7 +110,7 @@ class SvcUnsortableWidget(BaseResource):
     ]
 
 
-class SvcDtWidget(BaseResource):
+class SvcDtWidget(SqlResource):
     """A resource with a creatable, sortable datetime field for cursor type round-trip tests."""
 
     id: int

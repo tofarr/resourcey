@@ -9,10 +9,10 @@ materialises both tables.
 
 from __future__ import annotations
 
-from resourcey.resource.base import BaseResource
+from resourcey.resource.sql import SqlResource
 
 
-class Gadget(BaseResource):
+class Gadget(SqlResource):
     """A gadget with an id and a name."""
 
     id: int
