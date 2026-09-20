@@ -40,11 +40,14 @@ class CacheHeader(BaseModel):
         Returns ``False`` (not modified) when the validators prove the
         client's copy is equivalent to the server's:
 
-        * If ``self.etag`` is set: not modified when it equals ``other.etag``.
+        * If ``self.etag`` is set: not modified when it equals any of the
+          client's ETag tokens. A client may send a comma-separated list of
+          ETags (RFC 7232 ``If-None-Match``) or ``*`` (match-if-exists); the
+          latter always matches for an existing resource.
         * Else if ``self.updated_at`` is set: not modified when
           ``self.updated_at <= other.updated_at`` (the server's last change
           is at or before the client's ``If-Modified-Since`` time).
-        * Else (no validators): always modified — the server cannot prove
+        * Else (no validators): always modified - the server cannot prove
           equivalence, so the body is sent.
 
         ``other`` is the client-supplied validators (mapped from
@@ -53,7 +56,10 @@ class CacheHeader(BaseModel):
         satisfy the equality / ordering check, so the body is sent.
         """
         if self.etag is not None:
-            return self.etag != other.etag
+            if other.etag is None:
+                return True
+            client_tokens = {t.strip() for t in other.etag.split(",")}
+            return self.etag not in client_tokens and "*" not in client_tokens
         if self.updated_at is not None:
             if other.updated_at is None:
                 return True

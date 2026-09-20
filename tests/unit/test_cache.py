@@ -24,7 +24,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -340,7 +340,9 @@ class NoCacheResource(BaseResource):
     @classmethod
     def get_cache_strategy(cls) -> CacheStrategy[Any]:  # type: ignore[type-arg]
         class _NoneStrategy(CacheStrategy[Any]):  # type: ignore[type-arg]
-            def get_cache_header(self, models: list[Any]) -> CacheHeader:
+            def get_cache_header(
+                self, models: list[Any], *, context: dict[str, Any] | None = None
+            ) -> CacheHeader:
                 return CacheHeader()
 
         return _NoneStrategy()
@@ -631,3 +633,241 @@ class TestHttpCacheHeaders:
             )
             # Unparseable header → no client validator → body sent.
             assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Fix #1 - ETag reflects the serialization context (tracks the response body)
+# ---------------------------------------------------------------------------
+
+
+class _ContextSensitiveItem(BaseModel):
+    """A model whose serialized form depends on the pydantic context.
+
+    Mirrors how secret-bearing fields behave: the same underlying value
+    serializes differently with vs. without (or with distinct) contexts. The
+    ETag must follow that so it validates the bytes actually sent.
+    """
+
+    id: int
+    secret: str = "redacted"
+
+    @field_serializer("secret")
+    def _serialize_secret(self, _value: str, info: Any) -> str:
+        ctx = getattr(info, "context", None) or {}
+        token = ctx.get("token")
+        if token is not None:
+            return f"enc:{token}"
+        if ctx.get("expose"):
+            return "plaintext"
+        return "redacted"
+
+
+class TestETagSerializationContext:
+    def test_etag_changes_with_context(self) -> None:
+        """A context that changes the serialized form must change the ETag."""
+        items = [_ContextSensitiveItem(id=1)]
+        redacted = ETagCacheStrategy().get_cache_header(items)
+        exposed = ETagCacheStrategy().get_cache_header(items, context={"expose": True})
+        encrypted = ETagCacheStrategy().get_cache_header(items, context={"token": "abc"})
+        assert redacted.etag != exposed.etag
+        assert redacted.etag != encrypted.etag
+        assert exposed.etag != encrypted.etag
+
+    def test_etag_tracks_distinct_context_values(self) -> None:
+        """Distinct encryption tokens (e.g. non-deterministic IVs) yield distinct ETags."""
+        items = [_ContextSensitiveItem(id=1)]
+        a = ETagCacheStrategy().get_cache_header(items, context={"token": "iv-1"})
+        b = ETagCacheStrategy().get_cache_header(items, context={"token": "iv-2"})
+        assert a.etag != b.etag
+
+    def test_etag_stable_for_same_context(self) -> None:
+        items = [_ContextSensitiveItem(id=1)]
+        a = ETagCacheStrategy().get_cache_header(items, context={"token": "same"})
+        b = ETagCacheStrategy().get_cache_header(items, context={"token": "same"})
+        assert a.etag == b.etag
+
+    def test_default_context_redacts_like_no_context(self) -> None:
+        items = [_ContextSensitiveItem(id=1)]
+        none_ctx = ETagCacheStrategy().get_cache_header(items, context=None)
+        default = ETagCacheStrategy().get_cache_header(items)
+        assert none_ctx.etag == default.etag
+
+    def test_service_threads_context_into_etag(self, session_factory) -> None:
+        """ResourceService.compute_cache_header passes its serialization context."""
+        from resourcey.resource.base import BaseResource
+
+        class CtxResource(BaseResource):
+            id: int
+            secret: str = "redacted"
+
+            @classmethod
+            def get_cache_strategy(cls):  # type: ignore[override]
+                return ETagCacheStrategy()
+
+        CtxResource.get_sql_alchemy_model()
+        rm_cls = type("CtxRead", (_ContextSensitiveItem,), {})
+        svc_no_ctx = ResourceService(CtxResource, session_factory=session_factory)
+        svc_with_ctx = ResourceService(
+            CtxResource,
+            session_factory=session_factory,
+            serialization_context={"expose": True},
+        )
+        item = rm_cls(id=1)
+        h_none = svc_no_ctx.compute_cache_header([item])
+        h_exposed = svc_with_ctx.compute_cache_header([item])
+        assert h_none is not None and h_exposed is not None
+        assert h_none.etag != h_exposed.etag
+
+
+# ---------------------------------------------------------------------------
+# Fix #2 - 304 short-circuit is guarded to safe methods (GET/HEAD)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeMethodGuard:
+    @pytest.mark.asyncio
+    async def test_get_with_if_none_match_star_returns_304(
+        self, client_factory, session_factory
+    ) -> None:
+        svc = ResourceService(NoUpdated, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            await client.post("/no-updateds", json={"label": "x"})
+            r = await client.get("/no-updateds", headers={"If-None-Match": "*"})
+            assert r.status_code == 304
+
+    @pytest.mark.asyncio
+    async def test_create_does_not_304_with_if_none_match_star(
+        self, client_factory, session_factory
+    ) -> None:
+        svc = ResourceService(NoUpdated, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            r = await client.post(
+                "/no-updateds", json={"label": "x"}, headers={"If-None-Match": "*"}
+            )
+            assert r.status_code == 201
+            assert r.content != b""
+
+    @pytest.mark.asyncio
+    async def test_update_does_not_304_with_if_none_match_star(
+        self, client_factory, session_factory
+    ) -> None:
+        svc = ResourceService(NoUpdated, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            created = await client.post("/no-updateds", json={"label": "x"})
+            rid = created.json()["id"]
+            r = await client.patch(
+                f"/no-updateds/{rid}",
+                json={"label": "y"},
+                headers={"If-None-Match": "*"},
+            )
+            assert r.status_code == 200
+            assert r.content != b""
+
+    @pytest.mark.asyncio
+    async def test_batch_edit_does_not_304_with_if_none_match_star(
+        self, client_factory, session_factory
+    ) -> None:
+        svc = ResourceService(NoUpdated, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            a = (await client.post("/no-updateds", json={"label": "a"})).json()["id"]
+            r = await client.post(
+                "/no-updateds/batch-edit",
+                json=[{"id": a, "label": "b"}],
+                headers={"If-None-Match": "*"},
+            )
+            assert r.status_code == 200
+            assert r.content != b""
+
+    @pytest.mark.asyncio
+    async def test_mutation_routes_still_emit_etag(self, client_factory, session_factory) -> None:
+        """Unsafe methods emit ETag/Cache-Control but never short-circuit to 304."""
+        svc = ResourceService(NoUpdated, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            created = await client.post("/no-updateds", json={"label": "x"})
+            assert "etag" in created.headers
+            rid = created.json()["id"]
+            etag = created.headers["etag"]
+            r = await client.patch(
+                f"/no-updateds/{rid}",
+                json={"label": "y"},
+                headers={"If-None-Match": etag},
+            )
+            assert r.status_code == 200
+            assert r.content != b""
+
+
+# ---------------------------------------------------------------------------
+# Fix #4 - If-None-Match list / "*" handling
+# ---------------------------------------------------------------------------
+
+
+class TestIfNoneMatchListAndStar:
+    def test_star_matches_any_etag(self) -> None:
+        server = CacheHeader(etag='"abc"')
+        assert server.is_modified(CacheHeader(etag="*")) is False
+
+    def test_list_with_matching_etag_is_not_modified(self) -> None:
+        server = CacheHeader(etag='"abc"')
+        client = CacheHeader(etag='"abc", "def"')
+        assert server.is_modified(client) is False
+
+    def test_list_without_matching_etag_is_modified(self) -> None:
+        server = CacheHeader(etag='"abc"')
+        client = CacheHeader(etag='"def", "ghi"')
+        assert server.is_modified(client) is True
+
+    def test_list_with_weak_etag_then_second_token_matches(self) -> None:
+        server = CacheHeader(etag='"abc"')
+        # The weak token does not match the strong server etag, but the second
+        # (strong) token does.
+        client = CacheHeader(etag='W/"xyz", "abc"')
+        assert server.is_modified(client) is False
+
+    def test_star_is_not_modified_even_when_server_etag_differs(self) -> None:
+        server = CacheHeader(etag='"anything-at-all"')
+        assert server.is_modified(CacheHeader(etag="*")) is False
+
+    @pytest.mark.asyncio
+    async def test_get_with_matching_list_etag_returns_304(
+        self, client_factory, session_factory
+    ) -> None:
+        svc = ResourceService(NoUpdated, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            await client.post("/no-updateds", json={"label": "x"})
+            r1 = await client.get("/no-updateds")
+            etag = r1.headers["etag"]
+            r2 = await client.get("/no-updateds", headers={"If-None-Match": f'"deadbeef", {etag}'})
+            assert r2.status_code == 304
+
+    @pytest.mark.asyncio
+    async def test_get_with_non_matching_list_returns_200(
+        self, client_factory, session_factory
+    ) -> None:
+        svc = ResourceService(NoUpdated, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            await client.post("/no-updateds", json={"label": "x"})
+            r = await client.get("/no-updateds", headers={"If-None-Match": '"one", "two", "three"'})
+            assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Fix #3 - canonical JSON is stable for reordered nested keys
+# ---------------------------------------------------------------------------
+
+
+class _NestedItem(BaseModel):
+    id: int
+    meta: dict[str, str] = {}
+
+
+class TestStableCanonicalJson:
+    def test_etag_stable_for_reordered_nested_keys(self) -> None:
+        """Nested dicts with the same content but different key order hash equally."""
+        a = ETagCacheStrategy().get_cache_header([_NestedItem(id=1, meta={"b": "2", "a": "1"})])
+        b = ETagCacheStrategy().get_cache_header([_NestedItem(id=1, meta={"a": "1", "b": "2"})])
+        assert a.etag == b.etag
+
+    def test_etag_changes_when_nested_content_differs(self) -> None:
+        a = ETagCacheStrategy().get_cache_header([_NestedItem(id=1, meta={"a": "1"})])
+        b = ETagCacheStrategy().get_cache_header([_NestedItem(id=1, meta={"a": "2"})])
+        assert a.etag != b.etag

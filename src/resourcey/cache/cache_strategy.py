@@ -23,6 +23,7 @@ hook picks a default and may be overridden (the single seam for cache policy).
 from __future__ import annotations
 
 import hashlib
+import json
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime, timedelta
 from typing import Any, Generic, TypeVar
@@ -52,18 +53,32 @@ def _expire_at(expire_in: int) -> datetime | None:
     return _utcnow() + timedelta(seconds=expire_in)
 
 
-def _canonical_json(item: Any) -> str:
-    """Stable JSON for hashing: keys sorted, no unset-omission reshaping.
+def _digest(parts: list[bytes]) -> str:
+    """Truncated SHA-256 hex digest over the concatenated byte ``parts``."""
+    hasher = hashlib.sha256()
+    for part in parts:
+        hasher.update(part)
+    return hasher.hexdigest()[:_ETAG_DIGEST_LEN]
+
+
+def _canonical_json(item: Any, context: dict[str, Any] | None = None) -> str:
+    """Stable JSON for hashing: recursively key-sorted, compact separators.
 
     ``exclude_unset=False`` ensures fields defaulted by the server (e.g.
-    ``created_at``) are included so the hash reflects the full visible
-    representation. Secret-bearing fields already redact / encrypt to a fixed
-    sentinel via the serialization context, so the hash is stable across
-    requests with differing encryption contexts — the visible representation
-    is what matters for cache equivalence.
+    ``created_at``) are included so the hash reflects the full representation.
+    ``context`` is threaded into ``model_dump`` so secret-bearing fields
+    serialize exactly as they do in the response body — the ETag then
+    validates the bytes actually sent (a non-deterministic encryption IV changes
+    both the body and the ETag together). ``None`` context redacts secrets,
+    matching a body serialized without a context.
     """
-    dumped = item.model_dump(mode="json", exclude_unset=False)
-    return repr(sorted(dumped.items(), key=lambda kv: kv[0]))
+    dumped = item.model_dump(mode="json", exclude_unset=False, context=context)
+    return json.dumps(dumped, sort_keys=True, separators=(",", ":"))
+
+
+def _stable_json(value: Any) -> str:
+    """Recursively key-sorted, compact JSON for hashing arbitrary values."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 class CacheStrategy(DiscriminatedUnionMixin, ABC, Generic[T]):
@@ -85,11 +100,17 @@ class CacheStrategy(DiscriminatedUnionMixin, ABC, Generic[T]):
         return self
 
     @abstractmethod
-    def get_cache_header(self, models: list[T]) -> CacheHeader:
-        """Compute the cache header for the given read-model instances."""
+    def get_cache_header(
+        self, models: list[T], *, context: dict[str, Any] | None = None
+    ) -> CacheHeader:
+        """Compute the cache header for the given read-model instances.
+
+        ``context`` is the pydantic serialization context (the same one used to
+        serialize the response body) so ETag hashing matches the bytes sent.
+        """
         raise NotImplementedError
 
-    def _with_expiry(self, header: CacheHeader) -> CacheHeader:
+    def with_expiry(self, header: CacheHeader) -> CacheHeader:
         """Attach ``expire_at`` from ``expire_in`` (in place) and return it."""
         header.expire_at = _expire_at(self.expire_in)
         return header
@@ -100,19 +121,21 @@ class ETagCacheStrategy(CacheStrategy[T]):
 
     Each item is assumed to be a Pydantic model. The ETag is a SHA-256 hex
     digest (truncated, quoted) of the canonical JSON of every item's
-    ``model_dump(mode="json", exclude_unset=False)`` sorted by key, concatenated
-    over the list in order. No ``updated_at`` is produced.
+    ``model_dump(mode="json", exclude_unset=False, context=context)`` sorted
+    by key, concatenated over the list in order. No ``updated_at`` is
+    produced.
     """
 
-    def get_cache_header(self, models: list[T]) -> CacheHeader:
-        hasher = hashlib.sha256()
+    def get_cache_header(
+        self, models: list[T], *, context: dict[str, Any] | None = None
+    ) -> CacheHeader:
+        parts: list[bytes] = []
         for item in models:
-            hasher.update(_canonical_json(item).encode("utf-8"))
+            parts.append(_canonical_json(item, context).encode("utf-8"))
             # A separator guards against adjacency ambiguity (the concatenation
             # of [a, b] vs [ab] for a single-item list).
-            hasher.update(b"\n")
-        digest = hasher.hexdigest()[:_ETAG_DIGEST_LEN]
-        return self._with_expiry(CacheHeader(etag=f'"{digest}"'))
+            parts.append(b"\n")
+        return self.with_expiry(CacheHeader(etag=f'"{_digest(parts)}"'))
 
 
 class LastModifiedCacheStrategy(CacheStrategy[T]):
@@ -123,7 +146,9 @@ class LastModifiedCacheStrategy(CacheStrategy[T]):
     advance the max). No ``etag`` is produced.
     """
 
-    def get_cache_header(self, models: list[T]) -> CacheHeader:
+    def get_cache_header(
+        self, models: list[T], *, context: dict[str, Any] | None = None
+    ) -> CacheHeader:
         # Aware min so naive/aware datetimes are normalized before comparison.
         # Truncated to whole seconds: HTTP ``Last-Modified`` is second-precision,
         # so the validator must carry that precision for ``is_modified`` to match
@@ -138,7 +163,7 @@ class LastModifiedCacheStrategy(CacheStrategy[T]):
             updated = updated.replace(microsecond=0)
             if updated > latest:
                 latest = updated
-        return self._with_expiry(CacheHeader(updated_at=latest))
+        return self.with_expiry(CacheHeader(updated_at=latest))
 
 
 class OptimisticCacheStrategy(CacheStrategy[T]):
@@ -157,5 +182,7 @@ class OptimisticCacheStrategy(CacheStrategy[T]):
             )
         return self
 
-    def get_cache_header(self, models: list[T]) -> CacheHeader:
-        return self._with_expiry(CacheHeader())
+    def get_cache_header(
+        self, models: list[T], *, context: dict[str, Any] | None = None
+    ) -> CacheHeader:
+        return self.with_expiry(CacheHeader())

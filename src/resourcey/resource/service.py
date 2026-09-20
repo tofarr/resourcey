@@ -252,9 +252,11 @@ class ResourceService:
 
         Returns the :class:`~resourcey.cache.cache_header.CacheHeader`, or
         ``None`` when the strategy yields no validators and no expiry (so the
-        HTTP layer skips header setting entirely).
+        HTTP layer skips header setting entirely). The serialization context
+        (``self._ctx()``) is threaded into the strategy so the ETag validates
+        the same bytes the response body serializes to.
         """
-        header = self.resource.get_cache_strategy().get_cache_header(items)
+        header = self.resource.get_cache_strategy().get_cache_header(items, context=self._ctx())
         return header if header.has_any() else None
 
     def compute_count_cache_header(
@@ -272,20 +274,14 @@ class ResourceService:
         ``updated_at``, so last-modified is an unreliable validator for a
         count). ``expire_in`` from the resource's strategy is honoured.
         """
-        import hashlib
-
-        from resourcey.cache.cache_strategy import _expire_at
+        from resourcey.cache.cache_strategy import _digest, _stable_json
 
         strategy = self.resource.get_cache_strategy()
-        hasher = hashlib.sha256()
-        hasher.update(str(count).encode("utf-8"))
-        hasher.update(b"\n")
+        parts: list[bytes] = [str(count).encode("utf-8"), b"\n"]
         if filters is not None:
-            hasher.update(repr(filters.model_dump(mode="json")).encode("utf-8"))
-        digest = hasher.hexdigest()[:32]
-        header = CacheHeader(etag=f'"{digest}"')
-        header.expire_at = _expire_at(strategy.expire_in)
-        return header if header.has_any() else None
+            parts.append(_stable_json(filters.model_dump(mode="json")).encode("utf-8"))
+        header = CacheHeader(etag=f'"{_digest(parts)}"')
+        return strategy.with_expiry(header) if header.has_any() else None
 
     # ------------------------------------------------------------------
     # Validation helpers
@@ -922,13 +918,17 @@ def _cached_json_response(
 
     When ``header`` is ``None`` (the strategy yielded nothing) this is a plain
     JSON response. Otherwise the validator + freshness headers are set, and if
-    the client's conditional request headers prove the copy is current
-    (``header.is_modified(client)`` is ``False``) a ``304 Not Modified`` with
-    an empty body (but the validator + ``Cache-Control`` headers) is returned.
+    the request is a safe method (``GET`` / ``HEAD`` — RFC 7232 restricts
+    ``304 Not Modified`` to safe methods) and the client's conditional request
+    headers prove the copy is current (``header.is_modified(client)`` is
+    ``False``) a ``304 Not Modified`` with an empty body (but the validator +
+    ``Cache-Control`` headers) is returned. Unsafe methods (``POST`` / ``PATCH``
+    / ``DELETE``) still emit the headers on the response but always send the
+    body — they cannot short-circuit to ``304``.
     """
     if header is None or not header.has_any():
         return _json_response(payload, context, status_code)
-    if not header.is_modified(_client_cache_header(request)):
+    if request.method in ("GET", "HEAD") and not header.is_modified(_client_cache_header(request)):
         return Response(
             status_code=status.HTTP_304_NOT_MODIFIED,
             headers=_cache_response_headers(header),
