@@ -90,6 +90,7 @@ class SvcFilterableWidget(BaseResource):
             label__contains: str | None = None
             size__eq: int | None = None
             size__gte: int | None = None
+            size__in: list[int] | None = None
 
         return _Filter
 
@@ -649,3 +650,79 @@ class TestHttpFiltering:
             r = await client.get("/svc-filterable-widgets?size__eq=2")
             assert r.json()["total"] == 1
             assert r.json()["items"][0]["label"] == "b"
+
+    @pytest.mark.asyncio
+    async def test_declared_filter_in_operator(self, client_factory, session_factory) -> None:
+        svc = ResourceService(SvcFilterableWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            await client.post("/svc-filterable-widgets", json={"label": "a", "size": 1})
+            await client.post("/svc-filterable-widgets", json={"label": "b", "size": 2})
+            await client.post("/svc-filterable-widgets", json={"label": "c", "size": 3})
+            r = await client.get("/svc-filterable-widgets?size__in=1&size__in=3")
+            assert r.status_code == 200
+            assert r.json()["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# OpenAPI schema: declared filter fields surface as separate query params (#31)
+# ---------------------------------------------------------------------------
+
+
+def _build_app(resource: type[BaseResource]) -> FastAPI:
+    app = FastAPI()
+    ResourceService(resource).register(app, session_dependency=lambda: None)
+    register_error_handlers(app)
+    return app
+
+
+def _openapi(app: FastAPI) -> dict:
+    """Generate the OpenAPI schema, tolerating a pre-existing
+    ``PydanticJsonSchemaWarning`` emitted by some resource model fields whose
+    defaults (the ``MISSING`` sentinel) are not JSON-serializable. That warning
+    is unrelated to the search-route filter params under test here (#31)."""
+    import warnings
+
+    from pydantic.json_schema import PydanticJsonSchemaWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PydanticJsonSchemaWarning)
+        return app.openapi()
+
+
+class TestSearchOpenApiSchema:
+    """Issue #31: filter fields appear as individual query params in OpenAPI."""
+
+    def test_filter_fields_appear_as_query_params(self) -> None:
+        app = _build_app(SvcFilterableWidget)
+        params = _openapi(app)["paths"]["/svc-filterable-widgets"]["get"]["parameters"]
+        names = {p["name"] for p in params}
+        # standard search params are still present
+        assert {"limit", "offset", "sort"} <= names
+        # each declared filter field is its own query param (not a single $ref)
+        assert {"label__eq", "label__contains", "size__eq", "size__gte", "size__in"} <= names
+
+    def test_list_typed_filter_field_appears_as_array(self) -> None:
+        app = _build_app(SvcFilterableWidget)
+        params = _openapi(app)["paths"]["/svc-filterable-widgets"]["get"]["parameters"]
+        size_in = next(p for p in params if p["name"] == "size__in")
+        schema = size_in["schema"]
+        # list-typed (``in`` operator) fields must survive as array params, not
+        # be silently dropped by FastAPI's model-as-dependency path.
+        assert schema["anyOf"][0] == {"type": "array", "items": {"type": "integer"}}
+
+    def test_no_filter_class_means_no_filter_params(self) -> None:
+        app = _build_app(SvcWidget)
+        params = _openapi(app)["paths"]["/svc-widgets"]["get"]["parameters"]
+        names = {p["name"] for p in params}
+        assert {"limit", "offset", "sort"} <= names
+        # no field__op params are advertised when the resource declares no filter
+        assert not any("__" in n for n in names)
+
+    def test_filter_param_types_match_declarations(self) -> None:
+        app = _build_app(SvcFilterableWidget)
+        params = _openapi(app)["paths"]["/svc-filterable-widgets"]["get"]["parameters"]
+        by_name = {p["name"]: p for p in params}
+        # scalar int filter -> integer
+        assert by_name["size__eq"]["schema"]["anyOf"][0] == {"type": "integer"}
+        # scalar str filter -> string
+        assert by_name["label__contains"]["schema"]["anyOf"][0] == {"type": "string"}
