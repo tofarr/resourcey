@@ -139,4 +139,11 @@ class BaseService:
 
 
 class ServiceError(Exception):
-    """A service is misconfigured (e.g. no session available)."""
+    """A service is misconfigured (e.g. no session available).
+
+    Currently reserved: no code path in the framework raises it yet (the
+    session-factory guard raises :class:`ResourceyConfigError` instead). It is
+    wired to a 500 handler in :func:`~resourcey.resource.routes.register_error_handlers`
+    so future services can raise it for internal errors without touching the
+    HTTP layer.
+    """

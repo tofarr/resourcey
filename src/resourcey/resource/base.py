@@ -236,7 +236,7 @@ class BaseResource:
 
         Overridable: a developer returns any ``CacheStrategy`` instance (e.g.
         ``OptimisticCacheStrategy(expire_in=60)``) to change the policy. This
-        is the single seam for cache policy ŌĆö overriding it never touches the
+        is the single seam for cache policy — overriding it never touches the
         service or routes.
         """
         cached = cls.__dict__.get("_cache_strategy")

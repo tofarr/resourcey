@@ -32,7 +32,7 @@ from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request as StarletteRequest
 
 from resourcey.cache.cache_header import CacheHeader
-from resourcey.resource.errors import InvalidInputError, NotFoundError
+from resourcey.resource.errors import InvalidInputError, NotFoundError, ResourceyConfigError
 from resourcey.resource.missing import MISSING
 from resourcey.resource.service import Page, SqlService
 from resourcey.resource.service_base import ServiceError
@@ -77,6 +77,18 @@ def register_routes(
     id_type = _id_python_type(resource)
     service_dep = _service_dependency(resource)
     supported = resource.get_supported_actions()
+
+    # A resource may narrow the service's actions (hide a route) but must not
+    # widen beyond them — otherwise a route would be wired for an action the
+    # service cannot fulfill. Assert at registration time so the mismatch
+    # surfaces immediately, not as a NotImplementedError on the first request.
+    service_actions = resource.get_service_cls().actions
+    if not supported <= service_actions:
+        raise ResourceyConfigError(
+            f"{resource.__name__}.get_supported_actions()={sorted(supported)} is not a "
+            f"subset of {resource.get_service_cls().__name__}.actions={sorted(service_actions)}; "
+            f"narrowing is allowed, widening is not."
+        )
 
     # Build a route per supported action. Static sub-paths (search / count /
     # batch-read / batch-edit) are registered before the ``{id}`` routes,
