@@ -216,7 +216,12 @@ class ResourceService:
         return await self.repository.count(session, filters=filters)
 
     async def batch_read(self, session: AsyncSession, ids: list[Any]) -> list[Any]:
-        """Return read models in input order, omitting absent ids (per the spec)."""
+        """Return read models positionally aligned with the input ids.
+
+        Each position ``i`` holds the read model for ``ids[i]`` or ``None`` if
+        no such entity exists, so the response length always equals the input
+        length and callers can correlate results by index.
+        """
         await self.authorize(session, "batch_read", ids=ids)
         return await self.repository.get_many_by_ids(session, ids, context=self._ctx())
 
@@ -225,10 +230,14 @@ class ResourceService:
         session: AsyncSession,
         edits: list[tuple[Any, BaseModel]],
     ) -> list[Any]:
-        """Apply each edit (id + update payload); return updated read models in order.
+        """Apply each edit (id + update payload); return results in input order.
 
-        Skips absent ids (idempotent merge semantics per the spec). Edits
-        are a list of ``(id, update_model_instance)`` tuples.
+        Maintains a 1:1 positional correspondence with the input edits: each
+        position ``i`` holds the updated read model for ``edits[i]`` or
+        ``None`` if that id does not exist (no DB write). The merge is
+        idempotent — re-applying the same batch yields the same results and
+        leaves absent ids untouched. Edits are a list of
+        ``(id, update_model_instance)`` tuples.
         """
         await self.authorize(session, "batch_edit", edits=edits)
         results: list[Any] = []
@@ -236,8 +245,7 @@ class ResourceService:
             updated = await self.repository.update_by_id(
                 session, edit_id, payload, context=self._ctx()
             )
-            if updated is not None:
-                results.append(updated)
+            results.append(updated)
         return results
 
     # ------------------------------------------------------------------

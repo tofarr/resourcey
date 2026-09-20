@@ -53,8 +53,10 @@ Every generated resource service exposes the **standard actions** over REST:
   paging are meaningless for a count). Permission reuses `search` — counting
   is not a separate privilege from listing.
 * `update` is a partial merge (PATCH semantics), never a full replace.
-* `batch_edit` and `batch_read` accept an array and return an array in the
-  same order as the input ids.
+* `batch_edit` and `batch_read` accept an array and return an array
+  positionally aligned with the input: each position `i` holds the entity for
+  the `i`-th input id, or `null` if that id does not exist. The response
+  length always equals the input length.
 * All actions are permission-checked before execution (see `auth-rbac` skill).
 
 ## Error shapes

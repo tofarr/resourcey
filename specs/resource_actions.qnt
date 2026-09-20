@@ -33,6 +33,13 @@ module resource_actions {
   // A stored entity is keyed by an id and carries a value.
   type Entity = int
 
+  // Result of a positional batch action: the entity at that position, or
+  // Absent when no entity exists for the requested id (models ``null``).
+  type BatchResult = Present(Entity) | Absent
+
+  // A single (id, value) update within a batch_edit list.
+  type BatchUpdate = { id: int, value: Entity }
+
   // A predicate over an entity. Equality matches a specific value; `in`
   // matches membership in an accepted set (empty set => matches nothing).
   // None means "no restriction on this attribute".
@@ -125,25 +132,39 @@ module resource_actions {
     else
       entities.keys().filter(k => matchesFilter(entities.get(k), flt)).size()
 
-  // batch_read: return entities for a set of ids; missing ids are omitted.
-  def batch_read(ids: Set[int]): int -> Entity =
-    entities.keys().filter(k => ids.contains(k)).fold(
-      Map(),
-      (acc, k) => acc.put(k, entities.get(k))
+  // batch_read: return entities for a list of ids, preserving order and
+  // duplicates. Each position i holds the entity for ids[i] or Absent when no
+  // such entity exists, so the result length always equals the input length.
+  def batch_read(ids: List[int]): List[BatchResult] =
+    ids.foldl(List(), (acc, i) =>
+      acc.append(if (entities.keys().contains(i)) Present(entities.get(i)) else Absent)
     )
 
-  // batch_edit: apply a set of updates; absent ids are skipped.
-  action batch_edit(updates: int -> Entity): bool = {
-    val appliedKeys = updates.keys().filter(k => entities.keys().contains(k))
+  // batch_edit: apply a list of updates positionally; absent ids are no-ops.
+  // The merge is idempotent: re-applying the same batch yields the same state
+  // and leaves absent ids untouched. The positional result list is computed
+  // by ``batch_edit_result``.
+  action batch_edit(updates: List[BatchUpdate]): bool = {
+    val present = updates.foldl(Set(0).filter(x => false), (acc, u) =>
+      if (entities.keys().contains(u.id)) acc.union(Set(u.id)) else acc
+    )
     all {
-      entities' = appliedKeys.fold(
+      entities' = present.fold(
         entities,
-        (acc, k) => acc.put(k, updates.get(k))
+        (acc, k) => acc.put(k, updates.foldl(0, (v, u) => if (u.id == k) u.value else v))
       ),
       nextId' = nextId,
       true,
     }
   }
+
+  // The positional result of a batch_edit: each position i holds the updated
+  // entity for updates[i].id or Absent when that id was absent (no write).
+  // Read against the *post-edit* state.
+  def batch_edit_result(updates: List[BatchUpdate]): List[BatchResult] =
+    updates.foldl(List(), (acc, u) =>
+      acc.append(if (entities.keys().contains(u.id)) Present(u.value) else Absent)
+    )
 
   // Invariant: nextId is always greater than every stored key.
   val keysAreBelowCounter = entities.keys().forall(k => k < nextId)
@@ -201,11 +222,13 @@ module resource_actions {
       .then(create(1))
       .then(create(2))
       .then(all {
-        assert(batch_read(Set(1)).keys().size() == 1),
+        // batch_read preserves order and emits Absent for missing ids:
+        // input [2, 999, 1] -> [Present(2), Absent, Present(1)].
+        assert(batch_read(List(2, 999, 1)) == List(Present(2), Absent, Present(1))),
         entities' = entities,
         nextId' = nextId,
       })
-      .then(batch_edit(Map(1 -> 100, 2 -> 200)))
+      .then(batch_edit(List({ id: 1, value: 100 }, { id: 2, value: 200 }, { id: 999, value: 0 })))
       .then(all {
         assert(read(1) == 100),
         entities' = entities,
@@ -213,6 +236,14 @@ module resource_actions {
       })
       .then(all {
         assert(read(2) == 200),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        // batch_edit_result is 1:1 with the input: present ids carry the
+        // updated value, the absent id (999) is Absent.
+        assert(batch_edit_result(List({ id: 1, value: 100 }, { id: 2, value: 200 }, { id: 999, value: 0 }))
+          == List(Present(100), Present(200), Absent)),
         entities' = entities,
         nextId' = nextId,
       })

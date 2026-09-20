@@ -422,12 +422,26 @@ class TestServiceBatchRead:
         assert [r.id for r in result] == [b.id, a.id]
 
     @pytest.mark.asyncio
-    async def test_batch_read_omits_absent_ids(self, session: AsyncSession) -> None:
+    async def test_batch_read_inserts_null_for_absent_ids(self, session: AsyncSession) -> None:
         svc = ResourceService(SvcWidget)
         a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
         result = await svc.batch_read(session, [a.id, 999])
-        assert len(result) == 1
+        assert len(result) == 2
         assert result[0].id == a.id
+        assert result[1] is None
+
+    @pytest.mark.asyncio
+    async def test_batch_read_preserves_order_with_nulls(self, session: AsyncSession) -> None:
+        svc = ResourceService(SvcWidget)
+        a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
+        b = await svc.create(session, SvcWidget.get_create_model()(label="b"))
+        # [b, missing, a, missing] -> [b, None, a, None]
+        result = await svc.batch_read(session, [b.id, 998, a.id, 999])
+        assert len(result) == 4
+        assert result[0].id == b.id
+        assert result[1] is None
+        assert result[2].id == a.id
+        assert result[3] is None
 
     @pytest.mark.asyncio
     async def test_batch_read_empty_list(self, session: AsyncSession) -> None:
@@ -439,8 +453,19 @@ class TestServiceBatchRead:
     async def test_batch_read_deduplicates_ids(self, session: AsyncSession) -> None:
         svc = ResourceService(SvcWidget)
         a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
+        # Duplicates each map to the same entity, length matches the input.
         result = await svc.batch_read(session, [a.id, a.id])
-        assert len(result) == 1
+        assert len(result) == 2
+        assert result[0].id == a.id
+        assert result[1].id == a.id
+
+    @pytest.mark.asyncio
+    async def test_batch_read_duplicate_absent_id_maps_to_nulls(
+        self, session: AsyncSession
+    ) -> None:
+        svc = ResourceService(SvcWidget)
+        result = await svc.batch_read(session, [999, 999])
+        assert result == [None, None]
 
 
 class TestServiceBatchEdit:
@@ -459,18 +484,37 @@ class TestServiceBatchEdit:
         assert {r.id: r.size for r in results} == {a.id: 10, b.id: 10 + 10}
 
     @pytest.mark.asyncio
-    async def test_batch_edit_skips_absent_ids(self, session: AsyncSession) -> None:
+    async def test_batch_edit_inserts_null_for_absent_ids(self, session: AsyncSession) -> None:
         svc = ResourceService(SvcWidget)
         a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
         results = await svc.batch_edit(
             session,
             [
                 (a.id, SvcWidget.get_update_model()(size=5)),
-                (999, SvcWidget.get_update_model()(size=9)),  # absent -> skipped
+                (999, SvcWidget.get_update_model()(size=9)),  # absent -> null
             ],
         )
-        assert len(results) == 1
+        assert len(results) == 2
         assert results[0].id == a.id
+        assert results[1] is None
+
+    @pytest.mark.asyncio
+    async def test_batch_edit_preserves_order_with_nulls(self, session: AsyncSession) -> None:
+        svc = ResourceService(SvcWidget)
+        a = await svc.create(session, SvcWidget.get_create_model()(label="a", size=1))
+        results = await svc.batch_edit(
+            session,
+            [
+                (998, SvcWidget.get_update_model()(size=1)),  # absent
+                (a.id, SvcWidget.get_update_model()(size=7)),
+                (999, SvcWidget.get_update_model()(size=2)),  # absent
+            ],
+        )
+        assert len(results) == 3
+        assert results[0] is None
+        assert results[1].id == a.id
+        assert results[1].size == 7
+        assert results[2] is None
 
 
 class TestServiceAuthorize:
@@ -712,8 +756,14 @@ class TestHttpBatchRead:
             r = await client.get(f"/svc-widgets/batch-read?id={a}&id={b}&id=999")
             assert r.status_code == 200
             body = r.json()
-            assert len(body) == 2
-            assert [item["id"] for item in body] == [a, b]
+            # 1:1 with the input: [a, b, missing] -> [a, b, null]
+            assert len(body) == 3
+            assert [item["id"] if item is not None else None for item in body] == [
+                a,
+                b,
+                None,
+            ]
+            assert body[2] is None
 
     @pytest.mark.asyncio
     async def test_batch_read_no_ids_returns_empty(self, client_factory, session_factory) -> None:
@@ -739,6 +789,23 @@ class TestHttpBatchEdit:
             body = r.json()
             assert {item["id"]: item["size"] for item in body} == {a: 10, b: 2}
             assert next(i for i in body if i["id"] == b)["label"] == "renamed"
+
+    @pytest.mark.asyncio
+    async def test_batch_edit_null_for_absent_ids(self, client_factory, session_factory) -> None:
+        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            a = (await client.post("/svc-widgets", json={"label": "a", "size": 1})).json()["id"]
+            r = await client.post(
+                "/svc-widgets/batch-edit",
+                json=[{"id": a, "size": 9}, {"id": 999, "size": 5}],
+            )
+            assert r.status_code == 200
+            body = r.json()
+            # 1:1 with the input: [a, missing] -> [a-updated, null]
+            assert len(body) == 2
+            assert body[0]["id"] == a
+            assert body[0]["size"] == 9
+            assert body[1] is None
 
 
 class TestHttpErrors:
