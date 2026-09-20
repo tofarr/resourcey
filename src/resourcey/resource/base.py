@@ -1,4 +1,4 @@
-"""``BaseResource`` ŌĆö the storage-agnostic resource declaration layer.
+"""``BaseResource`` and the storage-agnostic resource declaration layer.
 
 A resource is the central unit of resourcey. ``BaseResource`` is a plain
 declaration class (not a Pydantic model): a subclass declares fields with the
