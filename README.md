@@ -32,7 +32,7 @@ Declaring a resource produces:
   resource's field metadata.
 * **SQLAlchemy models** for persistence, derived from the same metadata.
 * **A service** exposing the standard actions over REST:
-  `create`, `read`, `update`, `delete`, `search`, `batch_read`, `batch_edit`.
+  `create`, `read`, `update`, `delete`, `search`, `count`, `batch_read`, `batch_edit`.
 * **Migrations** — Alembic autogeneration from the current models, so you
   can derive schema changes from your resource declarations.
 * **Permissions** — the resource declares which actions a role may perform,

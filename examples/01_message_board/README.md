@@ -111,14 +111,14 @@ List a thread's messages (the `thread_id__eq` filter):
 
 ```bash
 curl -s "http://127.0.0.1:8081/messages?thread_id__eq=1"
-# → {"items":[{…},{…}],"total":2,"limit":20,"offset":0}
+# → {"items":[{…},{…}],"limit":20,"next_cursor":null}
 ```
 
 Substring search on the message body:
 
 ```bash
 curl -s "http://127.0.0.1:8081/messages?thread_id__eq=1&text__contains=hi"
-# → {"items":[{"id":1,…}],"total":1,"limit":20,"offset":0}
+# → {"items":[{"id":1,…}],"limit":20,"next_cursor":null}
 ```
 
 Read, update, delete:
@@ -140,7 +140,7 @@ curl -s "http://127.0.0.1:8081/messages/batch-read?id=1&id=2"
 
 ## Auto-generated REST surface
 
-Each resource gets the seven standard actions:
+Each resource gets the standard actions:
 
 | Method   | Path                    | Action      |
 | -------- | ----------------------- | ----------- |
@@ -149,10 +149,11 @@ Each resource gets the seven standard actions:
 | `PATCH`  | `/threads/{id}`         | update      |
 | `DELETE` | `/threads/{id}`         | delete      |
 | `GET`    | `/threads`              | search      |
+| `GET`    | `/threads/count`        | count       |
 | `GET`    | `/threads/batch-read`   | batch_read  |
 | `POST`   | `/threads/batch-edit`   | batch_edit  |
 
-…and the same seven for `/messages`.
+…and the same actions for `/messages`.
 
 ## Migrations
 

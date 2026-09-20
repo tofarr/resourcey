@@ -245,23 +245,47 @@ class TestServiceSearch:
         svc = ResourceService(SvcWidget)
         for i in range(3):
             await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, limit=10, offset=0)
+        page = await svc.search(session, limit=10)
         assert isinstance(page, Page)
-        assert page.total == 3
         assert len(page.items) == 3
         assert page.limit == 10
-        assert page.offset == 0
+        # All 3 rows fit in one page -> no next cursor.
+        assert page.next_cursor is None
 
     @pytest.mark.asyncio
-    async def test_search_pagination(self, session: AsyncSession) -> None:
+    async def test_search_cursor_pagination(self, session: AsyncSession) -> None:
         svc = ResourceService(SvcWidget)
         for i in range(5):
             await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, limit=2, offset=0)
+        page = await svc.search(session, limit=2)
         assert len(page.items) == 2
-        assert page.total == 5
-        page2 = await svc.search(session, limit=2, offset=2)
+        assert page.next_cursor is not None
+        page2 = await svc.search(session, limit=2, cursor=page.next_cursor)
         assert len(page2.items) == 2
+        # Cursor advances — no overlap with the first page.
+        assert {item.id for item in page2.items}.isdisjoint({item.id for item in page.items})
+        page3 = await svc.search(session, limit=2, cursor=page2.next_cursor)
+        assert len(page3.items) == 1
+        assert page3.next_cursor is None
+
+    @pytest.mark.asyncio
+    async def test_search_cursor_pagination_with_sort(self, session: AsyncSession) -> None:
+        svc = ResourceService(SvcWidget)
+        for i in [3, 1, 2]:
+            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(session, limit=2, sort="size")
+        assert [item.size for item in page.items] == [1, 2]
+        assert page.next_cursor is not None
+        page2 = await svc.search(session, limit=2, sort="size", cursor=page.next_cursor)
+        assert [item.size for item in page2.items] == [3]
+        assert page2.next_cursor is None
+
+    @pytest.mark.asyncio
+    async def test_search_invalid_cursor_raises(self, session: AsyncSession) -> None:
+        svc = ResourceService(SvcWidget)
+        await svc.create(session, SvcWidget.get_create_model()(label="g0", size=0))
+        with pytest.raises(InvalidInputError):
+            await svc.search(session, cursor="not-a-valid-cursor")
 
     @pytest.mark.asyncio
     async def test_search_sort_ascending(self, session: AsyncSession) -> None:
@@ -292,12 +316,6 @@ class TestServiceSearch:
             await svc.search(session, limit=0)
 
     @pytest.mark.asyncio
-    async def test_search_offset_below_zero_raises(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        with pytest.raises(InvalidInputError):
-            await svc.search(session, offset=-1)
-
-    @pytest.mark.asyncio
     async def test_search_limit_capped_to_max(self, session: AsyncSession) -> None:
         svc = ResourceService(SvcWidget)
         page = await svc.search(session, limit=999)
@@ -312,8 +330,31 @@ class TestServiceSearch:
             await svc.create(session, SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
         filters = filter_cls(size__gte=2)
         page = await svc.search(session, filters=filters)
-        assert page.total == 1
+        assert len(page.items) == 1
         assert page.items[0].size == 2
+
+
+class TestServiceCount:
+    @pytest.mark.asyncio
+    async def test_count_all(self, session: AsyncSession) -> None:
+        svc = ResourceService(SvcWidget)
+        for i in range(3):
+            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        assert await svc.count(session) == 3
+
+    @pytest.mark.asyncio
+    async def test_count_with_filter(self, session: AsyncSession) -> None:
+        svc = ResourceService(SvcFilterableWidget)
+        filter_cls = SvcFilterableWidget.get_search_filter_type()
+        assert filter_cls is not None
+        for i in range(5):
+            await svc.create(session, SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
+        assert await svc.count(session, filters=filter_cls(size__gte=3)) == 2
+
+    @pytest.mark.asyncio
+    async def test_count_empty(self, session: AsyncSession) -> None:
+        svc = ResourceService(SvcWidget)
+        assert await svc.count(session) == 0
 
 
 class TestServiceBatchRead:
@@ -431,7 +472,7 @@ class TestRegisterRoutes:
         svc = ResourceService(SvcWidget, session_factory=session_factory)
         app = FastAPI()
         router = svc.register(app)
-        assert len(router.routes) == 7
+        assert len(router.routes) == 8
 
     @pytest.mark.asyncio
     async def test_register_with_prefix(self, session_factory) -> None:
@@ -542,11 +583,59 @@ class TestHttpCrud:
         async with client_factory(svc) as client:
             for i in range(3):
                 await client.post("/svc-widgets", json={"label": f"g{i}", "size": i})
-            r = await client.get("/svc-widgets?limit=2&offset=0")
+            r = await client.get("/svc-widgets?limit=2")
             assert r.status_code == 200
             body = r.json()
-            assert body["total"] == 3
+            assert "total" not in body
+            assert "offset" not in body
             assert len(body["items"]) == 2
+            assert body["next_cursor"] is not None
+            # Follow the cursor to the remaining item.
+            r2 = await client.get(f"/svc-widgets?limit=2&cursor={body['next_cursor']}")
+            body2 = r2.json()
+            assert len(body2["items"]) == 1
+            assert body2["next_cursor"] is None
+
+    @pytest.mark.asyncio
+    async def test_search_rejects_offset_param(self, client_factory, session_factory) -> None:
+        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            r = await client.get("/svc-widgets?offset=0")
+            # offset is no longer a recognized param; FastAPI ignores unknown
+            # query params, so the request succeeds but the response has no
+            # "offset" field.
+            assert r.status_code == 200
+            assert "offset" not in r.json()
+
+    @pytest.mark.asyncio
+    async def test_count_endpoint(self, client_factory, session_factory) -> None:
+        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            for i in range(3):
+                await client.post("/svc-widgets", json={"label": f"g{i}", "size": i})
+            r = await client.get("/svc-widgets/count")
+            assert r.status_code == 200
+            assert r.json() == 3
+
+    @pytest.mark.asyncio
+    async def test_count_with_filter(self, client_factory, session_factory) -> None:
+        svc = ResourceService(SvcFilterableWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            for i in range(5):
+                await client.post("/svc-filterable-widgets", json={"label": f"g{i}", "size": i})
+            r = await client.get("/svc-filterable-widgets/count?size__gte=3")
+            assert r.status_code == 200
+            assert r.json() == 2
+
+    @pytest.mark.asyncio
+    async def test_count_rejects_sort_and_limit(self, client_factory, session_factory) -> None:
+        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            r = await client.get("/svc-widgets/count?sort=size")
+            assert r.status_code == 400
+            assert r.json()["error"]["code"] == "invalid_input"
+            r = await client.get("/svc-widgets/count?limit=10")
+            assert r.status_code == 400
 
     @pytest.mark.asyncio
     async def test_search_sort_via_query(self, client_factory, session_factory) -> None:
@@ -677,7 +766,7 @@ class TestHttpFiltering:
             r = await client.get("/svc-filterable-widgets?label__contains=app")
             assert r.status_code == 200
             body = r.json()
-            assert body["total"] == 1
+            assert len(body["items"]) == 1
             assert body["items"][0]["label"] == "apple"
 
     @pytest.mark.asyncio
@@ -687,7 +776,7 @@ class TestHttpFiltering:
             await client.post("/svc-filterable-widgets", json={"label": "a", "size": 1})
             await client.post("/svc-filterable-widgets", json={"label": "b", "size": 2})
             r = await client.get("/svc-filterable-widgets?size__eq=2")
-            assert r.json()["total"] == 1
+            assert len(r.json()["items"]) == 1
             assert r.json()["items"][0]["label"] == "b"
 
     @pytest.mark.asyncio
@@ -699,7 +788,7 @@ class TestHttpFiltering:
             await client.post("/svc-filterable-widgets", json={"label": "c", "size": 3})
             r = await client.get("/svc-filterable-widgets?size__in=1&size__in=3")
             assert r.status_code == 200
-            assert r.json()["total"] == 2
+            assert len(r.json()["items"]) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -736,7 +825,7 @@ class TestSearchOpenApiSchema:
         params = _openapi(app)["paths"]["/svc-filterable-widgets"]["get"]["parameters"]
         names = {p["name"] for p in params}
         # standard search params are still present (sort is now an enum, plus desc)
-        assert {"limit", "offset", "sort", "desc"} <= names
+        assert {"limit", "cursor", "sort", "desc"} <= names
         # each declared filter field is its own query param (not a single $ref)
         assert {"label__eq", "label__contains", "size__eq", "size__gte", "size__in"} <= names
 
@@ -753,7 +842,7 @@ class TestSearchOpenApiSchema:
         app = _build_app(SvcWidget)
         params = _openapi(app)["paths"]["/svc-widgets"]["get"]["parameters"]
         names = {p["name"] for p in params}
-        assert {"limit", "offset", "sort", "desc"} <= names
+        assert {"limit", "cursor", "sort", "desc"} <= names
         # no field__op params are advertised when the resource declares no filter
         assert not any("__" in n for n in names)
 
@@ -792,7 +881,7 @@ class TestSearchOpenApiSchema:
         names = {p["name"] for p in params}
         assert "sort" not in names
         assert "desc" not in names
-        assert {"limit", "offset"} <= names
+        assert {"limit", "cursor"} <= names
         assert SvcUnsortableWidget.get_sortable_fields() == []
 
     def test_search_response_items_typed_as_read_model(self) -> None:

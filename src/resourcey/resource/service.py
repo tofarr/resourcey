@@ -1,7 +1,7 @@
 """The auto-generated REST service for a resource.
 
 ``ResourceService`` is the central deliverable of issue #2. Bound to a
-``BaseResource`` subclass, it exposes the seven standard actions as
+``BaseResource`` subclass, it exposes the standard actions (create, read, update, delete, search, count, batch_read, batch_edit) as
 overridable async methods that each take an ``AsyncSession``. It contains
 logic (validation orchestration, error mapping, PATCH merge, pagination
 assembly, sort validation) and delegates data access to a
@@ -9,7 +9,7 @@ assembly, sort validation) and delegates data access to a
 
 The service is usable independently of HTTP — call its methods directly with
 an ``AsyncSession``. :meth:`ResourceService.register` is a thin convenience
-that mounts the seven actions onto a FastAPI app or router.
+that mounts the standard actions onto a FastAPI app or router.
 
 Auth is explicitly deferred to #4: an overridable :meth:`authorize` hook is
 a no-op by default and is called before every action, so a later PR can
@@ -31,6 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request as StarletteRequest
 
+from resourcey.resource.cursor import decode_cursor, encode_cursor
 from resourcey.resource.errors import InvalidInputError, NotFoundError
 from resourcey.resource.missing import MISSING
 from resourcey.resource.repository import ResourceRepository
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
+    from resourcey.encryption.encryption_service import EncryptionService
     from resourcey.resource.base import BaseResource
     from resourcey.util.search_filter import SearchFilter
 
@@ -48,22 +50,28 @@ T = TypeVar("T")
 
 
 class Page(BaseModel, Generic[T]):
-    """A page of search results with pagination metadata."""
+    """A page of cursor-paginated search results.
+
+    ``next_cursor`` is an opaque, encrypted keyset cursor pointing at the last
+    row of this page; pass it as the ``cursor`` query param on the next
+    request to fetch the following page. It is ``None`` when this page is the
+    last (no more rows follow). There is no ``total`` — counting is a separate
+    ``count`` action (issue #35).
+    """
 
     items: list[T]
-    total: int
     limit: int
-    offset: int
+    next_cursor: str | None
 
 
 # Default pagination bounds. ``limit`` is capped so a client cannot request
-# an unbounded scan; ``offset`` must be non-negative.
+# an unbounded scan.
 _DEFAULT_LIMIT = 20
 _MAX_LIMIT = 100
 
 
 class ResourceService:
-    """The service object exposing the seven standard resource actions.
+    """The service object exposing the standard resource actions.
 
     Constructed from a ``BaseResource`` subclass (and, optionally, a
     ``ResourceRepository`` subclass to override the default — escape hatch).
@@ -157,32 +165,55 @@ class ResourceService:
         session: AsyncSession,
         *,
         limit: int = _DEFAULT_LIMIT,
-        offset: int = 0,
+        cursor: str | None = None,
         sort: str | None = None,
         desc: bool = False,
         filters: SearchFilter[Any] | None = None,
     ) -> Page[Any]:
-        """Search with pagination, sort, and optional filters; return a :class:`Page`.
+        """Search with cursor pagination, sort, and optional filters; return a :class:`Page`.
 
-        ``sort`` is a single sortable field name (validated against the
+        ``cursor`` is an opaque, encrypted keyset cursor from a previous
+        page's ``next_cursor``; ``None`` (or omitted) starts from the first
+        page. ``sort`` is a single sortable field name (validated against the
         resource's ``sortable`` flag); ``desc`` selects descending order
-        (default ascending). Both are surfaced to :meth:`authorize`.
+        (default ascending). Both are surfaced to :meth:`authorize`. The
+        returned ``next_cursor`` is ``None`` when this page is the last.
         """
         await self.authorize(
-            session, "search", limit=limit, offset=offset, sort=sort, desc=desc, filters=filters
+            session, "search", limit=limit, cursor=cursor, sort=sort, desc=desc, filters=filters
         )
-        limit, offset = self._validate_pagination(limit, offset)
+        limit = self._validate_limit(limit)
         sort_parsed = self._parse_sort(sort, desc)
+        decoded_cursor = self._decode_cursor(cursor, sort_parsed)
+        # Fetch one extra row to detect whether a next page exists without a
+        # separate count query (keyset pagination does not use total/offset).
         items = await self.repository.search(
             session,
-            limit=limit,
-            offset=offset,
+            limit=limit + 1,
             sort=sort_parsed,
             filters=filters,
+            cursor=decoded_cursor,
             context=self._ctx(),
         )
-        total = await self.repository.count(session, filters=filters)
-        return Page(items=items, total=total, limit=limit, offset=offset)
+        has_next = len(items) > limit
+        items = items[:limit]
+        next_cursor = self._next_cursor(items, sort_parsed) if has_next else None
+        return Page(items=items, limit=limit, next_cursor=next_cursor)
+
+    async def count(
+        self,
+        session: AsyncSession,
+        *,
+        filters: SearchFilter[Any] | None = None,
+    ) -> int:
+        """Return the number of rows matching ``filters`` (decoupled from paging/sort).
+
+        Reuses the ``"search"`` permission — counting is not a separate
+        privilege from listing. Delegates to the repository's existing
+        ``count()`` (``select(func.count())`` with the same ``filters``).
+        """
+        await self.authorize(session, "search", filters=filters)
+        return await self.repository.count(session, filters=filters)
 
     async def batch_read(self, session: AsyncSession, ids: list[Any]) -> list[Any]:
         """Return read models in input order, omitting absent ids (per the spec)."""
@@ -213,14 +244,66 @@ class ResourceService:
     # Validation helpers
     # ------------------------------------------------------------------
 
-    def _validate_pagination(self, limit: int, offset: int) -> tuple[int, int]:
+    def _validate_limit(self, limit: int) -> int:
         if limit < 1:
             raise InvalidInputError(f"limit must be >= 1, got {limit}")
         if limit > _MAX_LIMIT:
             limit = _MAX_LIMIT
-        if offset < 0:
-            raise InvalidInputError(f"offset must be >= 0, got {offset}")
-        return limit, offset
+        return limit
+
+    def _encryption_service(self) -> EncryptionService:
+        """The encryption service used to encrypt/decrypt cursors.
+
+        Sourced from the serialization context (shared with at-rest field
+        encryption) when present, otherwise the process-wide singleton. The
+        singleton is always available in production (the encryption key is
+        required config); tests set ``RESOURCEY_ENCRYPTION_KEY_*`` env vars.
+        """
+        from resourcey.encryption.encryption_service import get_encryption_service
+
+        ctx = self._serialization_context
+        if ctx is not None:
+            enc = ctx.get("encryption_service")
+            if enc is not None:
+                return enc  # type: ignore[no-any-return]
+        return get_encryption_service()
+
+    def _sort_key_field(self, sort_parsed: tuple[str, bool] | None) -> str:
+        """The field whose value the cursor keys off (id when no sort is requested)."""
+        if sort_parsed is None:
+            return self.id_field
+        return sort_parsed[0]
+
+    def _decode_cursor(
+        self,
+        cursor: str | None,
+        sort_parsed: tuple[str, bool] | None,
+    ) -> tuple[Any, Any] | None:
+        """Decrypt an opaque cursor into a ``(sort_key, id)`` pair, or ``None``."""
+        if not cursor:
+            return None
+        try:
+            return decode_cursor(self._encryption_service(), cursor)
+        except (ValueError, KeyError) as exc:
+            raise InvalidInputError(f"Invalid or tampered cursor: {exc}") from exc
+
+    def _next_cursor(
+        self,
+        items: list[Any],
+        sort_parsed: tuple[str, bool] | None,
+    ) -> str | None:
+        """Encode a ``next_cursor`` from the last item, or ``None`` if the page is exhausted."""
+        if not items:
+            return None
+        last = items[-1]
+        field = self._sort_key_field(sort_parsed)
+        sort_key = getattr(last, field)
+        id_value = getattr(last, self.id_field)
+        return encode_cursor(
+            self._encryption_service(),
+            sort_key=sort_key,
+            id_value=id_value,
+        )
 
     def _parse_sort(self, sort: str | None, desc: bool) -> tuple[str, bool] | None:
         """Map a sort field name + ``desc`` flag to a ``(field, ascending)`` tuple.
@@ -240,7 +323,7 @@ class ResourceService:
         return sort, not desc
 
     # ------------------------------------------------------------------
-    # register — mount the seven actions onto a FastAPI app or router
+    # register — mount the standard actions onto a FastAPI app or router
     # ------------------------------------------------------------------
 
     def register(
@@ -251,13 +334,13 @@ class ResourceService:
         session_dependency: Callable[..., Any] | None = None,
         tags: list[str] | None = None,
     ) -> APIRouter:
-        """Build an :class:`APIRouter` with the seven routes and include it.
+        """Build an :class:`APIRouter` with the standard routes and include it.
 
         Accepts a ``FastAPI`` app, an ``APIRouter``, or any object with
         ``include_router`` (duck-typed). The ``{resource}`` path segment is
         the plural, lower-case, kebab-case name from
         ``resource.get_resource_path()``; action sub-paths use dashes
-        (``batch-read``, ``batch-edit``). ``tags`` defaults to
+        (``batch-read``, ``batch-edit``, ``count``). ``tags`` defaults to
         ``[<RESOURCE_NAME>]`` (the resource class name).
 
         Each route handler is a thin function: it resolves the
@@ -273,10 +356,11 @@ class ResourceService:
         session_dep = session_dependency or self._default_session_dependency()
 
         self._add_create_route(router, path, session_dep)
-        # Static sub-paths (batch-read / batch-edit / search) must be registered
-        # before the ``{id}`` routes, otherwise ``batch-read`` is captured as an
-        # id value by the ``/{resource}/{id}`` route.
+        # Static sub-paths (search / count / batch-read / batch-edit) must be
+        # registered before the ``{id}`` routes, otherwise ``batch-read`` is
+        # captured as an id value by the ``/{resource}/{id}`` route.
         self._add_search_route(router, path, session_dep)
+        self._add_count_route(router, path, session_dep)
         self._add_batch_read_route(router, path, id_type, session_dep)
         self._add_batch_edit_route(router, path, session_dep)
         self._add_read_route(router, path, id_type, session_dep)
@@ -377,7 +461,8 @@ class ResourceService:
 
         ``sort`` is an enum of the resource's sortable fields, so FastAPI
         validates it (422 on an unknown / injected value) before the handler
-        runs. ``desc`` selects direction (default ascending).
+        runs. ``desc`` selects direction (default ascending). ``cursor`` is
+        an opaque keyset cursor from a previous page's ``next_cursor``.
         """
         # A dynamic StrEnum (member names are the field names) gives OpenAPI a
         # concrete enum and FastAPI request validation that rejects unknown /
@@ -387,11 +472,12 @@ class ResourceService:
         )
         sort_default: Any = Query(default=None)
         desc_default: Any = Query(default=False)
+        cursor_default: Any = Query(default=None)
 
         async def handler(  # type: ignore[no-untyped-def]
             request,
             limit=_DEFAULT_LIMIT,
-            offset=0,
+            cursor=cursor_default,
             sort=sort_default,
             desc=desc_default,
             filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
@@ -401,7 +487,7 @@ class ResourceService:
             page = await service.search(
                 session,
                 limit=limit,
-                offset=offset,
+                cursor=cursor,
                 sort=sort.value if sort is not None else None,
                 desc=desc,
                 filters=resolved,
@@ -411,7 +497,7 @@ class ResourceService:
         handler.__annotations__ = {
             "request": Request,
             "limit": int,
-            "offset": int,
+            "cursor": str | None,
             "sort": sort_enum | None,
             "desc": bool,
             "session": AsyncSession,
@@ -429,13 +515,15 @@ class ResourceService:
 
         ``sort`` / ``desc`` are not exposed. A residual check preserves the
         contract that ``?sort=`` on a sortless resource is rejected (400)
-        rather than silently ignored.
+        rather than silently ignored. ``cursor`` is an opaque keyset cursor
+        from a previous page's ``next_cursor``.
         """
+        cursor_default: Any = Query(default=None)
 
         async def handler(  # type: ignore[no-untyped-def]
             request,
             limit=_DEFAULT_LIMIT,
-            offset=0,
+            cursor=cursor_default,
             filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
             session=Depends(session_dep),  # noqa: B008
         ):
@@ -445,16 +533,45 @@ class ResourceService:
                     f"it declares no sortable fields."
                 )
             resolved = self._resolve_filters(request, filter_cls, filters)
-            page = await service.search(session, limit=limit, offset=offset, filters=resolved)
+            page = await service.search(session, limit=limit, cursor=cursor, filters=resolved)
             return _json_response(page, self._ctx())
 
         handler.__annotations__ = {
             "request": Request,
             "limit": int,
-            "offset": int,
+            "cursor": str | None,
             "session": AsyncSession,
         }
         return handler
+
+    def _add_count_route(self, router: APIRouter, path: str, session_dep: Any) -> None:
+        """Register ``GET /{resource}/count`` — matching row count for a filter.
+
+        Accepts the same ``field__op=value`` filter query params as ``search``
+        (filter validation is shared via :meth:`_resolve_filters`), but no
+        ``sort`` / ``limit`` / ``cursor`` (ordering and paging are meaningless
+        for a count). Returns a bare integer. Permission reuses ``"search"``.
+        """
+        service = self
+        filter_cls = self.resource.get_search_filter_type()
+        filter_dep = self._filter_dependency(filter_cls) if filter_cls is not None else None
+        count_path = f"{path}/count"
+
+        async def handler(  # type: ignore[no-untyped-def]
+            request,
+            filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
+            session=Depends(session_dep),  # noqa: B008
+        ):
+            if {"sort", "desc", "limit", "cursor"} & set(request.query_params):
+                raise InvalidInputError(
+                    "count accepts only filter parameters; sort/limit/cursor are not allowed."
+                )
+            resolved = self._resolve_filters(request, filter_cls, filters)
+            total = await service.count(session, filters=resolved)
+            return _json_response(total, self._ctx())
+
+        handler.__annotations__ = {"request": Request, "session": AsyncSession}
+        self._route(router, count_path, ["GET"], handler, response_model=None)
 
     def _add_batch_read_route(
         self, router: APIRouter, path: str, id_type: Any, session_dep: Any
@@ -546,7 +663,7 @@ class ResourceService:
         vanish; (2) FastAPI only unfolds a model-typed query param into per-field
         params when it is the *sole* query param (``_get_flat_fields_from_params``
         checks ``len(fields) == 1``) — the search route always has
-        ``limit``/``offset``/``sort`` alongside it, so a model param would render
+        ``limit``/``cursor``/``sort`` alongside it, so a model param would render
         as a single ``$ref`` instead of separate filter params.
 
         Returns a callable suitable for ``Depends(...)``; it yields a validated
