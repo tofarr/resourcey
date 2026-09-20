@@ -103,9 +103,7 @@ class _EmbeddedCollection:
             cursor._limit = limit
         return cursor
 
-    async def update_one(
-        self, query: dict[str, Any], update: dict[str, Any]
-    ) -> UpdateResult:
+    async def update_one(self, query: dict[str, Any], update: dict[str, Any]) -> UpdateResult:
         result = self._col.update_one(query, update)
         return UpdateResult(result.raw_result, acknowledged=True)
 

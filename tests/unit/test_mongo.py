@@ -122,7 +122,9 @@ def _create_widget(label: str, *, size: int = 0, id: UUID | None = None) -> Any:
 
 class TestMongoCreate:
     @pytest.mark.asyncio
-    async def test_create_returns_read_model_with_id(self, widget_collection: AsyncMockCollection) -> None:
+    async def test_create_returns_read_model_with_id(
+        self, widget_collection: AsyncMockCollection
+    ) -> None:
         svc = MongoService(MongoWidget, collection=widget_collection)
         new_id = uuid4()
         result = await svc.create(_create_widget("gadget", id=new_id))
@@ -157,7 +159,9 @@ class TestMongoRead:
         assert result.label == "g"
 
     @pytest.mark.asyncio
-    async def test_read_missing_raises_not_found(self, widget_collection: AsyncMockCollection) -> None:
+    async def test_read_missing_raises_not_found(
+        self, widget_collection: AsyncMockCollection
+    ) -> None:
         svc = MongoService(MongoWidget, collection=widget_collection)
         with pytest.raises(NotFoundError):
             await svc.read(uuid4())
@@ -270,9 +274,7 @@ class TestMongoSearch:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
-                MongoDoc.get_create_model()(
-                    title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4()
-                )
+                MongoDoc.get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
             )
         page = await svc.search(limit=10, sort="ts")
         assert [item.ts.day for item in page.items] == [1, 2, 3]
@@ -283,9 +285,7 @@ class TestMongoSearch:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
-                MongoDoc.get_create_model()(
-                    title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4()
-                )
+                MongoDoc.get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
             )
         page = await svc.search(limit=10, sort="ts", desc=True)
         assert [item.ts.day for item in page.items] == [3, 2, 1]
@@ -307,9 +307,7 @@ class TestMongoSearch:
         assert page.limit <= 100
 
     @pytest.mark.asyncio
-    async def test_search_rejects_zero_limit(
-        self, widget_collection: AsyncMockCollection
-    ) -> None:
+    async def test_search_rejects_zero_limit(self, widget_collection: AsyncMockCollection) -> None:
         svc = MongoService(MongoWidget, collection=widget_collection)
         with pytest.raises(InvalidInputError):
             await svc.search(limit=0)
@@ -329,9 +327,7 @@ class TestMongoCount:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
-                MongoDoc.get_create_model()(
-                    title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4()
-                )
+                MongoDoc.get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
             )
         f = DocSearchFilter(ts__gte=base.replace(day=2))
         assert await svc.count(filters=f) == 2

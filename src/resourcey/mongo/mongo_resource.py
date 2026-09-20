@@ -165,7 +165,9 @@ class MongoResource(BaseResource):
             return
         collection = cls.get_collection()
         for spec in indexes:
-            await collection.create_index(spec["key"], name=spec.get("name"), **spec.get("options", {}))
+            await collection.create_index(
+                spec["key"], name=spec.get("name"), **spec.get("options", {})
+            )
 
     @classmethod
     def get_indexes(cls) -> list[dict[str, Any]]:
