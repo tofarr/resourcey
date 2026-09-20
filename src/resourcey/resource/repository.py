@@ -163,9 +163,11 @@ class ResourceRepository:
     ) -> list[Any]:
         """Return read-model instances for the given ids.
 
-        Preserves input order and omits absent ids. Duplicate ids in the
-        input are de-duplicated for the query then re-expanded to the input
-        order so each requested id maps to at most one result.
+        Maintains a 1:1 positional correspondence with the input: each
+        position ``i`` holds the read model for ``ids[i]`` or ``None`` if no
+        such entity exists. Duplicate ids in the input are de-duplicated for
+        the query then re-expanded to the input order, so each occurrence maps
+        to the same entity (or ``None``).
         """
         if not ids:
             return []
@@ -173,7 +175,7 @@ class ResourceRepository:
         stmt = select(self.model).where(self._id_column().in_(unique_ids))
         rows = (await session.execute(stmt)).scalars().all()
         by_id = {getattr(row, self.id_field): row for row in rows}
-        return [self._to_read_model(by_id[i], context) for i in unique_ids if i in by_id]
+        return [self._to_read_model(by_id[i], context) if i in by_id else None for i in ids]
 
     async def search(
         self,
