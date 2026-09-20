@@ -131,6 +131,12 @@ class ETagCacheStrategy(CacheStrategy[T]):
     ) -> CacheHeader:
         parts: list[bytes] = []
         for item in models:
+            # Batch results may carry positional ``None`` for absent ids; they
+            # hold no representational state, so they are skipped rather than
+            # hashed (two results with the same present items are cache-equivalent
+            # regardless of where the gaps sit).
+            if item is None:
+                continue
             parts.append(_canonical_json(item, context).encode("utf-8"))
             # A separator guards against adjacency ambiguity (the concatenation
             # of [a, b] vs [ab] for a single-item list).
