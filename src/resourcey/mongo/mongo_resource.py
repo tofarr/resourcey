@@ -16,6 +16,7 @@ schema-version field, but the framework does not prescribe it.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -26,21 +27,38 @@ from resourcey.util.naming import camel_to_snake, pluralize
 if TYPE_CHECKING:
     pass
 
+# AppContext cache key for the shared Mongo client. Resources look this up on
+# the context so an escape-hatch caller can pre-seed a client and skip the
+# default build.
+_MONGO_CLIENT_KEY = object()
+
+
+async def _clear_mongo_client() -> None:
+    """Disposer: null the cached Mongo client so a fresh app starts clean."""
+    MongoResource._client = None
+    MongoResource._db = None
+
+
+async def _noop_dispose() -> None:
+    """No-op disposer for clients that need no explicit close (embedded)."""
+
 
 class MongoResource(BaseResource):
     """A resource declaration backed by a MongoDB collection.
 
     Adds the Mongo concerns on top of :class:`BaseResource`: the collection
-    name, a ``motor`` client / collection factory set via :meth:`configure`,
-    and :meth:`open_service` yielding a
+    name, a ``motor`` client / database built by :meth:`lifespan` (via
+    :meth:`build_client`), and :meth:`open_service` yielding a
     :class:`~resourcey.mongo.mongo_service.MongoService`. There is no ORM
     model and no Alembic migration — a Mongo resource stores documents
     directly and upgrades them lazily via :meth:`migrate_document`.
     """
 
-    # ``motor`` client / collection used by ``open_service``. Set via
-    # :meth:`configure` before the app serves requests. ``None`` means
-    # unconfigured. ``ClassVar`` keeps it out of ``model_fields``.
+    # ``motor`` client / collection used by ``open_service``. Set by
+    # :meth:`lifespan` before the app serves requests. ``None`` means
+    # unconfigured. Cached on :class:`MongoResource` so all Mongo resources
+    # share one client (one connection pool). ``ClassVar`` keeps it out of
+    # ``model_fields``.
     _client: ClassVar[Any] = None
     _database_name: ClassVar[str] = "resourcey"
     _db: ClassVar[Any] = None
@@ -59,7 +77,8 @@ class MongoResource(BaseResource):
 
         Unlike ``SqlResource`` (which builds its ORM model so the table lands
         in metadata before migrations run), a Mongo resource has no schema to
-        materialise. Indexes are created lazily via :meth:`ensure_indexes`.
+        materialise. Indexes are created in :meth:`lifespan` via
+        :meth:`ensure_indexes`.
         """
 
     # ------------------------------------------------------------------
@@ -73,34 +92,89 @@ class MongoResource(BaseResource):
         return MongoService
 
     @classmethod
-    def configure(
-        cls,
-        *,
-        client: Any,
-        database_name: str = "resourcey",
-    ) -> None:
-        """Bind the ``motor`` client + database used by :meth:`open_service`.
+    @asynccontextmanager
+    async def lifespan(cls, ctx: Any) -> AsyncIterator[None]:
+        """Build (or reuse) the shared Mongo client, run indexes, then yield.
 
-        Typically called once by the app factory for each registered Mongo
-        resource so all resources share one client (and thus one connection
-        pool). The collection is resolved per-request from the database via
-        :meth:`get_collection_name`.
+        On entry: if no client is cached on :class:`MongoResource`, build one
+        via :meth:`build_client` and cache it on the base so all Mongo
+        resources share one connection pool. The client's disposer is
+        registered on ``ctx`` for app-level shutdown. A client pre-seeded on
+        ``ctx`` (the escape hatch) is adopted onto the class cache instead of
+        building — no disposer, the caller owns it. Then ``ensure_indexes``
+        runs for this resource's collection.
+
+        On exit: the disposer (registered on ``ctx``) closes the client and
+        clears the cached state, so a fresh ``create_app`` in the same process
+        starts clean.
         """
-        cls._client = client
-        cls._database_name = database_name
-        cls._db = client[database_name]
+        if MongoResource.__dict__.get("_client") is None:
+            if ctx.has(_MONGO_CLIENT_KEY):
+                # Escape hatch: adopt the caller-supplied client onto the
+                # class cache — the request path (get_collection) reads the
+                # class attributes, never ctx.
+                MongoResource._client = ctx.get(_MONGO_CLIENT_KEY)
+                MongoResource._db = MongoResource._client[MongoResource._database_name]
+            else:
+                client, database_name, dispose = cls.build_client(ctx)
+                MongoResource._client = client
+                MongoResource._database_name = database_name
+                MongoResource._db = client[database_name]
+                ctx.set(_MONGO_CLIENT_KEY, client)
+                ctx.add_disposer(dispose)
+        await cls.ensure_indexes()
+        # Always clear the class-level cache on shutdown so a fresh app in the
+        # same process does not see a stale (possibly closed) client.
+        ctx.add_disposer(_clear_mongo_client)
+        async with super().lifespan(ctx):
+            yield
+
+    @classmethod
+    def build_client(cls, ctx: Any) -> tuple[Any, str, Any]:
+        """Build the shared ``motor`` client + return its disposer.
+
+        Default: read ``mongo.url`` / ``mongo.database`` from the app config
+        (``ctx.config``). When the URL is ``embedded`` (or empty), use the
+        in-process :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient` — no
+        external MongoDB server required. Otherwise build a real ``motor``
+        client against the URL. Override to supply a custom client or point a
+        resource at a different database.
+
+        Returns:
+            ``(client, database_name, disposer)`` where ``disposer`` is a
+            no-arg async callable run on app shutdown (e.g. ``client.close``).
+        """
+        config = ctx.config
+        mongo = getattr(config, "mongo", None)
+        if mongo is not None:
+            url = mongo.url
+            database_name = mongo.database
+        else:
+            url = "embedded"
+            database_name = "resourcey"
+        url = (url or "embedded").strip()
+        client: Any
+        if not url or url == "embedded":
+            from resourcey.mongo.embedded import AsyncEmbeddedClient
+
+            client = AsyncEmbeddedClient()
+            return client, database_name, _noop_dispose
+        from motor.motor_asyncio import AsyncIOMotorClient
+
+        client = AsyncIOMotorClient(url)
+        return client, database_name, client.close
 
     @classmethod
     def get_collection(cls) -> Any:
         """The configured ``motor`` collection for this resource.
 
-        Raises if :meth:`configure` has not been called — a Mongo resource
-        cannot open a service without a client.
+        Raises if :meth:`lifespan` has not run — a Mongo resource cannot open
+        a service without a client.
         """
         if cls._db is None:
             raise ResourceyConfigError(
-                f"{cls.__name__} has no Mongo client configured; call "
-                f"{cls.__name__}.configure(client=...) (the app factory does this)."
+                f"{cls.__name__} has no Mongo client configured; "
+                "the app lifespan sets this via MongoResource.build_client."
             )
         return cls._db[cls.get_collection_name()]
 

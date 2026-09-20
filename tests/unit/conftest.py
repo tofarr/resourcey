@@ -83,3 +83,34 @@ def new_user(email: str, username: str | None = None, nickname: str | None = Non
 @pytest.fixture
 def make_user() -> Callable[..., User]:
     return new_user
+
+
+@pytest.fixture(autouse=True)
+def _reset_resource_caches():
+    """Clear SQL/Mongo class-level backend caches around every test.
+
+    Resources cache their session factory / Mongo client on the resource base
+    class (so all resources of a backend share one pool). Tests that set these
+    directly (bypassing the app lifespan) would leak across tests without this
+    reset. The app lifespan registers its own clearer on shutdown, but this
+    fixture covers direct-set tests too.
+    """
+    from resourcey.resource.sql import SqlResource
+
+    SqlResource._session_factory = None
+    try:
+        from resourcey.mongo.mongo_resource import MongoResource
+
+        MongoResource._client = None
+        MongoResource._db = None
+    except ImportError:
+        pass
+    yield
+    SqlResource._session_factory = None
+    try:
+        from resourcey.mongo.mongo_resource import MongoResource
+
+        MongoResource._client = None
+        MongoResource._db = None
+    except ImportError:
+        pass

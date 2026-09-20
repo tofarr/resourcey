@@ -153,7 +153,7 @@ async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
     per-request session) and mounts routes via ``register_routes``."""
 
     def _build(resource: type[SqlResource]) -> AsyncClient:
-        resource.configure(session_factory=session_factory)
+        resource._session_factory = session_factory
         app = FastAPI()
         register_routes(app, resource)
         register_error_handlers(app)
@@ -584,7 +584,7 @@ class TestServiceRepositoryOverride:
 class TestRegisterRoutes:
     @pytest.mark.asyncio
     async def test_all_seven_routes_registered(self, session_factory) -> None:
-        SvcWidget.configure(session_factory=session_factory)
+        SvcWidget._session_factory = session_factory
         app = FastAPI()
         router = register_routes(app, SvcWidget)
         paths = {(r.path, next(iter(r.methods))) for r in router.routes}
@@ -598,14 +598,14 @@ class TestRegisterRoutes:
 
     @pytest.mark.asyncio
     async def test_register_returns_router(self, session_factory) -> None:
-        SvcWidget.configure(session_factory=session_factory)
+        SvcWidget._session_factory = session_factory
         app = FastAPI()
         router = register_routes(app, SvcWidget)
         assert len(router.routes) == 8
 
     @pytest.mark.asyncio
     async def test_register_with_prefix(self, session_factory) -> None:
-        SvcWidget.configure(session_factory=session_factory)
+        SvcWidget._session_factory = session_factory
         app = FastAPI()
         register_routes(app, SvcWidget, prefix="/api/v1")
         register_error_handlers(app)
@@ -628,7 +628,7 @@ class TestRegisterRoutes:
 
     @pytest.mark.asyncio
     async def test_escape_hatch_custom_route_preserved(self, session_factory) -> None:
-        SvcWidget.configure(session_factory=session_factory)
+        SvcWidget._session_factory = session_factory
         app = FastAPI()
         # Register a custom GET /svc-widgets route BEFORE register_routes - it
         # should be kept (not overwritten) by the escape hatch.
@@ -918,7 +918,7 @@ def _build_app(resource: type[BaseResource]) -> FastAPI:
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    resource.configure(session_factory=factory)  # type: ignore[attr-defined]
+    resource._session_factory = factory  # type: ignore[attr-defined]
     app = FastAPI()
     register_routes(app, resource)
     register_error_handlers(app)

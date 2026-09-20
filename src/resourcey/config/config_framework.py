@@ -73,6 +73,28 @@ class DbConfig(BaseModel):
         )
 
 
+class MongoConfig(BaseModel):
+    """MongoDB connection configuration.
+
+    ``url`` is the ``mongodb://`` connection string. When empty or
+    ``"embedded"``, :meth:`MongoResource.build_client` uses the in-process
+    :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient` (no external
+    server) — the default for local development and tests.
+    """
+
+    url: str = Field(
+        default="embedded",
+        description=(
+            "MongoDB connection URL, or 'embedded' (the default) for the "
+            "in-process mongomock-backed client."
+        ),
+    )
+    database: str = Field(
+        default="resourcey",
+        description="MongoDB database name.",
+    )
+
+
 class MigrationConfig(BaseModel):
     """Alembic migration configuration.
 
@@ -99,6 +121,9 @@ class FrameworkConfig(BaseConfig):
 
     database: DbConfig = Field(
         default_factory=DbConfig, description="Database connection configuration."
+    )
+    mongo: MongoConfig = Field(
+        default_factory=MongoConfig, description="MongoDB connection configuration."
     )
     migrations: MigrationConfig = Field(
         default_factory=MigrationConfig, description="Alembic migration configuration."
