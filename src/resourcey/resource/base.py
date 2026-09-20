@@ -30,6 +30,8 @@ treated as declared fields) and are stored per-subclass.
 from __future__ import annotations
 
 import types
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import reduce
 from typing import (
     TYPE_CHECKING,
@@ -107,6 +109,35 @@ class BaseResource:
         build their backing model so it is available before migrations / table
         creation run.
         """
+
+    # ------------------------------------------------------------------
+    # App lifecycle
+    # ------------------------------------------------------------------
+
+    @classmethod
+    @asynccontextmanager
+    async def lifespan(cls, ctx: Any) -> AsyncIterator[None]:
+        """App-level async context manager: build + tear down backend state.
+
+        Entered by :func:`resourcey.app.create_app`'s lifespan for each
+        registered resource, with the shared :class:`~resourcey.app_context.AppContext`.
+        A storage-agnostic resource has nothing to build, so the base
+        implementation is a no-op yield. Storage-specific subclasses
+        (:class:`~resourcey.resource.sql.SqlResource`,
+        :class:`~resourcey.mongo.mongo_resource.MongoResource`) override this
+        to build / cache their connection pool and register disposal.
+
+        The resource pulls its dependencies from ``ctx`` (e.g.
+        ``ctx.config.database.database_url``) rather than receiving them as
+        ``configure()`` parameters, so the app factory stays storage-agnostic.
+        Override by replacing the whole method, or factor the build / teardown
+        into ``build_*`` hooks and keep this method's structure.
+
+        Args:
+            ctx: The app's :class:`~resourcey.app_context.AppContext` — a
+                trivial cache + disposer list, bypassable by pre-seeding.
+        """
+        yield
 
     # ------------------------------------------------------------------
     # Service + action surface

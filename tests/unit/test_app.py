@@ -29,7 +29,7 @@ from resourcey.app import create_app
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import clear_config_cache, get_config, set_config
 from resourcey.resource.errors import NotFoundError, ResourceyConfigError
-from resourcey.resource.sql import ResourceyBase
+from resourcey.resource.sql import ResourceyBase, SqlResource
 
 _CONFIG_CLASS_ENV = "RESOURCEY_CONFIG_CLASS"
 
@@ -260,9 +260,19 @@ class TestConfigEscapeHatches:
 
 class TestEngineEscapeHatches:
     @pytest.mark.asyncio
-    async def test_engine_arg_builds_factory_from_it(self):
+    async def test_app_context_pre_seeded_factory_reused(self):
+        # The app_context escape hatch: a caller pre-seeds the SQL session
+        # factory on the context so SqlResource.lifespan skips building an
+        # engine. Replaces the old engine= arg.
+        from resourcey.app_context import AppContext
+        from resourcey.resource.sql import _SESSION_FACTORY_KEY
+
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-        app = create_app(resources=[], engine=engine)
+        factory = async_sessionmaker(engine, expire_on_commit=False)
+        ctx = AppContext(FrameworkConfig())
+        ctx.set(_SESSION_FACTORY_KEY, factory)
+        SqlResource._session_factory = factory
+        app = create_app(resources=[], app_context=ctx)
         assert app.router.lifespan_context is not None
         await engine.dispose()
 
@@ -287,6 +297,64 @@ class TestEngineEscapeHatches:
             pass
         async with sqlite_factory() as session:
             assert session is not None
+
+
+class TestResourceLifespan:
+    """Tests for the resource-level lifespan protocol (issue #49)."""
+
+    @pytest.mark.asyncio
+    async def test_sql_lifespan_builds_session_factory_from_config(self, monkeypatch):
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+
+        monkeypatch.setenv("RESOURCEY_DATABASE_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+        FrameworkConfig.clear_instance_cache()
+        cfg = FrameworkConfig()
+        ctx = AppContext(cfg)
+        assert SqlResource._session_factory is None
+        async with SqlResource.lifespan(ctx):
+            factory = SqlResource.get_session_factory()
+            assert isinstance(factory, async_sessionmaker)
+        # The lifespan registers a clearer on ctx; create_app calls aclose.
+        await ctx.aclose()
+        assert SqlResource._session_factory is None
+
+    @pytest.mark.asyncio
+    async def test_sql_lifespan_reuses_pre_seeded_factory(self, sqlite_factory):
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+        from resourcey.resource.sql import _SESSION_FACTORY_KEY
+
+        ctx = AppContext(FrameworkConfig())
+        ctx.set(_SESSION_FACTORY_KEY, sqlite_factory)
+        SqlResource._session_factory = sqlite_factory
+        async with SqlResource.lifespan(ctx):
+            assert SqlResource.get_session_factory() is sqlite_factory
+        await ctx.aclose()
+        assert SqlResource._session_factory is None
+
+    @pytest.mark.asyncio
+    async def test_sql_build_session_factory_returns_disposer(self):
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+
+        ctx = AppContext(FrameworkConfig())
+        factory, dispose = SqlResource.build_session_factory(ctx)
+        assert factory is not None
+        await dispose()
+
+    @pytest.mark.asyncio
+    async def test_base_resource_lifespan_is_noop(self):
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+        from resourcey.resource.base import BaseResource
+
+        ctx = AppContext(FrameworkConfig())
+        # The base lifespan is a no-op yield — entering/exiting must not raise.
+        async with BaseResource.lifespan(ctx):
+            pass
 
 
 # ---------------------------------------------------------------------------

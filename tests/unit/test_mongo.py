@@ -90,24 +90,35 @@ class MongoVersioned(MongoResource):
 # ---------------------------------------------------------------------------
 
 
+def _bind_client(resource: type, client: Any, database_name: str = "test") -> None:
+    """Set the Mongo client/db cache directly (replaces the old ``configure``).
+
+    Cached on :class:`MongoResource` (the base) to match the lifespan's
+    caching strategy — all Mongo resources share one client.
+    """
+    MongoResource._client = client
+    MongoResource._database_name = database_name
+    MongoResource._db = client[database_name]
+
+
 @pytest_asyncio.fixture
 async def widget_collection() -> _EmbeddedCollection:
     client = make_mock_client()
-    MongoWidget.configure(client=client, database_name="test")
+    _bind_client(MongoWidget, client)
     return client["test"][MongoWidget.get_collection_name()]
 
 
 @pytest_asyncio.fixture
 async def doc_collection() -> _EmbeddedCollection:
     client = make_mock_client()
-    MongoDoc.configure(client=client, database_name="test")
+    _bind_client(MongoDoc, client)
     return client["test"][MongoDoc.get_collection_name()]
 
 
 @pytest_asyncio.fixture
 async def versioned_collection() -> _EmbeddedCollection:
     client = make_mock_client()
-    MongoVersioned.configure(client=client, database_name="test")
+    _bind_client(MongoVersioned, client)
     return client["test"][MongoVersioned.get_collection_name()]
 
 
@@ -552,3 +563,62 @@ class TestImportGuard:
         sys.modules.pop("resourcey.mongo", None)
         with pytest.raises(ImportError, match="mongodb"):
             importlib.import_module("resourcey.mongo")
+
+
+class TestMongoLifecycle:
+    """Tests for the app-level lifespan / build_client protocol (issue #49)."""
+
+    @pytest.mark.asyncio
+    async def test_lifespan_builds_embedded_client_by_default(self) -> None:
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+
+        ctx = AppContext(FrameworkConfig())
+        async with MongoWidget.lifespan(ctx):
+            # Cached on the base so all Mongo resources share one client.
+            assert MongoResource._client is not None
+            assert MongoResource._db is not None
+            coll = MongoWidget.get_collection()
+            assert coll is not None
+        # The lifespan registers a clearer on ctx; create_app calls aclose.
+        await ctx.aclose()
+        assert MongoResource._client is None
+        assert MongoResource._db is None
+
+    @pytest.mark.asyncio
+    async def test_lifespan_reuses_pre_seeded_client(self) -> None:
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+        from resourcey.mongo.embedded import AsyncEmbeddedClient
+        from resourcey.mongo.mongo_resource import _MONGO_CLIENT_KEY
+
+        ctx = AppContext(FrameworkConfig())
+        pre = AsyncEmbeddedClient()
+        ctx.set(_MONGO_CLIENT_KEY, pre)
+        # Pre-seed the class cache too, as create_app's session_factory path does.
+        MongoResource._client = pre
+        MongoResource._db = pre["resourcey"]
+        async with MongoWidget.lifespan(ctx):
+            # Should reuse the pre-seeded client, not build a new one.
+            assert MongoResource._client is pre
+        await ctx.aclose()
+        assert MongoResource._client is None
+
+    @pytest.mark.asyncio
+    async def test_build_client_reads_mongo_config(self) -> None:
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig, MongoConfig
+
+        cfg = FrameworkConfig()
+        cfg.mongo = MongoConfig(url="embedded", database="custom_db")
+        ctx = AppContext(cfg)
+        client, db_name, dispose = MongoWidget.build_client(ctx)
+        assert client is not None
+        assert db_name == "custom_db"
+        await dispose()
+
+    @pytest.mark.asyncio
+    async def test_get_collection_raises_when_unconfigured(self) -> None:
+        # After reset (autouse fixture clears the cache), get_collection raises.
+        with pytest.raises(ResourceyConfigError, match="no Mongo client configured"):
+            MongoWidget.get_collection()

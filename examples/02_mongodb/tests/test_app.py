@@ -20,12 +20,16 @@ from message_board.thread import Thread
 
 @pytest_asyncio.fixture
 async def client() -> AsyncIterator[AsyncClient]:
-    # Register + configure resources against a fresh embedded client.
+    # Pre-seed an embedded Mongo client on the shared cache so the app's
+    # lifespan reuses it. The framework factory enters each resource's
+    # lifespan, which finds the client cached and skips building.
     from resourcey.mongo.embedded import AsyncEmbeddedClient
+    from resourcey.mongo.mongo_resource import MongoResource
 
     client_obj = AsyncEmbeddedClient()
-    Thread.configure(client=client_obj, database_name="test")
-    Message.configure(client=client_obj, database_name="test")
+    MongoResource._client = client_obj
+    MongoResource._database_name = "test"
+    MongoResource._db = client_obj["test"]
 
     app = create_app()
     transport = ASGITransport(app=app)
