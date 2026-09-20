@@ -29,11 +29,10 @@ is the integration test that API must keep satisfying).
 01_message_board/
 ├── README.md            # this file
 ├── pyproject.toml       # standalone project — depends on resourcey from git
-├── .env.example         # copy to .env and edit
+├── .env                 # SQLite config + resources (committed, ready to run)
 ├── .gitignore
 ├── message_board/       # the importable app package
 │   ├── app.py           # create_app() entry point (uvicorn factory)
-│   ├── config.py        # MessageBoardConfig — SQLite by default
 │   ├── resources.py     # registers Thread + Message with the framework
 │   ├── thread.py        # Thread resource declaration
 │   └── message.py       # Message resource declaration + MessageSearchFilter
@@ -52,7 +51,6 @@ directory:
 uv sync
 
 # 2. Apply the database migration (creates message_board.db)
-cp .env.example .env             # activate the SQLite config + resources
 resourcey migrate upgrade
 
 # 3. Start the server
@@ -70,20 +68,20 @@ Interactive API docs are at `http://127.0.0.1:8081/docs`.
 
 ### Configuration
 
-The example uses `MessageBoardConfig` (a `FrameworkConfig` subclass) which
-defaults to a local SQLite file (`message_board.db`). Override via env vars
-(see `.env.example`):
+The example uses the stock `FrameworkConfig` with a committed `.env` that
+points it at a local SQLite file (`message_board.db`). SQLite URLs don't fit
+the structured `protocol://user:pass@host:port/db` pattern, so the
+`RESOURCEY_DATABASE_FULL_DB_URL` escape hatch is used to pass the complete
+URL verbatim. Edit `.env` to change the database or server bind:
 
-| Env var                          | Default               | Purpose                          |
-| -------------------------------- | --------------------- | -------------------------------- |
-| `RESOURCEY_DATABASE_PROTOCOL`    | `sqlite+aiosqlite`    | Async SQLAlchemy driver.          |
-| `RESOURCEY_DATABASE_DB_NAME`     | `message_board.db`    | SQLite file path (or `:memory:`). |
-| `RESOURCEY_HOST` / `RESOURCEY_PORT` | `0.0.0.0` / `8081` | App server bind.                |
-| `RESOURCEY_RESOURCES`            | _(set in .env)_       | Dotted import paths to resources. |
+| Env var                            | Default                           | Purpose                          |
+| ---------------------------------- | --------------------------------- | -------------------------------- |
+| `RESOURCEY_DATABASE_FULL_DB_URL`   | `sqlite+aiosqlite:///message_board.db` | Complete SQLAlchemy URL (SQLite escape hatch). |
+| `RESOURCEY_HOST` / `RESOURCEY_PORT` | `0.0.0.0` / `8081`               | App server bind.                |
+| `RESOURCEY_RESOURCES`              | _(set in .env)_                   | Dotted import paths to resources. |
 
-To target Postgres instead, point `RESOURCEY_DATABASE_*` at your asyncpg
-connection (or drop `RESOURCEY_CONFIG_CLASS` and use the stock
-`FrameworkConfig` defaults).
+To target Postgres instead, unset `RESOURCEY_DATABASE_FULL_DB_URL` and set the
+structured `RESOURCEY_DATABASE_*` vars (`HOST`, `PORT`, `DB_NAME`, etc.).
 
 ## Example HTTP requests
 

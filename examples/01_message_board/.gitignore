@@ -4,7 +4,7 @@ message_board.db-*
 
 # uv (standalone project)
 .venv/
+uv.lock
 
-# dotenv (copy of .env.example)
-.env
+# tooling caches
 .ruff_cache/

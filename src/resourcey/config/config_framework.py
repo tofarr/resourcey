@@ -36,6 +36,11 @@ class DbConfig(BaseModel):
     as a single connection string, so each component can be injected
     independently. Use the :attr:`database_url` property to get the assembled
     ``postgresql+asyncpg`` URL.
+
+    For databases whose URL shape doesn't fit the ``protocol://user:pass@
+    host:port/db`` pattern (notably SQLite, which is
+    ``sqlite+aiosqlite:///path/to/file.db``), set :attr:`full_db_url` to the
+    complete URL. When set, it takes precedence over the structured fields.
     """
 
     protocol: str = Field(default="postgresql+asyncpg", description="Database driver protocol.")
@@ -44,10 +49,24 @@ class DbConfig(BaseModel):
     db_name: str = Field(default="resourcey", description="Database name.")
     username: str = Field(default="resourcey", description="Database username.")
     password: str = Field(default="resourcey", description="Database password.")
+    full_db_url: str | None = Field(
+        default=None,
+        description=(
+            "Complete SQLAlchemy URL override (takes precedence over the "
+            "structured fields). Use for SQLite or any URL that doesn't fit "
+            "the protocol://user:pass@host:port/db pattern."
+        ),
+    )
 
     @property
     def database_url(self) -> str:
-        """Assemble the async SQLAlchemy URL from the structured fields."""
+        """Assemble the async SQLAlchemy URL from the structured fields.
+
+        Returns :attr:`full_db_url` verbatim when set (the escape hatch for
+        SQLite etc.); otherwise assembles ``protocol://user:pass@host:port/db``.
+        """
+        if self.full_db_url is not None:
+            return self.full_db_url
         return (
             f"{self.protocol}://{self.username}:"
             f"{self.password}@{self.host}:{self.port}/{self.db_name}"
