@@ -21,7 +21,7 @@ from __future__ import annotations
 import enum
 import inspect
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
@@ -44,10 +44,13 @@ if TYPE_CHECKING:
     from resourcey.util.search_filter import SearchFilter
 
 
-class Page(BaseModel):
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
     """A page of search results with pagination metadata."""
 
-    items: list[Any]
+    items: list[T]
     total: int
     limit: int
     offset: int
@@ -158,7 +161,7 @@ class ResourceService:
         sort: str | None = None,
         desc: bool = False,
         filters: SearchFilter[Any] | None = None,
-    ) -> Page:
+    ) -> Page[Any]:
         """Search with pagination, sort, and optional filters; return a :class:`Page`.
 
         ``sort`` is a single sortable field name (validated against the
@@ -346,6 +349,7 @@ class ResourceService:
         filter_cls = self.resource.get_search_filter_type()
         filter_dep = self._filter_dependency(filter_cls) if filter_cls is not None else None
         sortable = self.resource.get_sortable_fields()
+        read_model = self.read_model
 
         if sortable:
             handler = self._sortable_search_handler(
@@ -353,7 +357,13 @@ class ResourceService:
             )
         else:
             handler = self._sortless_search_handler(service, filter_cls, filter_dep, session_dep)
-        self._route(router, path, ["GET"], handler, response_model=None)
+        self._route(
+            router,
+            path,
+            ["GET"],
+            handler,
+            response_model=Page[read_model],  # type: ignore[valid-type]
+        )
 
     def _sortable_search_handler(
         self,

@@ -794,3 +794,15 @@ class TestSearchOpenApiSchema:
         assert "desc" not in names
         assert {"limit", "offset"} <= names
         assert SvcUnsortableWidget.get_sortable_fields() == []
+
+    def test_search_response_items_typed_as_read_model(self) -> None:
+        """The search endpoint's 200 response references the read model, not bare Any."""
+        app = _build_app(SvcWidget)
+        schema = _openapi(app)
+        response = schema["paths"]["/svc-widgets"]["get"]["responses"]["200"]
+        ref = response["content"]["application/json"]["schema"]["$ref"]
+        page_name = ref.split("/")[-1]
+        page_schema = schema["components"]["schemas"][page_name]
+        items = page_schema["properties"]["items"]
+        assert items["type"] == "array"
+        assert items["items"]["$ref"] == "#/components/schemas/SvcWidgetRead"
