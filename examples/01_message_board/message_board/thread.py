@@ -11,10 +11,10 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from pydantic import Field
-from resourcey.resource.base import BaseResource
+from resourcey.resource.sql import SqlResource
 
 
-class Thread(BaseResource):
+class Thread(SqlResource):
     """A message-board thread.
 
     Fields:

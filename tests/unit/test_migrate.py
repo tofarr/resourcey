@@ -30,12 +30,13 @@ from resourcey.cli import main as cli_main
 from resourcey.config.config_framework import FrameworkConfig, MigrationConfig
 from resourcey.config.config_runtime import clear_config_cache, set_config
 from resourcey.migrate import migrate_runner
-from resourcey.resource.base import BaseResource, ResourceyBase
+from resourcey.resource.base import BaseResource
 from resourcey.resource.registry import (
     clear_registry,
     get_registered_resources,
     register_resource,
 )
+from resourcey.resource.sql import ResourceyBase, SqlResource
 
 _RESOURCE_A = "migrate_resources_a.Widget"
 _RESOURCE_B = "migrate_resources_b.Gadget"
@@ -167,7 +168,7 @@ class TestMigrationConfig:
 
 class TestResourceRegistry:
     def test_register_materialises_model_and_records(self):
-        class Gadget(BaseResource):
+        class Gadget(SqlResource):
             id: int
             name: str
 
@@ -176,14 +177,14 @@ class TestResourceRegistry:
         assert "gadgets" in ResourceyBase.metadata.tables
 
     def test_register_returns_class(self):
-        class Gizmo(BaseResource):
+        class Gizmo(SqlResource):
             id: int
 
         result = register_resource(Gizmo)
         assert result is Gizmo
 
     def test_register_is_idempotent(self):
-        class Doohickey(BaseResource):
+        class Doohickey(SqlResource):
             id: int
 
         register_resource(Doohickey)
@@ -195,10 +196,10 @@ class TestResourceRegistry:
             register_resource(int)  # type: ignore[arg-type]
 
     def test_register_preserves_order(self):
-        class Alpha(BaseResource):
+        class Alpha(SqlResource):
             id: int
 
-        class Beta(BaseResource):
+        class Beta(SqlResource):
             id: int
 
         register_resource(Beta)
@@ -207,7 +208,7 @@ class TestResourceRegistry:
         assert resources.index(Beta) < resources.index(Alpha)
 
     def test_clear_registry(self):
-        class Ephemeral(BaseResource):
+        class Ephemeral(SqlResource):
             id: int
 
         register_resource(Ephemeral)

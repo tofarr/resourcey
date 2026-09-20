@@ -1,18 +1,18 @@
 """The app factory that assembles a runnable FastAPI application.
 
 :func:`create_app` is the wiring layer (issue #21) that connects the
-already-built pieces — config (:mod:`resourcey.config.config_runtime`),
-:class:`~resourcey.resource.service.ResourceService`, and the error envelope
-— into a single process a developer can launch.
+already-built pieces - config (:mod:`resourcey.config.config_runtime`),
+:mod:`resourcey.resource.routes`, and the error envelope - into a single
+process a developer can launch.
 
 Config is read lazily via :func:`~resourcey.config.config_runtime.get_config`
 (never at module import time). The factory builds an async engine +
 ``async_sessionmaker`` from ``config.database.database_url``, wires a
-Starlette lifespan that owns the engine lifecycle (create/dispose only —
+Starlette lifespan that owns the engine lifecycle (create/dispose only -
 structured so lifecycle hooks (#15) can be added later), configures CORS
-middleware from ``config.cors_origins``, registers the error envelope, and
-mounts the REST endpoints for each registered resource via
-:class:`ResourceService`.
+middleware from ``config.cors_origins``, registers the error envelope,
+configures each resource's session factory, and mounts the REST endpoints
+for each registered resource via :func:`resourcey.resource.routes.register_routes`.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ from resourcey.config.config_runtime import (
     set_config,
 )
 from resourcey.resource.base import BaseResource
-from resourcey.resource.service import ResourceService, register_error_handlers
+from resourcey.resource.routes import register_error_handlers, register_routes
 
 
 def create_app(
@@ -94,8 +94,11 @@ def create_app(
     register_error_handlers(app)
 
     for resource in resolved_resources:
-        service = ResourceService(resource, session_factory=resolved_factory)
-        service.register(app)
+        # Configure the session factory on the resource so its ``open_service``
+        # can open a per-request session, then mount the standard-action
+        # routes (only those in ``resource.get_supported_actions()``).
+        resource.configure(session_factory=resolved_factory)  # type: ignore[attr-defined]
+        register_routes(app, resource)
 
     return app
 

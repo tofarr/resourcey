@@ -39,10 +39,11 @@ _registry: dict[type[BaseResource], None] = {}
 def register_resource(cls: type[BaseResource]) -> type[BaseResource]:
     """Register a resource class with the framework.
 
-    Validates ``cls`` is a :class:`BaseResource` subclass, builds its
-    SQLAlchemy ORM model (registering the derived table in
-    :data:`ResourceyBase.metadata`), and records it in the registry. Returns
-    ``cls`` so it can be used inline::
+    Validates ``cls`` is a :class:`BaseResource` subclass, calls its
+    :meth:`BaseResource._on_register` hook (storage-specific subclasses build
+    their backing model there, e.g. ``SqlResource`` registers its table in
+    :data:`~resourcey.resource.sql.ResourceyBase.metadata`), and records it in
+    the registry. Returns ``cls`` so it can be used inline::
 
         register_resource(User).get_resource_path()
 
@@ -53,7 +54,7 @@ def register_resource(cls: type[BaseResource]) -> type[BaseResource]:
     if not isinstance(cls, type) or not issubclass(cls, BaseResource):
         raise TypeError(f"register_resource expects a BaseResource subclass, got {cls!r}")
     if cls not in _registry:
-        cls.get_sql_alchemy_model()
+        cls._on_register()
         _registry[cls] = None
     return cls
 

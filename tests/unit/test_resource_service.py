@@ -29,16 +29,14 @@ from sqlalchemy import Column, String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from resourcey.resource.base import BaseResource, ResourceyBase
+from resourcey.resource.base import BaseResource
 from resourcey.resource.errors import InvalidInputError, NotFoundError
 from resourcey.resource.field import ResourceyField
 from resourcey.resource.repository import ResourceRepository
-from resourcey.resource.service import (
-    Page,
-    ResourceService,
-    ResourceServiceError,
-    register_error_handlers,
-)
+from resourcey.resource.routes import register_error_handlers, register_routes
+from resourcey.resource.service import Page, SqlService
+from resourcey.resource.service_base import Action, BaseService
+from resourcey.resource.sql import ResourceyBase, SqlResource
 from resourcey.util.search_filter import BaseSearchFilter
 
 # ---------------------------------------------------------------------------
@@ -46,7 +44,7 @@ from resourcey.util.search_filter import BaseSearchFilter
 # ---------------------------------------------------------------------------
 
 
-class SvcWidget(BaseResource):
+class SvcWidget(SqlResource):
     """A simple resource for CRUD tests — int id, required label, optional size."""
 
     id: int
@@ -55,7 +53,7 @@ class SvcWidget(BaseResource):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class SvcGadget(BaseResource):
+class SvcGadget(SqlResource):
     """A resource with a unique constraint to exercise the 409 conflict path."""
 
     id: int
@@ -73,7 +71,7 @@ class GadgetSearchFilter(BaseSearchFilter[_GadgetOrm]):
     serial__contains: str | None = None
 
 
-class SvcFilterableWidget(BaseResource):
+class SvcFilterableWidget(SqlResource):
     """A resource that opts into filtering via a declared search filter class."""
 
     id: int
@@ -95,7 +93,7 @@ class SvcFilterableWidget(BaseResource):
         return _Filter
 
 
-class SvcUnsortableWidget(BaseResource):
+class SvcUnsortableWidget(SqlResource):
     """A resource whose every field is opted out of sorting.
 
     Exercises the ``sort`` / ``desc`` params being omitted from the OpenAPI
@@ -109,7 +107,7 @@ class SvcUnsortableWidget(BaseResource):
     ]
 
 
-class SvcDtWidget(BaseResource):
+class SvcDtWidget(SqlResource):
     """A resource with a creatable, sortable datetime field for cursor type round-trip tests."""
 
     id: int
@@ -149,11 +147,15 @@ async def session(session_factory: async_sessionmaker[AsyncSession]) -> AsyncSes
 @pytest_asyncio.fixture
 async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
     """Factory building an httpx AsyncClient against a FastAPI app with the
-    given service's routes registered + error handlers installed."""
+    given resource's routes registered + error handlers installed.
 
-    def _build(service: ResourceService) -> AsyncClient:
+    Configures the resource's session factory (so ``open_service`` can open a
+    per-request session) and mounts routes via ``register_routes``."""
+
+    def _build(resource: type[SqlResource]) -> AsyncClient:
+        resource.configure(session_factory=session_factory)
         app = FastAPI()
-        service.register(app)
+        register_routes(app, resource)
         register_error_handlers(app)
         return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
@@ -168,8 +170,8 @@ async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
 class TestServiceCreate:
     @pytest.mark.asyncio
     async def test_create_returns_read_model_with_generated_id(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        result = await svc.create(session, SvcWidget.get_create_model()(label="gadget"))
+        svc = SqlService(SvcWidget, session=session)
+        result = await svc.create(SvcWidget.get_create_model()(label="gadget"))
         assert result.id == 1
         assert result.label == "gadget"
         assert result.size == 0
@@ -177,82 +179,82 @@ class TestServiceCreate:
 
     @pytest.mark.asyncio
     async def test_create_populates_default_factory_timestamps(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        result = await svc.create(session, SvcWidget.get_create_model()(label="x"))
+        svc = SqlService(SvcWidget, session=session)
+        result = await svc.create(SvcWidget.get_create_model()(label="x"))
         # created_at is not creatable (excluded from create model) but the
         # repository supplements its default_factory so it is never NULL.
         assert result.created_at is not None
 
     @pytest.mark.asyncio
     async def test_create_drops_missing_optional_fields(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         # size is optional (default 0); omitting it should store 0, not MISSING.
-        result = await svc.create(session, SvcWidget.get_create_model()(label="x"))
+        result = await svc.create(SvcWidget.get_create_model()(label="x"))
         assert result.size == 0
 
 
 class TestServiceRead:
     @pytest.mark.asyncio
     async def test_read_returns_entity(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        created = await svc.create(session, SvcWidget.get_create_model()(label="g"))
-        result = await svc.read(session, created.id)
+        svc = SqlService(SvcWidget, session=session)
+        created = await svc.create(SvcWidget.get_create_model()(label="g"))
+        result = await svc.read(created.id)
         assert result.label == "g"
 
     @pytest.mark.asyncio
     async def test_read_missing_raises_not_found(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         with pytest.raises(NotFoundError):
-            await svc.read(session, 999)
+            await svc.read(999)
 
 
 class TestServiceUpdate:
     @pytest.mark.asyncio
     async def test_update_applies_patch(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        created = await svc.create(session, SvcWidget.get_create_model()(label="g", size=1))
-        result = await svc.update(session, created.id, SvcWidget.get_update_model()(size=99))
+        svc = SqlService(SvcWidget, session=session)
+        created = await svc.create(SvcWidget.get_create_model()(label="g", size=1))
+        result = await svc.update(created.id, SvcWidget.get_update_model()(size=99))
         assert result.size == 99
         assert result.label == "g"  # untouched (PATCH semantics)
 
     @pytest.mark.asyncio
     async def test_update_missing_raises_not_found(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         with pytest.raises(NotFoundError):
-            await svc.update(session, 999, SvcWidget.get_update_model()(size=1))
+            await svc.update(999, SvcWidget.get_update_model()(size=1))
 
     @pytest.mark.asyncio
     async def test_update_empty_payload_returns_current(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        created = await svc.create(session, SvcWidget.get_create_model()(label="g"))
+        svc = SqlService(SvcWidget, session=session)
+        created = await svc.create(SvcWidget.get_create_model()(label="g"))
         # An update model with no fields set — nothing to change.
-        result = await svc.update(session, created.id, SvcWidget.get_update_model()())
+        result = await svc.update(created.id, SvcWidget.get_update_model()())
         assert result.id == created.id
 
 
 class TestServiceDelete:
     @pytest.mark.asyncio
     async def test_delete_removes_entity(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        created = await svc.create(session, SvcWidget.get_create_model()(label="g"))
-        await svc.delete(session, created.id)
+        svc = SqlService(SvcWidget, session=session)
+        created = await svc.create(SvcWidget.get_create_model()(label="g"))
+        await svc.delete(created.id)
         with pytest.raises(NotFoundError):
-            await svc.read(session, created.id)
+            await svc.read(created.id)
 
     @pytest.mark.asyncio
     async def test_delete_missing_raises_not_found(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         with pytest.raises(NotFoundError):
-            await svc.delete(session, 999)
+            await svc.delete(999)
 
 
 class TestServiceSearch:
     @pytest.mark.asyncio
     async def test_search_returns_page_with_metadata(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         for i in range(3):
-            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, limit=10)
+            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(limit=10)
         assert isinstance(page, Page)
         assert len(page.items) == 3
         assert page.limit == 10
@@ -261,56 +263,56 @@ class TestServiceSearch:
 
     @pytest.mark.asyncio
     async def test_search_cursor_pagination(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         for i in range(5):
-            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, limit=2)
+            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(limit=2)
         assert len(page.items) == 2
         assert page.next_cursor is not None
-        page2 = await svc.search(session, limit=2, cursor=page.next_cursor)
+        page2 = await svc.search(limit=2, cursor=page.next_cursor)
         assert len(page2.items) == 2
         # Cursor advances — no overlap with the first page.
         assert {item.id for item in page2.items}.isdisjoint({item.id for item in page.items})
-        page3 = await svc.search(session, limit=2, cursor=page2.next_cursor)
+        page3 = await svc.search(limit=2, cursor=page2.next_cursor)
         assert len(page3.items) == 1
         assert page3.next_cursor is None
 
     @pytest.mark.asyncio
     async def test_search_cursor_pagination_with_sort(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         for i in [3, 1, 2]:
-            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, limit=2, sort="size")
+            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(limit=2, sort="size")
         assert [item.size for item in page.items] == [1, 2]
         assert page.next_cursor is not None
-        page2 = await svc.search(session, limit=2, sort="size", cursor=page.next_cursor)
+        page2 = await svc.search(limit=2, sort="size", cursor=page.next_cursor)
         assert [item.size for item in page2.items] == [3]
         assert page2.next_cursor is None
 
     @pytest.mark.asyncio
     async def test_search_invalid_cursor_raises(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        await svc.create(session, SvcWidget.get_create_model()(label="g0", size=0))
+        svc = SqlService(SvcWidget, session=session)
+        await svc.create(SvcWidget.get_create_model()(label="g0", size=0))
         with pytest.raises(InvalidInputError):
-            await svc.search(session, cursor="not-a-valid-cursor")
+            await svc.search(cursor="not-a-valid-cursor")
 
     @pytest.mark.asyncio
     async def test_search_cursor_sort_mismatch_raises(self, session: AsyncSession) -> None:
         """A cursor built for sort=size must not be reused under a different sort."""
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         for i in range(5):
-            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, limit=2, sort="size")
+            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(limit=2, sort="size")
         assert page.next_cursor is not None
         # Reusing the size-sorted cursor under no sort -> 400.
         with pytest.raises(InvalidInputError):
-            await svc.search(session, limit=2, cursor=page.next_cursor)
+            await svc.search(limit=2, cursor=page.next_cursor)
         # Reusing under a different sort field -> 400.
         with pytest.raises(InvalidInputError):
-            await svc.search(session, limit=2, sort="label", cursor=page.next_cursor)
+            await svc.search(limit=2, sort="label", cursor=page.next_cursor)
         # Reusing under a different direction -> 400.
         with pytest.raises(InvalidInputError):
-            await svc.search(session, limit=2, sort="size", desc=True, cursor=page.next_cursor)
+            await svc.search(limit=2, sort="size", desc=True, cursor=page.next_cursor)
 
     @pytest.mark.asyncio
     async def test_search_cursor_datetime_sort_round_trip(self, session: AsyncSession) -> None:
@@ -321,70 +323,69 @@ class TestServiceSearch:
         string) to the keyset predicate and the round-trip yields the right
         page ordering.
         """
-        svc = ResourceService(SvcDtWidget)
+        svc = SqlService(SvcDtWidget, session=session)
         for i in range(5):
             await svc.create(
-                session,
                 SvcDtWidget.get_create_model()(ts=datetime(2026, 1, i + 1, 12, 0, 0, tzinfo=UTC)),
             )
-        page = await svc.search(session, limit=2, sort="ts")
+        page = await svc.search(limit=2, sort="ts")
         assert [item.ts.replace(tzinfo=None) for item in page.items] == [
             datetime(2026, 1, 1, 12, 0, 0),
             datetime(2026, 1, 2, 12, 0, 0),
         ]
         assert page.next_cursor is not None
-        page2 = await svc.search(session, limit=2, sort="ts", cursor=page.next_cursor)
+        page2 = await svc.search(limit=2, sort="ts", cursor=page.next_cursor)
         assert [item.ts.replace(tzinfo=None) for item in page2.items] == [
             datetime(2026, 1, 3, 12, 0, 0),
             datetime(2026, 1, 4, 12, 0, 0),
         ]
-        page3 = await svc.search(session, limit=2, sort="ts", cursor=page2.next_cursor)
+        page3 = await svc.search(limit=2, sort="ts", cursor=page2.next_cursor)
         assert len(page3.items) == 1
         assert page3.next_cursor is None
 
     @pytest.mark.asyncio
     async def test_search_sort_ascending(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         for i in [3, 1, 2]:
-            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, sort="size")
+            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(sort="size")
         assert [item.size for item in page.items] == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_search_sort_descending(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         for i in [3, 1, 2]:
-            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, sort="size", desc=True)
+            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(sort="size", desc=True)
         assert [item.size for item in page.items] == [3, 2, 1]
 
     @pytest.mark.asyncio
     async def test_search_sort_unknown_field_raises(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         with pytest.raises(InvalidInputError):
-            await svc.search(session, sort="nonsense")
+            await svc.search(sort="nonsense")
 
     @pytest.mark.asyncio
     async def test_search_limit_below_one_raises(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         with pytest.raises(InvalidInputError):
-            await svc.search(session, limit=0)
+            await svc.search(limit=0)
 
     @pytest.mark.asyncio
     async def test_search_limit_capped_to_max(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        page = await svc.search(session, limit=999)
+        svc = SqlService(SvcWidget, session=session)
+        page = await svc.search(limit=999)
         assert page.limit == 100  # _MAX_LIMIT
 
     @pytest.mark.asyncio
     async def test_search_with_declared_filter(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcFilterableWidget)
+        svc = SqlService(SvcFilterableWidget, session=session)
         filter_cls = SvcFilterableWidget.get_search_filter_type()
         assert filter_cls is not None
         for i in range(3):
-            await svc.create(session, SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
         filters = filter_cls(size__gte=2)
-        page = await svc.search(session, filters=filters)
+        page = await svc.search(filters=filters)
         assert len(page.items) == 1
         assert page.items[0].size == 2
 
@@ -392,51 +393,51 @@ class TestServiceSearch:
 class TestServiceCount:
     @pytest.mark.asyncio
     async def test_count_all(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
+        svc = SqlService(SvcWidget, session=session)
         for i in range(3):
-            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        assert await svc.count(session) == 3
+            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        assert await svc.count() == 3
 
     @pytest.mark.asyncio
     async def test_count_with_filter(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcFilterableWidget)
+        svc = SqlService(SvcFilterableWidget, session=session)
         filter_cls = SvcFilterableWidget.get_search_filter_type()
         assert filter_cls is not None
         for i in range(5):
-            await svc.create(session, SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
-        assert await svc.count(session, filters=filter_cls(size__gte=3)) == 2
+            await svc.create(SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
+        assert await svc.count(filters=filter_cls(size__gte=3)) == 2
 
     @pytest.mark.asyncio
     async def test_count_empty(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        assert await svc.count(session) == 0
+        svc = SqlService(SvcWidget, session=session)
+        assert await svc.count() == 0
 
 
 class TestServiceBatchRead:
     @pytest.mark.asyncio
     async def test_batch_read_returns_in_input_order(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
-        b = await svc.create(session, SvcWidget.get_create_model()(label="b"))
-        result = await svc.batch_read(session, [b.id, a.id])
+        svc = SqlService(SvcWidget, session=session)
+        a = await svc.create(SvcWidget.get_create_model()(label="a"))
+        b = await svc.create(SvcWidget.get_create_model()(label="b"))
+        result = await svc.batch_read([b.id, a.id])
         assert [r.id for r in result] == [b.id, a.id]
 
     @pytest.mark.asyncio
     async def test_batch_read_inserts_null_for_absent_ids(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
-        result = await svc.batch_read(session, [a.id, 999])
+        svc = SqlService(SvcWidget, session=session)
+        a = await svc.create(SvcWidget.get_create_model()(label="a"))
+        result = await svc.batch_read([a.id, 999])
         assert len(result) == 2
         assert result[0].id == a.id
         assert result[1] is None
 
     @pytest.mark.asyncio
     async def test_batch_read_preserves_order_with_nulls(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
-        b = await svc.create(session, SvcWidget.get_create_model()(label="b"))
+        svc = SqlService(SvcWidget, session=session)
+        a = await svc.create(SvcWidget.get_create_model()(label="a"))
+        b = await svc.create(SvcWidget.get_create_model()(label="b"))
         # [b, missing, a, missing] -> [b, None, a, None]
-        result = await svc.batch_read(session, [b.id, 998, a.id, 999])
+        result = await svc.batch_read([b.id, 998, a.id, 999])
         assert len(result) == 4
         assert result[0].id == b.id
         assert result[1] is None
@@ -445,16 +446,16 @@ class TestServiceBatchRead:
 
     @pytest.mark.asyncio
     async def test_batch_read_empty_list(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        result = await svc.batch_read(session, [])
+        svc = SqlService(SvcWidget, session=session)
+        result = await svc.batch_read([])
         assert result == []
 
     @pytest.mark.asyncio
     async def test_batch_read_deduplicates_ids(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
+        svc = SqlService(SvcWidget, session=session)
+        a = await svc.create(SvcWidget.get_create_model()(label="a"))
         # Duplicates each map to the same entity, length matches the input.
-        result = await svc.batch_read(session, [a.id, a.id])
+        result = await svc.batch_read([a.id, a.id])
         assert len(result) == 2
         assert result[0].id == a.id
         assert result[1].id == a.id
@@ -463,19 +464,18 @@ class TestServiceBatchRead:
     async def test_batch_read_duplicate_absent_id_maps_to_nulls(
         self, session: AsyncSession
     ) -> None:
-        svc = ResourceService(SvcWidget)
-        result = await svc.batch_read(session, [999, 999])
+        svc = SqlService(SvcWidget, session=session)
+        result = await svc.batch_read([999, 999])
         assert result == [None, None]
 
 
 class TestServiceBatchEdit:
     @pytest.mark.asyncio
     async def test_batch_edit_applies_updates(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        a = await svc.create(session, SvcWidget.get_create_model()(label="a", size=1))
-        b = await svc.create(session, SvcWidget.get_create_model()(label="b", size=2))
+        svc = SqlService(SvcWidget, session=session)
+        a = await svc.create(SvcWidget.get_create_model()(label="a", size=1))
+        b = await svc.create(SvcWidget.get_create_model()(label="b", size=2))
         results = await svc.batch_edit(
-            session,
             [
                 (a.id, SvcWidget.get_update_model()(size=10)),
                 (b.id, SvcWidget.get_update_model()(size=20)),
@@ -485,10 +485,9 @@ class TestServiceBatchEdit:
 
     @pytest.mark.asyncio
     async def test_batch_edit_inserts_null_for_absent_ids(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        a = await svc.create(session, SvcWidget.get_create_model()(label="a"))
+        svc = SqlService(SvcWidget, session=session)
+        a = await svc.create(SvcWidget.get_create_model()(label="a"))
         results = await svc.batch_edit(
-            session,
             [
                 (a.id, SvcWidget.get_update_model()(size=5)),
                 (999, SvcWidget.get_update_model()(size=9)),  # absent -> null
@@ -500,10 +499,9 @@ class TestServiceBatchEdit:
 
     @pytest.mark.asyncio
     async def test_batch_edit_preserves_order_with_nulls(self, session: AsyncSession) -> None:
-        svc = ResourceService(SvcWidget)
-        a = await svc.create(session, SvcWidget.get_create_model()(label="a", size=1))
+        svc = SqlService(SvcWidget, session=session)
+        a = await svc.create(SvcWidget.get_create_model()(label="a", size=1))
         results = await svc.batch_edit(
-            session,
             [
                 (998, SvcWidget.get_update_model()(size=1)),  # absent
                 (a.id, SvcWidget.get_update_model()(size=7)),
@@ -517,18 +515,50 @@ class TestServiceBatchEdit:
         assert results[2] is None
 
 
-class TestServiceAuthorize:
+class TestServiceWrappable:
+    """Issue #40: the service contract carries no session/user/RBAC, so a
+    service is trivially wrappable (a future ``SecuredService`` holds an inner
+    service + user and delegates). These guard the contract."""
+
     @pytest.mark.asyncio
-    async def test_authorize_called_before_action(self, session: AsyncSession) -> None:
-        calls: list[str] = []
+    async def test_actions_default_to_all(self) -> None:
 
-        class GuardedService(ResourceService):
-            async def authorize(self, s, action, **ctx) -> None:
-                calls.append(action)
+        assert SqlService.actions == frozenset(Action)
 
-        svc = GuardedService(SvcWidget)
-        await svc.create(session, SvcWidget.get_create_model()(label="x"))
-        assert "create" in calls
+    @pytest.mark.asyncio
+    async def test_methods_take_no_session(self, session: AsyncSession) -> None:
+        import inspect
+
+        sig = inspect.signature(SqlService.create)
+        assert "session" not in sig.parameters
+        sig = inspect.signature(SqlService.search)
+        assert "session" not in sig.parameters
+
+    @pytest.mark.asyncio
+    async def test_wrapper_delegates_without_session(self, session: AsyncSession) -> None:
+        """A wrapper holding an inner service delegates with no signature change."""
+
+        class ReadOnlyWrapper(BaseService):
+            actions = frozenset({Action.READ, Action.SEARCH, Action.COUNT})
+
+            def __init__(self, inner: SqlService) -> None:
+                self._inner = inner
+
+            async def read(self, id):  # noqa: A002
+                return await self._inner.read(id)
+
+            async def search(self, **kwargs):
+                return await self._inner.search(**kwargs)
+
+            async def count(self, **kwargs):
+                return await self._inner.count(**kwargs)
+
+        inner = SqlService(SvcWidget, session=session)
+        await inner.create(SvcWidget.get_create_model()(label="x"))
+        wrapped = ReadOnlyWrapper(inner)
+        result = await wrapped.read(1)
+        assert result.label == "x"
+        assert await wrapped.count() == 1
 
 
 class TestServiceRepositoryOverride:
@@ -541,8 +571,8 @@ class TestServiceRepositoryOverride:
                 CountingRepo.insert_count += 1
                 return await super().insert(sess, payload, context=context)
 
-        svc = ResourceService(SvcWidget, repository_cls=CountingRepo)
-        await svc.create(session, SvcWidget.get_create_model()(label="x"))
+        svc = SqlService(SvcWidget, session=session, repository_cls=CountingRepo)
+        await svc.create(SvcWidget.get_create_model()(label="x"))
         assert CountingRepo.insert_count == 1
 
 
@@ -554,9 +584,9 @@ class TestServiceRepositoryOverride:
 class TestRegisterRoutes:
     @pytest.mark.asyncio
     async def test_all_seven_routes_registered(self, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        SvcWidget.configure(session_factory=session_factory)
         app = FastAPI()
-        router = svc.register(app)
+        router = register_routes(app, SvcWidget)
         paths = {(r.path, next(iter(r.methods))) for r in router.routes}
         assert ("/svc-widgets", "POST") in paths
         assert ("/svc-widgets/{id}", "GET") in paths
@@ -568,16 +598,16 @@ class TestRegisterRoutes:
 
     @pytest.mark.asyncio
     async def test_register_returns_router(self, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        SvcWidget.configure(session_factory=session_factory)
         app = FastAPI()
-        router = svc.register(app)
+        router = register_routes(app, SvcWidget)
         assert len(router.routes) == 8
 
     @pytest.mark.asyncio
     async def test_register_with_prefix(self, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        SvcWidget.configure(session_factory=session_factory)
         app = FastAPI()
-        svc.register(app, prefix="/api/v1")
+        register_routes(app, SvcWidget, prefix="/api/v1")
         register_error_handlers(app)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
@@ -585,34 +615,23 @@ class TestRegisterRoutes:
             assert r.status_code == 201
 
     @pytest.mark.asyncio
-    async def test_register_without_session_raises(self) -> None:
-        svc = ResourceService(SvcWidget)
-        app = FastAPI()
-        with pytest.raises(ResourceServiceError):
-            svc.register(app)
+    async def test_open_service_without_session_factory_raises(self) -> None:
+        # An unconfigured SQL resource cannot open a service.
+        from resourcey.resource.errors import ResourceyConfigError
 
-    @pytest.mark.asyncio
-    async def test_custom_session_dependency(self, session_factory) -> None:
-        svc = ResourceService(SvcWidget)
+        class _Unconfigured(SqlResource):
+            id: int
+            label: str
 
-        async def dep():
-            async with session_factory() as sess:
-                yield sess
-                await sess.commit()
-
-        app = FastAPI()
-        svc.register(app, session_dependency=dep)
-        register_error_handlers(app)
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-            r = await c.post("/svc-widgets", json={"label": "g"})
-            assert r.status_code == 201
+        with pytest.raises(ResourceyConfigError):
+            _Unconfigured.get_session_factory()
 
     @pytest.mark.asyncio
     async def test_escape_hatch_custom_route_preserved(self, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        SvcWidget.configure(session_factory=session_factory)
         app = FastAPI()
-        # Register a custom GET /svc-widgets route BEFORE the service — it should
-        # be kept (not overwritten) by register's escape hatch.
+        # Register a custom GET /svc-widgets route BEFORE register_routes - it
+        # should be kept (not overwritten) by the escape hatch.
         from fastapi import APIRouter
 
         custom = APIRouter()
@@ -622,7 +641,7 @@ class TestRegisterRoutes:
             return {"custom": True}
 
         app.include_router(custom)
-        svc.register(app)
+        register_routes(app, SvcWidget)
         register_error_handlers(app)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             r = await c.get("/svc-widgets")
@@ -632,8 +651,7 @@ class TestRegisterRoutes:
 class TestHttpCrud:
     @pytest.mark.asyncio
     async def test_create_returns_201(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.post("/svc-widgets", json={"label": "gadget", "size": 5})
             assert r.status_code == 201
             assert r.json()["label"] == "gadget"
@@ -641,8 +659,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_read_returns_200(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.post("/svc-widgets", json={"label": "g"})
             wid = r.json()["id"]
             r = await client.get(f"/svc-widgets/{wid}")
@@ -651,16 +668,14 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_read_missing_returns_404_envelope(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.get("/svc-widgets/999")
             assert r.status_code == 404
             assert r.json()["error"]["code"] == "not_found"
 
     @pytest.mark.asyncio
     async def test_update_returns_200(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             wid = (await client.post("/svc-widgets", json={"label": "g", "size": 1})).json()["id"]
             r = await client.patch(f"/svc-widgets/{wid}", json={"size": 99})
             assert r.status_code == 200
@@ -668,8 +683,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_delete_returns_204(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             wid = (await client.post("/svc-widgets", json={"label": "g"})).json()["id"]
             r = await client.delete(f"/svc-widgets/{wid}")
             assert r.status_code == 204
@@ -678,8 +692,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_search_returns_page(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             for i in range(3):
                 await client.post("/svc-widgets", json={"label": f"g{i}", "size": i})
             r = await client.get("/svc-widgets?limit=2")
@@ -697,8 +710,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_search_rejects_offset_param(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.get("/svc-widgets?offset=0")
             # offset is no longer a recognized param; FastAPI ignores unknown
             # query params, so the request succeeds but the response has no
@@ -708,8 +720,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_count_endpoint(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             for i in range(3):
                 await client.post("/svc-widgets", json={"label": f"g{i}", "size": i})
             r = await client.get("/svc-widgets/count")
@@ -718,8 +729,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_count_with_filter(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcFilterableWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcFilterableWidget) as client:
             for i in range(5):
                 await client.post("/svc-filterable-widgets", json={"label": f"g{i}", "size": i})
             r = await client.get("/svc-filterable-widgets/count?size__gte=3")
@@ -728,8 +738,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_count_rejects_sort_and_limit(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.get("/svc-widgets/count?sort=size")
             assert r.status_code == 400
             assert r.json()["error"]["code"] == "invalid_input"
@@ -738,8 +747,7 @@ class TestHttpCrud:
 
     @pytest.mark.asyncio
     async def test_search_sort_via_query(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             for s in [3, 1, 2]:
                 await client.post("/svc-widgets", json={"label": "g", "size": s})
             r = await client.get("/svc-widgets?sort=size&desc=true")
@@ -749,8 +757,7 @@ class TestHttpCrud:
 class TestHttpBatchRead:
     @pytest.mark.asyncio
     async def test_batch_read_repeated_id_params(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             a = (await client.post("/svc-widgets", json={"label": "a"})).json()["id"]
             b = (await client.post("/svc-widgets", json={"label": "b"})).json()["id"]
             r = await client.get(f"/svc-widgets/batch-read?id={a}&id={b}&id=999")
@@ -767,8 +774,7 @@ class TestHttpBatchRead:
 
     @pytest.mark.asyncio
     async def test_batch_read_no_ids_returns_empty(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.get("/svc-widgets/batch-read")
             assert r.status_code == 200
             assert r.json() == []
@@ -777,8 +783,7 @@ class TestHttpBatchRead:
 class TestHttpBatchEdit:
     @pytest.mark.asyncio
     async def test_batch_edit_applies(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             a = (await client.post("/svc-widgets", json={"label": "a", "size": 1})).json()["id"]
             b = (await client.post("/svc-widgets", json={"label": "b", "size": 2})).json()["id"]
             r = await client.post(
@@ -792,8 +797,7 @@ class TestHttpBatchEdit:
 
     @pytest.mark.asyncio
     async def test_batch_edit_null_for_absent_ids(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             a = (await client.post("/svc-widgets", json={"label": "a", "size": 1})).json()["id"]
             r = await client.post(
                 "/svc-widgets/batch-edit",
@@ -814,8 +818,7 @@ class TestHttpErrors:
         # ``sort`` is an enum of sortable fields; an unknown value is rejected
         # by FastAPI's request validation (422), consistent with how typed
         # filter params behave (#31).
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.get("/svc-widgets?sort=nonsense")
             assert r.status_code == 422
 
@@ -825,8 +828,7 @@ class TestHttpErrors:
     ) -> None:
         # The enum validates the value, so a SQL-injection-style payload never
         # reaches the query layer.
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.get("/svc-widgets?sort=id;%20DROP%20TABLE%20users")
             assert r.status_code == 422
 
@@ -836,8 +838,7 @@ class TestHttpErrors:
     ) -> None:
         # A resource with no sortable fields exposes no ``sort`` param; a
         # residual check rejects ``?sort=`` with 400 invalid_input.
-        svc = ResourceService(SvcUnsortableWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcUnsortableWidget) as client:
             r = await client.get("/svc-unsortable-widgets?sort=id")
             assert r.status_code == 400
             assert r.json()["error"]["code"] == "invalid_input"
@@ -846,24 +847,21 @@ class TestHttpErrors:
     async def test_filter_when_none_declared_returns_400(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             r = await client.get("/svc-widgets?bogus__eq=x")
             assert r.status_code == 400
             assert r.json()["error"]["code"] == "invalid_input"
 
     @pytest.mark.asyncio
     async def test_unknown_filter_field_returns_400(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcFilterableWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcFilterableWidget) as client:
             r = await client.get("/svc-filterable-widgets?nonsense__eq=x")
             assert r.status_code == 400
             assert r.json()["error"]["code"] == "invalid_input"
 
     @pytest.mark.asyncio
     async def test_unique_constraint_returns_409(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcGadget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcGadget) as client:
             await client.post("/svc-gadgets", json={"serial": "SN1"})
             r = await client.post("/svc-gadgets", json={"serial": "SN1"})
             assert r.status_code == 409
@@ -871,8 +869,7 @@ class TestHttpErrors:
 
     @pytest.mark.asyncio
     async def test_validation_error_returns_422(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcWidget) as client:
             # label is required; omitting it should fail validation.
             r = await client.post("/svc-widgets", json={"size": 1})
             assert r.status_code == 422
@@ -881,8 +878,7 @@ class TestHttpErrors:
 class TestHttpFiltering:
     @pytest.mark.asyncio
     async def test_declared_filter_applies(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcFilterableWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcFilterableWidget) as client:
             await client.post("/svc-filterable-widgets", json={"label": "apple", "size": 1})
             await client.post("/svc-filterable-widgets", json={"label": "banana", "size": 2})
             r = await client.get("/svc-filterable-widgets?label__contains=app")
@@ -893,8 +889,7 @@ class TestHttpFiltering:
 
     @pytest.mark.asyncio
     async def test_declared_filter_eq(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcFilterableWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcFilterableWidget) as client:
             await client.post("/svc-filterable-widgets", json={"label": "a", "size": 1})
             await client.post("/svc-filterable-widgets", json={"label": "b", "size": 2})
             r = await client.get("/svc-filterable-widgets?size__eq=2")
@@ -903,8 +898,7 @@ class TestHttpFiltering:
 
     @pytest.mark.asyncio
     async def test_declared_filter_in_operator(self, client_factory, session_factory) -> None:
-        svc = ResourceService(SvcFilterableWidget, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(SvcFilterableWidget) as client:
             await client.post("/svc-filterable-widgets", json={"label": "a", "size": 1})
             await client.post("/svc-filterable-widgets", json={"label": "b", "size": 2})
             await client.post("/svc-filterable-widgets", json={"label": "c", "size": 3})
@@ -919,8 +913,14 @@ class TestHttpFiltering:
 
 
 def _build_app(resource: type[BaseResource]) -> FastAPI:
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    resource.configure(session_factory=factory)  # type: ignore[attr-defined]
     app = FastAPI()
-    ResourceService(resource).register(app, session_dependency=lambda: None)
+    register_routes(app, resource)
     register_error_handlers(app)
     return app
 

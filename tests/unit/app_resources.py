@@ -11,10 +11,10 @@ from datetime import UTC, datetime
 
 from pydantic import Field
 
-from resourcey.resource.base import BaseResource
+from resourcey.resource.sql import SqlResource
 
 
-class AppWidget(BaseResource):
+class AppWidget(SqlResource):
     """A simple resource for ``create_app`` integration tests — int id + label."""
 
     id: int
@@ -22,7 +22,7 @@ class AppWidget(BaseResource):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class AppGadget(BaseResource):
+class AppGadget(SqlResource):
     """A second resource so multi-resource registration is exercised."""
 
     id: int

@@ -35,9 +35,10 @@ from resourcey.cache.cache_strategy import (
     LastModifiedCacheStrategy,
     OptimisticCacheStrategy,
 )
-from resourcey.resource.base import BaseResource, ResourceyBase
 from resourcey.resource.field import ResourceyField
-from resourcey.resource.service import ResourceService, register_error_handlers
+from resourcey.resource.routes import register_error_handlers, register_routes
+from resourcey.resource.service import SqlService
+from resourcey.resource.sql import ResourceyBase, SqlResource
 
 # ---------------------------------------------------------------------------
 # Pydantic read-model fixtures
@@ -281,18 +282,18 @@ class TestCacheStrategySerialization:
 # ---------------------------------------------------------------------------
 
 
-class HasUpdated(BaseResource):
+class HasUpdated(SqlResource):
     id: int
     label: str
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-class NoUpdated(BaseResource):
+class NoUpdated(SqlResource):
     id: int
     label: str
 
 
-class UpdatedUnreadable(BaseResource):
+class UpdatedUnreadable(SqlResource):
     id: int
     label: str
     updated_at: Annotated[
@@ -300,7 +301,7 @@ class UpdatedUnreadable(BaseResource):
     ]
 
 
-class CustomStrategy(BaseResource):
+class CustomStrategy(SqlResource):
     id: int
     label: str
 
@@ -309,7 +310,7 @@ class CustomStrategy(BaseResource):
         return OptimisticCacheStrategy(expire_in=42)
 
 
-class EtagExpiring(BaseResource):
+class EtagExpiring(SqlResource):
     """ETag strategy with a freshness window (Cache-Control + Expires)."""
 
     id: int
@@ -320,7 +321,7 @@ class EtagExpiring(BaseResource):
         return ETagCacheStrategy(expire_in=120)
 
 
-class OptimisticResource(BaseResource):
+class OptimisticResource(SqlResource):
     """Optimistic strategy: freshness only, no validators."""
 
     id: int
@@ -331,7 +332,7 @@ class OptimisticResource(BaseResource):
         return OptimisticCacheStrategy(expire_in=60)
 
 
-class NoCacheResource(BaseResource):
+class NoCacheResource(SqlResource):
     """A resource whose strategy yields nothing (no headers emitted)."""
 
     id: int
@@ -402,13 +403,13 @@ async def session(session_factory: async_sessionmaker[AsyncSession]) -> AsyncSes
 
 class TestServiceComputeCacheHeader:
     def test_compute_cache_header_etag_for_no_updated_resource(self) -> None:
-        svc = ResourceService(NoUpdated)
+        svc = SqlService(NoUpdated, session=None)
         header = svc.compute_cache_header([NoUpdated.get_read_model()(id=1, label="x")])
         assert header is not None
         assert header.etag is not None
 
     def test_compute_cache_header_last_modified_for_updated_resource(self) -> None:
-        svc = ResourceService(HasUpdated)
+        svc = SqlService(HasUpdated, session=None)
         rm = HasUpdated.get_read_model()(
             id=1, label="x", updated_at=datetime(2026, 1, 1, tzinfo=UTC)
         )
@@ -417,14 +418,14 @@ class TestServiceComputeCacheHeader:
         assert header.updated_at is not None
 
     def test_compute_count_cache_header_etag(self) -> None:
-        svc = ResourceService(NoUpdated)
+        svc = SqlService(NoUpdated, session=None)
         h1 = svc.compute_count_cache_header(3, None)
         assert h1 is not None
         assert h1.etag is not None
         assert h1.updated_at is None
 
     def test_compute_count_cache_header_distinct_for_distinct_count(self) -> None:
-        svc = ResourceService(NoUpdated)
+        svc = SqlService(NoUpdated, session=None)
         a = svc.compute_count_cache_header(3, None)
         b = svc.compute_count_cache_header(4, None)
         assert a is not None and b is not None
@@ -433,7 +434,7 @@ class TestServiceComputeCacheHeader:
     def test_compute_count_cache_header_always_returns_etag(self) -> None:
         # Count is count-derived (independent of the strategy's get_cache_header),
         # so it always produces an ETag even when the strategy yields nothing.
-        svc = ResourceService(NoCacheResource)
+        svc = SqlService(NoCacheResource, session=None)
         # compute_cache_header yields None (strategy produces nothing)...
         assert svc.compute_cache_header([NoCacheResource.get_read_model()(id=1, label="x")]) is None
         # ...but count is count-derived, so it still has an ETag.
@@ -449,9 +450,10 @@ class TestServiceComputeCacheHeader:
 
 @pytest_asyncio.fixture
 async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
-    def _build(service: ResourceService) -> AsyncClient:
+    def _build(resource: type[SqlResource]) -> AsyncClient:
+        resource.configure(session_factory=session_factory)
         app = FastAPI()
-        service.register(app)
+        register_routes(app, resource)
         register_error_handlers(app)
         return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
@@ -461,8 +463,7 @@ async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
 class TestHttpCacheHeaders:
     @pytest.mark.asyncio
     async def test_read_emits_etag(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             created = await client.post("/no-updateds", json={"label": "x"})
             etag = created.headers.get("etag")
             assert etag is not None
@@ -473,8 +474,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_read_emits_last_modified(self, client_factory, session_factory) -> None:
-        svc = ResourceService(HasUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(HasUpdated) as client:
             created = await client.post("/has-updateds", json={"label": "x"})
             lm = created.headers.get("last-modified")
             assert lm is not None
@@ -485,8 +485,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_read_304_on_matching_etag(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             created = await client.post("/no-updateds", json={"label": "x"})
             etag = created.headers["etag"]
             rid = created.json()["id"]
@@ -497,8 +496,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_read_200_on_mismatched_etag(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             created = await client.post("/no-updateds", json={"label": "x"})
             rid = created.json()["id"]
             r = await client.get(f"/no-updateds/{rid}", headers={"If-None-Match": '"deadbeef"'})
@@ -507,8 +505,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_read_304_on_if_modified_since(self, client_factory, session_factory) -> None:
-        svc = ResourceService(HasUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(HasUpdated) as client:
             created = await client.post("/has-updateds", json={"label": "x"})
             lm = created.headers["last-modified"]
             rid = created.json()["id"]
@@ -519,8 +516,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_search_emits_etag_and_304(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             await client.post("/no-updateds", json={"label": "a"})
             r1 = await client.get("/no-updateds")
             assert r1.status_code == 200
@@ -530,8 +526,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_count_emits_etag_and_304(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             await client.post("/no-updateds", json={"label": "a"})
             r1 = await client.get("/no-updateds/count")
             assert r1.status_code == 200
@@ -541,8 +536,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_count_etag_changes_with_count(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             r1 = await client.get("/no-updateds/count")
             await client.post("/no-updateds", json={"label": "a"})
             r2 = await client.get("/no-updateds/count")
@@ -550,8 +544,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_batch_read_emits_etag_and_304(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             a = (await client.post("/no-updateds", json={"label": "a"})).json()["id"]
             r1 = await client.get(f"/no-updateds/batch-read?id={a}")
             assert r1.status_code == 200
@@ -563,8 +556,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_batch_edit_emits_etag(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             a = (await client.post("/no-updateds", json={"label": "a"})).json()["id"]
             r = await client.post("/no-updateds/batch-edit", json=[{"id": a, "label": "b"}])
             assert r.status_code == 200
@@ -572,8 +564,7 @@ class TestHttpCacheHeaders:
 
     @pytest.mark.asyncio
     async def test_create_emits_etag(self, client_factory, session_factory) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             r = await client.post("/no-updateds", json={"label": "a"})
             assert r.status_code == 201
             assert "etag" in r.headers
@@ -582,8 +573,7 @@ class TestHttpCacheHeaders:
     async def test_cache_control_emitted_with_expire_in(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(EtagExpiring, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(EtagExpiring) as client:
             created = await client.post("/etag-expirings", json={"label": "x"})
             rid = created.json()["id"]
             r = await client.get(f"/etag-expirings/{rid}")
@@ -595,8 +585,7 @@ class TestHttpCacheHeaders:
     async def test_optimistic_emits_cache_control_only(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(OptimisticResource, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(OptimisticResource) as client:
             created = await client.post("/optimistic-resources", json={"label": "x"})
             rid = created.json()["id"]
             r = await client.get(f"/optimistic-resources/{rid}")
@@ -610,8 +599,7 @@ class TestHttpCacheHeaders:
     async def test_304_response_includes_cache_control(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(EtagExpiring, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(EtagExpiring) as client:
             created = await client.post("/etag-expirings", json={"label": "x"})
             etag = created.headers["etag"]
             rid = created.json()["id"]
@@ -624,8 +612,7 @@ class TestHttpCacheHeaders:
     async def test_invalid_if_modified_since_treated_as_modified(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(HasUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(HasUpdated) as client:
             created = await client.post("/has-updateds", json={"label": "x"})
             rid = created.json()["id"]
             r = await client.get(
@@ -694,9 +681,8 @@ class TestETagSerializationContext:
 
     def test_service_threads_context_into_etag(self, session_factory) -> None:
         """ResourceService.compute_cache_header passes its serialization context."""
-        from resourcey.resource.base import BaseResource
 
-        class CtxResource(BaseResource):
+        class CtxResource(SqlResource):
             id: int
             secret: str = "redacted"
 
@@ -706,10 +692,10 @@ class TestETagSerializationContext:
 
         CtxResource.get_sql_alchemy_model()
         rm_cls = type("CtxRead", (_ContextSensitiveItem,), {})
-        svc_no_ctx = ResourceService(CtxResource, session_factory=session_factory)
-        svc_with_ctx = ResourceService(
+        svc_no_ctx = SqlService(CtxResource, session=None)
+        svc_with_ctx = SqlService(
             CtxResource,
-            session_factory=session_factory,
+            session=None,
             serialization_context={"expose": True},
         )
         item = rm_cls(id=1)
@@ -729,8 +715,7 @@ class TestSafeMethodGuard:
     async def test_get_with_if_none_match_star_returns_304(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             await client.post("/no-updateds", json={"label": "x"})
             r = await client.get("/no-updateds", headers={"If-None-Match": "*"})
             assert r.status_code == 304
@@ -739,8 +724,7 @@ class TestSafeMethodGuard:
     async def test_create_does_not_304_with_if_none_match_star(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             r = await client.post(
                 "/no-updateds", json={"label": "x"}, headers={"If-None-Match": "*"}
             )
@@ -751,8 +735,7 @@ class TestSafeMethodGuard:
     async def test_update_does_not_304_with_if_none_match_star(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             created = await client.post("/no-updateds", json={"label": "x"})
             rid = created.json()["id"]
             r = await client.patch(
@@ -767,8 +750,7 @@ class TestSafeMethodGuard:
     async def test_batch_edit_does_not_304_with_if_none_match_star(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             a = (await client.post("/no-updateds", json={"label": "a"})).json()["id"]
             r = await client.post(
                 "/no-updateds/batch-edit",
@@ -781,8 +763,7 @@ class TestSafeMethodGuard:
     @pytest.mark.asyncio
     async def test_mutation_routes_still_emit_etag(self, client_factory, session_factory) -> None:
         """Unsafe methods emit ETag/Cache-Control but never short-circuit to 304."""
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             created = await client.post("/no-updateds", json={"label": "x"})
             assert "etag" in created.headers
             rid = created.json()["id"]
@@ -831,8 +812,7 @@ class TestIfNoneMatchListAndStar:
     async def test_get_with_matching_list_etag_returns_304(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             await client.post("/no-updateds", json={"label": "x"})
             r1 = await client.get("/no-updateds")
             etag = r1.headers["etag"]
@@ -843,8 +823,7 @@ class TestIfNoneMatchListAndStar:
     async def test_get_with_non_matching_list_returns_200(
         self, client_factory, session_factory
     ) -> None:
-        svc = ResourceService(NoUpdated, session_factory=session_factory)
-        async with client_factory(svc) as client:
+        async with client_factory(NoUpdated) as client:
             await client.post("/no-updateds", json={"label": "x"})
             r = await client.get("/no-updateds", headers={"If-None-Match": '"one", "two", "three"'})
             assert r.status_code == 200
