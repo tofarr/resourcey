@@ -1,0 +1,465 @@
+"""``MongoService`` — the MongoDB-backed service for a resource.
+
+A :class:`~resourcey.mongo.mongo_resource.MongoResource` subclass yields a
+``MongoService`` from :meth:`~resourcey.mongo.mongo_resource.MongoResource.open_service`.
+The service holds a ``motor`` async collection as instance state (mirroring how
+:class:`~resourcey.resource.service.SqlService` holds an ``AsyncSession``) and
+implements the standard :class:`~resourcey.resource.service_base.BaseService`
+``Action`` contract against it. The action signatures carry no notion of
+session, user, or RBAC — those are instance state, keeping the service
+wrappable (issue #40).
+
+A document is the resource's read-model serialization plus the resource's id
+field stored under ``_id``. The service translates create/update payloads to
+documents, applies keyset cursor pagination (reusing the same opaque/encrypted
+cursor encoding as the SQL path), and delegates filter translation to
+:mod:`resourcey.mongo.mongo_filter`.
+
+Non-SQL resources do **not** participate in Alembic migrations. Instead,
+:meth:`~resourcey.mongo.mongo_resource.MongoResource.migrate_document` is an
+opt-in hook (default no-op) invoked on every read so an application can lazily
+upgrade a document to the current shape. The versioning scheme is
+application-defined.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, TypeVar
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel
+
+from resourcey.cache.cache_header import CacheHeader
+from resourcey.resource.cursor import decode_cursor, encode_cursor
+from resourcey.resource.errors import InvalidInputError, NotFoundError
+from resourcey.resource.service import Page
+from resourcey.resource.service_base import BaseService
+
+if TYPE_CHECKING:
+    from resourcey.encryption.encryption_service import EncryptionService
+    from resourcey.mongo.mongo_resource import MongoResource
+    from resourcey.util.search_filter import SearchFilter
+
+
+T = TypeVar("T")
+
+_DEFAULT_LIMIT = 20
+_MAX_LIMIT = 100
+
+# Sentinel for "no default" on a Pydantic field (Pydantic uses a private sentinel
+# object; ``None`` is a valid default, so we must distinguish).
+_UNDEFINED: Any = object()
+
+
+class MongoService(BaseService):
+    """The MongoDB-backed service exposing the standard resource actions.
+
+    Constructed from a :class:`MongoResource` subclass and an async ``motor``
+    collection (instance state, not a per-call parameter). The collection is
+    duck-typed: any object exposing the ``motor`` async collection API
+    (``insert_one``, ``find_one``, ``find``, ``update_one``, ``delete_one``,
+    ``count_documents``, ``replace_one``) works, so tests can substitute an
+    in-process adapter backed by ``mongomock``.
+    """
+
+    def __init__(
+        self,
+        resource: type[MongoResource],
+        *,
+        collection: Any,
+        serialization_context: dict[str, Any] | None = None,
+    ) -> None:
+        self.resource = resource
+        self.create_model = resource.get_create_model()
+        self.update_model = resource.get_update_model()
+        self.read_model = resource.get_read_model()
+        self.id_field = resource.get_id_field()
+        self._collection = collection
+        self._serialization_context = serialization_context
+
+    # ------------------------------------------------------------------
+    # Context
+    # ------------------------------------------------------------------
+
+    def serialization_context(self) -> dict[str, Any] | None:
+        return self._serialization_context
+
+    def _ctx(self) -> dict[str, Any] | None:
+        return self.serialization_context()
+
+    # ------------------------------------------------------------------
+    # Standard actions
+    # ------------------------------------------------------------------
+
+    async def create(self, payload: BaseModel) -> Any:
+        """Validate via the create model, persist, return the read model (HTTP 201)."""
+        doc = self._payload_to_doc(payload, fill_defaults=True)
+        await self._collection.insert_one(doc)
+        return self._doc_to_read_model(doc)
+
+    async def read(self, id: Any) -> Any:  # noqa: A002
+        """Fetch; raise :class:`NotFoundError` (-> 404) if absent."""
+        doc = await self._collection.find_one({"_id": _encode_value(id)})
+        if doc is None:
+            raise NotFoundError(self.resource.__name__, id)
+        return self._doc_to_read_model(doc)
+
+    async def update(self, id: Any, payload: BaseModel) -> Any:  # noqa: A002
+        """Validate via the PATCH update model, apply; raise ``NotFoundError`` if absent."""
+        updates = self._payload_to_doc(payload, fill_defaults=False)
+        encoded_id = _encode_value(id)
+        if updates:
+            result = await self._collection.find_one_and_update(
+                {"_id": encoded_id},
+                {"$set": updates},
+                return_document=True,
+            )
+        else:
+            result = await self._collection.find_one({"_id": encoded_id})
+        if result is None:
+            raise NotFoundError(self.resource.__name__, id)
+        return self._doc_to_read_model(result)
+
+    async def delete(self, id: Any) -> None:  # noqa: A002
+        """Delete; raise ``NotFoundError`` if absent. Returns no body (HTTP 204)."""
+        result = await self._collection.delete_one({"_id": _encode_value(id)})
+        if result.deleted_count == 0:
+            raise NotFoundError(self.resource.__name__, id)
+
+    async def search(
+        self,
+        *,
+        limit: int = _DEFAULT_LIMIT,
+        cursor: str | None = None,
+        sort: str | None = None,
+        desc: bool = False,
+        filters: SearchFilter[Any] | None = None,
+    ) -> Page[Any]:
+        """Search with cursor pagination, sort, and optional filters; return a :class:`Page`."""
+        limit = self._validate_limit(limit)
+        sort_parsed = self._parse_sort(sort, desc)
+        decoded_cursor = self._decode_cursor(cursor, sort_parsed)
+        query = to_mongo_query(filters, id_field=self.id_field)
+        mongo_sort = self._mongo_sort(sort_parsed)
+        cursor_filter = self._cursor_filter(decoded_cursor, sort_parsed)
+        if cursor_filter is not None:
+            query = _merge_query(query, cursor_filter)
+        # Fetch one extra to detect a next page without a separate count.
+        result_cursor: Any = self._collection.find(query, limit=limit + 1)
+        if mongo_sort:
+            result_cursor = result_cursor.sort(mongo_sort)
+        docs: list[dict[str, Any]] = await result_cursor.to_list(length=limit + 1)
+        has_next = len(docs) > limit
+        docs = docs[:limit]
+        items = [self._doc_to_read_model(doc) for doc in docs]
+        next_cursor = self._next_cursor(items, sort_parsed) if has_next else None
+        return Page(items=items, limit=limit, next_cursor=next_cursor)
+
+    async def count(
+        self,
+        *,
+        filters: SearchFilter[Any] | None = None,
+    ) -> int:
+        """Return the number of documents matching ``filters``."""
+        query = to_mongo_query(filters, id_field=self.id_field)
+        return int(await self._collection.count_documents(query or {}))
+
+    async def batch_read(self, ids: list[Any]) -> list[Any]:
+        """Return read models positionally aligned with the input ids."""
+        if not ids:
+            return []
+        unique_ids = list(dict.fromkeys(ids))
+        encoded_ids = [_encode_value(i) for i in unique_ids]
+        result_cursor: Any = self._collection.find({"_id": {"$in": encoded_ids}})
+        docs: list[dict[str, Any]] = await result_cursor.to_list(length=len(unique_ids))
+        by_id = {_decode_value(doc["_id"]): doc for doc in docs}
+        return [self._doc_to_read_model(by_id[i]) if i in by_id else None for i in ids]
+
+    async def batch_edit(
+        self,
+        edits: list[tuple[Any, BaseModel]],
+    ) -> list[Any]:
+        """Apply each edit (id + update payload); return results in input order."""
+        results: list[Any] = []
+        for edit_id, payload in edits:
+            updates = self._payload_to_doc(payload, fill_defaults=False)
+            encoded_id = _encode_value(edit_id)
+            if updates:
+                doc = await self._collection.find_one_and_update(
+                    {"_id": encoded_id},
+                    {"$set": updates},
+                    return_document=True,
+                )
+            else:
+                doc = await self._collection.find_one({"_id": encoded_id})
+            results.append(self._doc_to_read_model(doc) if doc is not None else None)
+        return results
+
+    # ------------------------------------------------------------------
+    # Cache header computation (delegates to the resource strategy)
+    # ------------------------------------------------------------------
+
+    def compute_cache_header(self, items: list[Any]) -> CacheHeader | None:
+        header = self.resource.get_cache_strategy().get_cache_header(items, context=self._ctx())
+        return header if header.has_any() else None
+
+    def compute_count_cache_header(
+        self,
+        count: int,
+        filters: SearchFilter[Any] | None,
+    ) -> CacheHeader | None:
+        from resourcey.cache.cache_strategy import _digest, _stable_json
+
+        strategy = self.resource.get_cache_strategy()
+        parts: list[bytes] = [str(count).encode("utf-8"), b"\n"]
+        if filters is not None:
+            parts.append(_stable_json(filters.model_dump(mode="json")).encode("utf-8"))
+        header = CacheHeader(etag=f'"{_digest(parts)}"')
+        return strategy.with_expiry(header) if header.has_any() else None
+
+    # ------------------------------------------------------------------
+    # Document <-> model translation
+    # ------------------------------------------------------------------
+
+    def _payload_to_doc(
+        self,
+        payload: BaseModel,
+        *,
+        fill_defaults: bool,
+    ) -> dict[str, Any]:
+        """Dump a create/update payload to a Mongo document dict.
+
+        ``exclude_unset=True`` drops fields the caller did not supply (PATCH
+        semantics for update). For create, ``fill_defaults=True`` additionally
+        populates defaults for non-supplied fields (e.g. ``created_at`` from
+        its ``default_factory``). The id field is stored under ``_id`` so Mongo
+        indexes it as the primary key; when the client omits it on create, a
+        fresh ``UUID`` is generated (client-generated ids, not auto-increment).
+        All ``UUID`` values are encoded as strings (see :func:`_encode_value`)
+        since bson cannot encode native ``UUID`` without a configured
+        ``UuidRepresentation``.
+        """
+        data = payload.model_dump(context=self._ctx(), exclude_unset=True)
+        if fill_defaults:
+            for name, field in self.resource.model_fields.items():
+                if name in data:
+                    continue
+                if name == self.id_field:
+                    data[self.id_field] = uuid4()
+                    continue
+                if field.default_factory is not None:
+                    factory: Any = field.default_factory
+                    data[name] = factory()
+                elif field.default is not None and field.default is not _UNDEFINED:
+                    data[name] = field.default
+        # Encode all UUID values to strings for bson compatibility.
+        data = {k: _encode_value(v) for k, v in data.items()}
+        # Move the id field to ``_id`` so Mongo indexes it as the primary key.
+        if self.id_field in data:
+            data["_id"] = data.pop(self.id_field)
+        return data
+
+    def _doc_to_read_model(self, doc: dict[str, Any] | None) -> Any:
+        """Project a Mongo document into the resource's read-model instance.
+
+        Invokes the resource's ``migrate_document`` hook first (default no-op)
+        so an application can lazily upgrade a document on read. Maps ``_id``
+        back to the resource's id field name, decodes string-encoded UUIDs
+        back to ``UUID`` objects, then validates into the read model with the
+        serialization context (so secret fields decrypt).
+        """
+        if doc is None:
+            return None
+        migrated = self.resource.migrate_document(doc)
+        data = dict(migrated)
+        if "_id" in data:
+            data[self.id_field] = _decode_value(data.pop("_id"))
+        # Decode string-encoded UUIDs back to UUID objects for fields whose
+        # annotation is UUID (bson cannot store native UUID without a configured
+        # UuidRepresentation, so all UUIDs are stored as strings).
+        for name, field in self.read_model.model_fields.items():
+            if name in data and data[name] is not None and _field_is_uuid(field):
+                data[name] = _decode_value(data[name])
+        names = self.read_model.model_fields
+        projected = {name: data.get(name) for name in names}
+        return self.read_model.model_validate(projected, context=self._ctx())
+
+    # ------------------------------------------------------------------
+    # Validation + cursor helpers (parallel the SqlService logic)
+    # ------------------------------------------------------------------
+
+    def _validate_limit(self, limit: int) -> int:
+        if limit < 1:
+            raise InvalidInputError(f"limit must be >= 1, got {limit}")
+        return min(limit, _MAX_LIMIT)
+
+    def _parse_sort(self, sort: str | None, desc: bool) -> tuple[str, bool] | None:
+        if not sort:
+            return None
+        if sort not in self.resource.model_fields:
+            raise InvalidInputError(f"Unknown sort field {sort!r}")
+        field = self.resource.model_fields[sort]
+        config = self.resource.get_config_for_field(sort, field)
+        if not config.sortable:
+            raise InvalidInputError(f"Field {sort!r} is not sortable")
+        return sort, not desc
+
+    def _mongo_sort(self, sort_parsed: tuple[str, bool] | None) -> list[tuple[str, int]] | None:
+        """Translate the validated sort into a Mongo sort spec (``[(field, 1|-1)]``)."""
+        if sort_parsed is None:
+            # Default: order by ``_id`` ascending so pagination is stable.
+            return [("_id", 1)]
+        field, ascending = sort_parsed
+        direction = 1 if ascending else -1
+        mongo_field = "_id" if field == self.id_field else field
+        return [(mongo_field, direction), ("_id", direction)]
+
+    def _sort_key_field(self, sort_parsed: tuple[str, bool] | None) -> str:
+        if sort_parsed is None:
+            return self.id_field
+        return sort_parsed[0]
+
+    def _cursor_filter(
+        self,
+        decoded_cursor: tuple[Any, Any] | None,
+        sort_parsed: tuple[str, bool] | None,
+    ) -> dict[str, Any] | None:
+        """Build the keyset ``$gt``/``$lt`` filter that seeks past the cursor row.
+
+        Mirrors :func:`resourcey.resource.cursor.keyset_predicate`: for ascending
+        order, keep documents where ``(sort_key, _id) > (cursor_key, cursor_id)``;
+        for descending, mirror the comparison. When the sort field is the id
+        (the default no-sort case), the predicate collapses to a single ``_id``
+        comparison. Cursor values are encoded via :func:`_encode_value` so a
+        ``UUID`` id compares against its stored string form.
+        """
+        if decoded_cursor is None:
+            return None
+        cursor_key, cursor_id = decoded_cursor
+        encoded_key = _encode_value(cursor_key)
+        encoded_id = _encode_value(cursor_id)
+        ascending = sort_parsed[1] if sort_parsed is not None else True
+        sort_field = self._sort_key_field(sort_parsed)
+        op = "$gt" if ascending else "$lt"
+        if sort_field == self.id_field:
+            return {"_id": {op: encoded_id}}
+        return {
+            "$or": [
+                {sort_field: {op: encoded_key}},
+                {sort_field: encoded_key, "_id": {op: encoded_id}},
+            ]
+        }
+
+    def _encryption_service(self) -> EncryptionService:
+        from resourcey.encryption.encryption_service import get_encryption_service
+
+        ctx = self._serialization_context
+        if ctx is not None:
+            enc = ctx.get("encryption_service")
+            if enc is not None:
+                return enc  # type: ignore[no-any-return]
+        return get_encryption_service()
+
+    def _decode_cursor(
+        self,
+        cursor: str | None,
+        sort_parsed: tuple[str, bool] | None,
+    ) -> tuple[Any, Any] | None:
+        if not cursor:
+            return None
+        try:
+            c_field, c_ascending, sort_key, id_value = decode_cursor(
+                self._encryption_service(), cursor
+            )
+        except (ValueError, KeyError) as exc:
+            raise InvalidInputError(f"Invalid or tampered cursor: {exc}") from exc
+        expected_field = sort_parsed[0] if sort_parsed is not None else None
+        expected_ascending = sort_parsed[1] if sort_parsed is not None else True
+        if c_field != expected_field or c_ascending != expected_ascending:
+            raise InvalidInputError(
+                "Cursor was built for a different sort than the current request; "
+                "start a new search without a cursor when changing sort."
+            )
+        return sort_key, id_value
+
+    def _next_cursor(
+        self,
+        items: list[Any],
+        sort_parsed: tuple[str, bool] | None,
+    ) -> str | None:
+        if not items:
+            return None
+        last = items[-1]
+        field = self._sort_key_field(sort_parsed)
+        sort_key = getattr(last, field)
+        id_value = getattr(last, self.id_field)
+        sort_field = sort_parsed[0] if sort_parsed is not None else None
+        ascending = sort_parsed[1] if sort_parsed is not None else True
+        return encode_cursor(
+            self._encryption_service(),
+            sort_field=sort_field,
+            ascending=ascending,
+            sort_key=sort_key,
+            id_value=id_value,
+        )
+
+
+def _encode_value(value: Any) -> Any:
+    """Encode a value for Mongo storage (UUID -> string, others passthrough).
+
+    ``uuid.UUID`` cannot be stored directly unless the client is configured
+    with a ``UuidRepresentation`` (bson raises by default). Storing the string
+    form is portable across mongomock and real MongoDB, and the string
+    round-trips back to a ``UUID`` via :func:`_decode_value`.
+    """
+    if isinstance(value, UUID):
+        return str(value)
+    return value
+
+
+def _decode_value(value: Any) -> Any:
+    """Decode a stored value back to its native Python type.
+
+    Reconstructs a ``UUID`` from its string form. Other types pass through.
+    """
+    if isinstance(value, str):
+        try:
+            return UUID(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _field_is_uuid(field: Any) -> bool:
+    """Check whether a Pydantic field's annotation is (or contains) ``UUID``."""
+    import typing
+    from uuid import UUID as _UUID
+
+    ann = field.annotation
+    if ann is _UUID:
+        return True
+    # Handle ``UUID | None`` (Union) annotations.
+    origin = typing.get_origin(ann)
+    if origin is not None:
+        args = typing.get_args(ann)
+        return any(a is _UUID for a in args)
+    return False
+
+
+def _merge_query(
+    base: dict[str, Any] | None,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge two Mongo query dicts into a single ``$and`` query.
+
+    Keeps both the filter predicates and the keyset cursor predicate. When
+    ``base`` is ``None`` (no filter), ``extra`` is the whole query.
+    """
+    if base is None:
+        return extra
+    return {"$and": [base, extra]}
+
+
+# Imported at the bottom to avoid a circular import at module load
+# (mongo_filter imports nothing from mongo_service).
+from resourcey.mongo.mongo_filter import to_mongo_query  # noqa: E402
