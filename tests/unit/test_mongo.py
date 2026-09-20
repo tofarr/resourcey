@@ -594,13 +594,13 @@ class TestMongoLifecycle:
 
         ctx = AppContext(FrameworkConfig())
         pre = AsyncEmbeddedClient()
+        # Seed ONLY the context (the documented escape hatch) — the lifespan
+        # must adopt it onto the class cache so the request path finds it.
         ctx.set(_MONGO_CLIENT_KEY, pre)
-        # Pre-seed the class cache too, as create_app's session_factory path does.
-        MongoResource._client = pre
-        MongoResource._db = pre["resourcey"]
         async with MongoWidget.lifespan(ctx):
             # Should reuse the pre-seeded client, not build a new one.
             assert MongoResource._client is pre
+            assert MongoWidget.get_collection() is not None
         await ctx.aclose()
         assert MongoResource._client is None
 

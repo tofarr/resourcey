@@ -94,13 +94,15 @@ def create_app(
         # Enter each resource's lifecycle within a shared exit stack so
         # teardown runs in reverse order. Resources build/cache their backend
         # connections here and register disposers on ``ctx`` for shutdown.
+        # ``ctx.aclose`` is pushed as a stack callback (not a plain finally)
+        # so disposers run even when a later resource's lifespan raises during
+        # startup — otherwise its already-entered siblings' engines/clients
+        # would leak.
         async with AsyncExitStack() as stack:
+            stack.push_async_callback(ctx.aclose)
             for resource in resolved_resources:
                 await stack.enter_async_context(resource.lifespan(ctx))
-            try:
-                yield
-            finally:
-                await ctx.aclose()
+            yield
 
     app = FastAPI(lifespan=lifespan)
     _configure_cors(app, active.cors_origins)

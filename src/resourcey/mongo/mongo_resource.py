@@ -99,20 +99,29 @@ class MongoResource(BaseResource):
         On entry: if no client is cached on :class:`MongoResource`, build one
         via :meth:`build_client` and cache it on the base so all Mongo
         resources share one connection pool. The client's disposer is
-        registered on ``ctx`` for app-level shutdown. Then ``ensure_indexes``
+        registered on ``ctx`` for app-level shutdown. A client pre-seeded on
+        ``ctx`` (the escape hatch) is adopted onto the class cache instead of
+        building — no disposer, the caller owns it. Then ``ensure_indexes``
         runs for this resource's collection.
 
         On exit: the disposer (registered on ``ctx``) closes the client and
         clears the cached state, so a fresh ``create_app`` in the same process
         starts clean.
         """
-        if MongoResource.__dict__.get("_client") is None and not ctx.has(_MONGO_CLIENT_KEY):
-            client, database_name, dispose = cls.build_client(ctx)
-            MongoResource._client = client
-            MongoResource._database_name = database_name
-            MongoResource._db = client[database_name]
-            ctx.set(_MONGO_CLIENT_KEY, client)
-            ctx.add_disposer(dispose)
+        if MongoResource.__dict__.get("_client") is None:
+            if ctx.has(_MONGO_CLIENT_KEY):
+                # Escape hatch: adopt the caller-supplied client onto the
+                # class cache — the request path (get_collection) reads the
+                # class attributes, never ctx.
+                MongoResource._client = ctx.get(_MONGO_CLIENT_KEY)
+                MongoResource._db = MongoResource._client[MongoResource._database_name]
+            else:
+                client, database_name, dispose = cls.build_client(ctx)
+                MongoResource._client = client
+                MongoResource._database_name = database_name
+                MongoResource._db = client[database_name]
+                ctx.set(_MONGO_CLIENT_KEY, client)
+                ctx.add_disposer(dispose)
         await cls.ensure_indexes()
         # Always clear the class-level cache on shutdown so a fresh app in the
         # same process does not see a stale (possibly closed) client.

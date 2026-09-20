@@ -167,11 +167,12 @@ class SqlResource(BaseResource):
     async def lifespan(cls, ctx: Any) -> AsyncIterator[None]:
         """Build (or reuse) the shared session factory, then yield.
 
-        On entry: if no session factory is cached on :class:`SqlResource`
-        (and none pre-seeded on ``ctx``), build one via
-        :meth:`build_session_factory` and cache it on the base so all SQL
-        resources share a single connection pool. The engine's disposer is
-        registered on ``ctx`` for app-level shutdown.
+        On entry: if no session factory is cached on :class:`SqlResource`,
+        build one via :meth:`build_session_factory` and cache it on the base
+        so all SQL resources share a single connection pool. The engine's
+        disposer is registered on ``ctx`` for app-level shutdown. A factory
+        pre-seeded on ``ctx`` (the escape hatch) is adopted onto the class
+        cache instead of building — no disposer, the caller owns it.
 
         On exit: the cached factory is always cleared (registered as a
         disposer) so a fresh ``create_app`` in the same process starts clean
@@ -179,13 +180,17 @@ class SqlResource(BaseResource):
         pre-seeded (caller-supplied) factory is left intact — the caller
         owns it.
         """
-        if SqlResource.__dict__.get("_session_factory") is None and not ctx.has(
-            _SESSION_FACTORY_KEY
-        ):
-            factory, dispose = cls.build_session_factory(ctx)
-            SqlResource._session_factory = factory
-            ctx.set(_SESSION_FACTORY_KEY, factory)
-            ctx.add_disposer(dispose)
+        if SqlResource.__dict__.get("_session_factory") is None:
+            if ctx.has(_SESSION_FACTORY_KEY):
+                # Escape hatch: adopt the caller-supplied factory onto the
+                # class cache — the request path (get_session_factory) reads
+                # the class attribute, never ctx.
+                SqlResource._session_factory = ctx.get(_SESSION_FACTORY_KEY)
+            else:
+                factory, dispose = cls.build_session_factory(ctx)
+                SqlResource._session_factory = factory
+                ctx.set(_SESSION_FACTORY_KEY, factory)
+                ctx.add_disposer(dispose)
         # Always clear the class-level cache on shutdown so a fresh app in the
         # same process does not see a stale (possibly disposed) factory.
         ctx.add_disposer(_clear_sql_factory)

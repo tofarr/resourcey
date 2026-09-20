@@ -23,7 +23,7 @@ zero external dependencies:
 
 ```bash
 uv sync
-uv run python -m message_board.app
+uv run resourcey
 ```
 
 The app listens on **port 8082** by default.
@@ -31,7 +31,7 @@ The app listens on **port 8082** by default.
 To use a real MongoDB server instead, set `RESOURCEY_MONGO_URL`:
 
 ```bash
-RESOURCEY_MONGO_URL=mongodb://localhost:27017 uv run python -m message_board.app
+RESOURCEY_MONGO_URL=mongodb://localhost:27017 uv run resourcey
 ```
 
 ## Resources

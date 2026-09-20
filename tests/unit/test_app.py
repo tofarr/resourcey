@@ -327,9 +327,10 @@ class TestResourceLifespan:
         from resourcey.config.config_framework import FrameworkConfig
         from resourcey.resource.sql import _SESSION_FACTORY_KEY
 
+        # Seed ONLY the context (the documented escape hatch) — the lifespan
+        # must adopt it onto the class cache so the request path finds it.
         ctx = AppContext(FrameworkConfig())
         ctx.set(_SESSION_FACTORY_KEY, sqlite_factory)
-        SqlResource._session_factory = sqlite_factory
         async with SqlResource.lifespan(ctx):
             assert SqlResource.get_session_factory() is sqlite_factory
         await ctx.aclose()
@@ -355,6 +356,50 @@ class TestResourceLifespan:
         # The base lifespan is a no-op yield — entering/exiting must not raise.
         async with BaseResource.lifespan(ctx):
             pass
+
+    @pytest.mark.asyncio
+    async def test_startup_failure_still_drains_disposers(self):
+        """A resource whose lifespan raises must not leak its siblings' engines.
+
+        The app lifespan pushes ``ctx.aclose`` as an exit-stack callback, so
+        disposers registered by already-entered resources run even when a
+        later resource fails during startup.
+        """
+        from contextlib import asynccontextmanager
+
+        from resourcey.app import create_app
+        from resourcey.resource.errors import ResourceyConfigError
+
+        class Ok(SqlResource):
+            id: int
+            title: str
+
+        @classmethod
+        @asynccontextmanager
+        async def _broken_lifespan(cls, ctx):
+            # Fail during entry (e.g. a misconfigured backend), after the
+            # first resource has already built its engine and registered the
+            # disposer on ctx.
+            raise ResourceyConfigError("broken backend")
+            yield  # pragma: no cover
+
+        class Broken(SqlResource):
+            id: int
+            title: str
+
+            lifespan = _broken_lifespan
+
+        app = create_app(resources=[Ok, Broken])
+        # Run the Starlette lifespan the way uvicorn does: startup raises,
+        # but the earlier resource's engine disposer must still have run.
+        lifespan_cm = app.router.lifespan_context(app)
+        with pytest.raises(ResourceyConfigError, match="broken backend"):
+            async with lifespan_cm:
+                pass
+        # ctx was created inside create_app; verify no stale class cache and
+        # no leaked engine by checking the class cache was cleared (the
+        # disposer for a built engine ran during the failed startup).
+        assert SqlResource._session_factory is None
 
 
 # ---------------------------------------------------------------------------
