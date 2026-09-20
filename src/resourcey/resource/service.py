@@ -18,6 +18,7 @@ fill it in without reworking the action methods or the route wiring.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
 
@@ -341,18 +342,21 @@ class ResourceService:
 
     def _add_search_route(self, router: APIRouter, path: str, session_dep: Any) -> None:
         service = self
+        filter_cls = self.resource.get_search_filter_type()
+        filter_dep = self._filter_dependency(filter_cls) if filter_cls is not None else None
 
         async def handler(  # type: ignore[no-untyped-def]
             request,
             limit=_DEFAULT_LIMIT,
             offset=0,
             sort=None,
+            filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
             session=Depends(session_dep),  # noqa: B008
         ):
             sort_tokens = [t.strip() for t in sort.split(",")] if sort else None
-            filters = self._resolve_filters(request)
+            resolved = self._resolve_filters(request, filter_cls, filters)
             page = await service.search(
-                session, limit=limit, offset=offset, sort=sort_tokens, filters=filters
+                session, limit=limit, offset=offset, sort=sort_tokens, filters=resolved
             )
             return _json_response(page, self._ctx())
 
@@ -437,17 +441,69 @@ class ResourceService:
         field = self.resource.model_fields[self.id_field]
         return _resolve_scalar_type(field.annotation)
 
-    def _resolve_filters(self, request: StarletteRequest) -> SearchFilter[Any] | None:
-        """Resolve ``field__op=value`` query params into a declared filter instance.
+    def _filter_dependency(self, filter_cls: type[SearchFilter[Any]]) -> Callable[..., Any]:
+        """Build a FastAPI dependency exposing each declared filter field as a query param.
 
-        When the resource declares no search filter class, any ``field__op``
-        param is rejected with :class:`InvalidInputError` (-> 400). When a
-        filter class is declared, only its known ``field__op`` fields are
-        accepted; an unknown ``field__op`` token is also rejected so typos
-        surface rather than being silently ignored.
+        The declared ``SearchFilter`` class is the single source of truth for
+        what is filterable: its ``model_fields`` (e.g. ``thread_id__eq``,
+        ``text__contains``) become individual query parameters in the OpenAPI
+        schema, typed from the field annotations. The dependency's signature is
+        synthesised from those fields (one ``Query(default=None)`` parameter per
+        field) so FastAPI unfolds them into separate OpenAPI parameters and
+        coerces/validates each value (422 on a bad type) before the handler runs.
+
+        A synthesised per-field dependency is used rather than
+        ``filters: FilterCls = Depends()`` (plain model-as-dependency) for two
+        reasons: (1) FastAPI drops list-typed fields from the schema in that
+        mode, so the ``in`` operator (``field__in: list[...]``) would silently
+        vanish; (2) FastAPI only unfolds a model-typed query param into per-field
+        params when it is the *sole* query param (``_get_flat_fields_from_params``
+        checks ``len(fields) == 1``) — the search route always has
+        ``limit``/``offset``/``sort`` alongside it, so a model param would render
+        as a single ``$ref`` instead of separate filter params.
+
+        Returns a callable suitable for ``Depends(...)``; it yields a validated
+        ``filter_cls`` instance with only the client-supplied fields set.
         """
-        filter_cls = self.resource.get_search_filter_type()
-        filter_params = {k: v for k, v in request.query_params.items() if "__" in k}
+        fields = list(filter_cls.model_fields.items())
+
+        def dependency(**kwargs: Any) -> filter_cls:  # type: ignore[valid-type]
+            return filter_cls(**{k: v for k, v in kwargs.items() if v is not None})
+
+        # Replace the dependency's signature so FastAPI sees one typed,
+        # Query-defaulted parameter per filter field. The annotation is set to
+        # the real type object (not a string) so it resolves without forward
+        # references even under ``from __future__ import annotations``.
+        params = [
+            inspect.Parameter(
+                name,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                default=Query(default=None),
+                annotation=field.annotation,
+            )
+            for name, field in fields
+        ]
+        dependency.__signature__ = inspect.Signature(parameters=params)  # type: ignore[attr-defined]
+        return dependency
+
+    def _resolve_filters(
+        self,
+        request: StarletteRequest,
+        filter_cls: type[SearchFilter[Any]] | None,
+        filters: SearchFilter[Any] | None,
+    ) -> SearchFilter[Any] | None:
+        """Reject unknown ``field__op`` query params; return the validated filter.
+
+        FastAPI collects the declared filter fields into ``filters`` (via the
+        generated dependency) and surfaces them in the OpenAPI schema. It does
+        not, however, reject *unknown* query parameters — they are silently
+        ignored. To preserve the contract that a typo (an undeclared
+        ``field__op``) surfaces as ``400 invalid_input`` rather than being
+        dropped, any ``field__op`` query key not in the declared filter class is
+        rejected here. When the resource declares no filter class, any
+        ``field__op`` param is rejected outright.
+        """
+        filter_params = {k for k in request.query_params if "__" in k}
         if not filter_params:
             return None
         if filter_cls is None:
@@ -455,11 +511,10 @@ class ResourceService:
                 f"Filter parameters {sorted(filter_params)} are not supported on "
                 f"{self.resource.__name__}; it declares no search filter."
             )
-        declared = set(filter_cls.model_fields)
-        unknown = set(filter_params) - declared
+        unknown = filter_params - set(filter_cls.model_fields)
         if unknown:
             raise InvalidInputError(f"Unknown filter parameters {sorted(unknown)}.")
-        return filter_cls(**filter_params)  # type: ignore[arg-type]
+        return filters
 
     def _batch_edit_item_model(self) -> type[BaseModel]:
         """Build the request-body item model for ``batch-edit``: id + update fields.
