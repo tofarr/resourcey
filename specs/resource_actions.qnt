@@ -1,14 +1,21 @@
 // resource_actions.qnt — formal spec for the standard resource actions.
 //
-// A resource exposes: create, read, update, delete, search, batch_read,
-// batch_edit. This spec models the state transitions and invariants that
-// every generated service must satisfy.
+// A resource exposes: create, read, update, delete, search, count,
+// batch_read, batch_edit. This spec models the state transitions and
+// invariants that every generated service must satisfy.
 //
 // search is modelled with an opt-in filter: a resource declares a filter type
 // via get_search_filter_type(); when no filter type is declared the search
 // action refuses any non-empty filter (the endpoint serves pagination + sort
 // only). A filter combines attribute predicates (equality and `in`-membership);
 // an empty `in` list matches nothing, mirroring the portable SQL `false()`.
+//
+// Search uses cursor-based (keyset) pagination: a page carries an opaque
+// `nextCursor` that encodes the sort key (and id tie-breaker) of the last row
+// on the page; `nextCursor` is `None` when the page is the last. There is no
+// `total` on the page — counting is a separate `count` action that returns the
+// matching row count for a filter, decoupled from paging and sort. `count`
+// reuses the `search` permission (counting is not a separate privilege).
 //
 // Sort is a single field name drawn from the resource's sortable fields
 // (advertised as an OpenAPI enum) plus a `desc` direction flag; resources with
@@ -21,7 +28,7 @@
 //   - deleteRequiresExisting: delete fails for absent ids.
 
 module resource_actions {
-  type Action = Create | Read | Update | Delete | Search | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
 
   // A stored entity is keyed by an id and carries a value.
   type Entity = int
@@ -106,6 +113,17 @@ module resource_actions {
       Set()
     else
       entities.keys().filter(k => matchesFilter(entities.get(k), flt))
+
+  // count: return the number of entities matching the filter. Decoupled from
+  // paging and sort (a count has no ordering). Reuses the search permission.
+  // When no filter type is declared, a non-empty filter is refused (returns 0);
+  // otherwise counting reduces to AND over the filter's predicates, exactly as
+  // search does. An empty filter counts every entity.
+  def count(hasFilterType: bool, flt: Filter): int =
+    if (not(hasFilterType) and flt.keys().size() > 0)
+      0
+    else
+      entities.keys().filter(k => matchesFilter(entities.get(k), flt)).size()
 
   // batch_read: return entities for a set of ids; missing ids are omitted.
   def batch_read(ids: Set[int]): int -> Entity =
@@ -285,6 +303,48 @@ module resource_actions {
       .then(all {
         // No filter declared but empty filter -> all keys returned.
         assert(search(false, Map()) == Set(1, 2)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // count: an empty filter counts every entity.
+  run countEmptyFilterCountsAll = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(count(defaultHasFilterType, Map()) == 2),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // count: an `Eq` predicate narrows the count to the matching entity.
+  run countEqualityPredicate = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(count(defaultHasFilterType, Map("value" -> Eq(10))) == 1),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // count: with no filter type declared, a non-empty filter is refused (0);
+  // an empty filter counts every entity.
+  run countNoFilterDeclaredRejectsNonEmptyFilter = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(count(false, Map("value" -> Eq(10))) == 0),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(count(false, Map()) == 2),
         entities' = entities,
         nextId' = nextId,
       })

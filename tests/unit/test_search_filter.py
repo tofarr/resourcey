@@ -11,10 +11,10 @@ from __future__ import annotations
 from datetime import datetime
 
 import pytest
-from conftest import User, UserSearchFilter, new_user  # type: ignore[no-redef]
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from conftest import User, UserSearchFilter, new_user  # type: ignore[no-redef]
 from resourcey.util.search_filter import (
     ALL,
     NONE,

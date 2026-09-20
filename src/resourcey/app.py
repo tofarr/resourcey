@@ -65,7 +65,7 @@ def create_app(
 
     Returns:
         A :class:`FastAPI` with CORS middleware, error handlers, engine/session
-        lifecycle (lifespan), and a route for each registered resource's seven
+        lifecycle (lifespan), and a route for each registered resource's
         standard actions.
     """
     if config is not None:

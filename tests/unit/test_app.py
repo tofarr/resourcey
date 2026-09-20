@@ -346,11 +346,21 @@ class TestAppHttpCrud:
     async def test_search_returns_page(self, client):
         for i in range(3):
             await client.post("/app-widgets", json={"label": f"i{i}"})
-        resp = await client.get("/app-widgets", params={"limit": 2, "offset": 0})
+        resp = await client.get("/app-widgets", params={"limit": 2})
         assert resp.status_code == 200
         body = resp.json()
-        assert body["total"] == 3
+        assert "total" not in body
+        assert "offset" not in body
         assert len(body["items"]) == 2
+        assert body["next_cursor"] is not None
+
+    @pytest.mark.asyncio
+    async def test_count_endpoint(self, client):
+        for i in range(3):
+            await client.post("/app-widgets", json={"label": f"i{i}"})
+        resp = await client.get("/app-widgets/count")
+        assert resp.status_code == 200
+        assert resp.json() == 3
 
     @pytest.mark.asyncio
     async def test_batch_read(self, client):

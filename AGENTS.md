@@ -17,6 +17,15 @@ area. The always-on rules below apply to all code in this repo.
 * Quint for formal specs; every behavioral change to a resource must be
   reflected in `specs/` and verified with `quint typecheck` / `quint test`.
 
+## Release state
+
+The project is **pre-release** (no tagged release, no external consumers).
+Backward-compatibility shims are not required when changing the public API:
+removed query params (e.g. a dropped `offset` after switching to cursor
+pagination) do not need to be rejected or aliased — they may simply be
+ignored. Optimize for a clean, minimal API surface over migration ergonomics
+until the first release.
+
 ## Core design principles
 
 * **Resource-oriented.** A resource is the central unit. One declaration

@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
+from resourcey.resource.cursor import apply_cursor
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -178,23 +180,36 @@ class ResourceRepository:
         session: AsyncSession,
         *,
         limit: int,
-        offset: int,
         sort: tuple[str, bool] | None,
         filters: SearchFilter[Any] | None,
+        cursor: tuple[Any, Any] | None = None,
         context: dict[str, Any] | None = None,
     ) -> list[Any]:
-        """Build and execute a paged select; return read-model instances.
+        """Build and execute a keyset-paged select; return read-model instances.
 
         ``filters`` (a :class:`~resourcey.util.search_filter.SearchFilter` or
         ``None``) contributes its SQL ``WHERE`` via ``filter_sql``.
         ``sort`` is a ``(field_name, ascending)`` tuple already validated by
-        the service, or ``None`` for no ordering.
+        the service, or ``None`` for no ordering. ``cursor`` is the decrypted
+        ``(sort_key, id)`` pair of the last row on the previous page, or
+        ``None`` for the first page; it becomes a keyset ``WHERE`` predicate
+        (see :mod:`resourcey.resource.cursor`) rather than ``OFFSET n``.
         """
         stmt = select(self.model)
         if filters is not None:
             stmt = filters.filter_sql(stmt)
+        if cursor is not None:
+            cursor_key, cursor_id = cursor
+            stmt = apply_cursor(
+                stmt,
+                self.model,
+                sort=sort,
+                id_field=self.id_field,
+                cursor_key=cursor_key,
+                cursor_id=cursor_id,
+            )
         stmt = self._apply_sort(stmt, sort)
-        stmt = stmt.limit(limit).offset(offset)
+        stmt = stmt.limit(limit)
         rows = (await session.execute(stmt)).scalars().all()
         return [self._to_read_model(row, context) for row in rows]
 
@@ -204,7 +219,7 @@ class ResourceRepository:
         *,
         filters: SearchFilter[Any] | None,
     ) -> int:
-        """Total matching rows for pagination metadata (same ``filters``)."""
+        """Total matching rows for the ``count`` action (same ``filters`` as ``search``)."""
         stmt = select(func.count()).select_from(self.model)
         if filters is not None:
             stmt = filters.filter_sql(stmt)
