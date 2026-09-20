@@ -372,7 +372,11 @@ class ResourceService:
             "session": AsyncSession,
         }
         self._route(
-            router, path, ["GET"], handler, response_model=Page[read_model]  # type: ignore[valid-type]
+            router,
+            path,
+            ["GET"],
+            handler,
+            response_model=Page[read_model],  # type: ignore[valid-type]
         )
 
     def _add_batch_read_route(
