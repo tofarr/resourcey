@@ -35,9 +35,12 @@ Every generated resource service exposes the **standard actions** over REST:
   - `cursor` is an opaque, encrypted keyset cursor from a previous page's
     `next_cursor`; omitted/empty on the first request. It encodes the sort
     key (and id, for stable tie-breaking) of the last row on the previous
-    page, encrypted via the `EncryptionService` (JWE `dir` + `A256GCM`) so
-    it is tamper-proof. A malformed or tampered cursor returns
-    `400 invalid_input`.
+    page **plus the `(sort_field, ascending)` it was built for**, encrypted
+    via the `EncryptionService` (JWE `dir` + `A256GCM`) so it is tamper-proof.
+    The sort field/direction are validated on decode: a cursor reused under a
+    different `sort` / `desc` (or no sort) returns `400 invalid_input` rather
+    than silently applying the key against the wrong column. A malformed or
+    tampered cursor also returns `400 invalid_input`.
   - `limit` is capped (default 20, max 100). There is no `offset`.
   - The response `Page` carries `items`, `limit`, and `next_cursor`
     (`None` when the page is the last). There is no `total` on the page —

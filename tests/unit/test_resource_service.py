@@ -109,8 +109,15 @@ class SvcUnsortableWidget(BaseResource):
     ]
 
 
+class SvcDtWidget(BaseResource):
+    """A resource with a creatable, sortable datetime field for cursor type round-trip tests."""
+
+    id: int
+    ts: datetime
+
+
 # Resolve ORM models eagerly so metadata is populated before table creation.
-for _r in (SvcWidget, SvcGadget, SvcFilterableWidget, SvcUnsortableWidget):
+for _r in (SvcWidget, SvcGadget, SvcFilterableWidget, SvcUnsortableWidget, SvcDtWidget):
     _r.get_sql_alchemy_model()
 
 
@@ -286,6 +293,54 @@ class TestServiceSearch:
         await svc.create(session, SvcWidget.get_create_model()(label="g0", size=0))
         with pytest.raises(InvalidInputError):
             await svc.search(session, cursor="not-a-valid-cursor")
+
+    @pytest.mark.asyncio
+    async def test_search_cursor_sort_mismatch_raises(self, session: AsyncSession) -> None:
+        """A cursor built for sort=size must not be reused under a different sort."""
+        svc = ResourceService(SvcWidget)
+        for i in range(5):
+            await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
+        page = await svc.search(session, limit=2, sort="size")
+        assert page.next_cursor is not None
+        # Reusing the size-sorted cursor under no sort -> 400.
+        with pytest.raises(InvalidInputError):
+            await svc.search(session, limit=2, cursor=page.next_cursor)
+        # Reusing under a different sort field -> 400.
+        with pytest.raises(InvalidInputError):
+            await svc.search(session, limit=2, sort="label", cursor=page.next_cursor)
+        # Reusing under a different direction -> 400.
+        with pytest.raises(InvalidInputError):
+            await svc.search(session, limit=2, sort="size", desc=True, cursor=page.next_cursor)
+
+    @pytest.mark.asyncio
+    async def test_search_cursor_datetime_sort_round_trip(self, session: AsyncSession) -> None:
+        """Cursor round-trip preserves a native datetime sort key (not stringified).
+
+        SQLite stores datetimes without tzinfo, so we compare naive values;
+        the point is that the cursor binds a native ``datetime`` (not a
+        string) to the keyset predicate and the round-trip yields the right
+        page ordering.
+        """
+        svc = ResourceService(SvcDtWidget)
+        for i in range(5):
+            await svc.create(
+                session,
+                SvcDtWidget.get_create_model()(ts=datetime(2026, 1, i + 1, 12, 0, 0, tzinfo=UTC)),
+            )
+        page = await svc.search(session, limit=2, sort="ts")
+        assert [item.ts.replace(tzinfo=None) for item in page.items] == [
+            datetime(2026, 1, 1, 12, 0, 0),
+            datetime(2026, 1, 2, 12, 0, 0),
+        ]
+        assert page.next_cursor is not None
+        page2 = await svc.search(session, limit=2, sort="ts", cursor=page.next_cursor)
+        assert [item.ts.replace(tzinfo=None) for item in page2.items] == [
+            datetime(2026, 1, 3, 12, 0, 0),
+            datetime(2026, 1, 4, 12, 0, 0),
+        ]
+        page3 = await svc.search(session, limit=2, sort="ts", cursor=page2.next_cursor)
+        assert len(page3.items) == 1
+        assert page3.next_cursor is None
 
     @pytest.mark.asyncio
     async def test_search_sort_ascending(self, session: AsyncSession) -> None:

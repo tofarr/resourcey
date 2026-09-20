@@ -279,13 +279,30 @@ class ResourceService:
         cursor: str | None,
         sort_parsed: tuple[str, bool] | None,
     ) -> tuple[Any, Any] | None:
-        """Decrypt an opaque cursor into a ``(sort_key, id)`` pair, or ``None``."""
+        """Decrypt an opaque cursor into a ``(sort_key, id)`` pair, or ``None``.
+
+        Validates that the cursor was built for the same ``(sort_field,
+        ascending)`` as the current request: a cursor from a ``sort=size``
+        page reused under ``sort=created_at`` (or no sort) would apply the
+        decrypted key against the wrong column, yielding silently wrong
+        results, so it is rejected with ``400 invalid_input``.
+        """
         if not cursor:
             return None
         try:
-            return decode_cursor(self._encryption_service(), cursor)
+            c_field, c_ascending, sort_key, id_value = decode_cursor(
+                self._encryption_service(), cursor
+            )
         except (ValueError, KeyError) as exc:
             raise InvalidInputError(f"Invalid or tampered cursor: {exc}") from exc
+        expected_field = sort_parsed[0] if sort_parsed is not None else None
+        expected_ascending = sort_parsed[1] if sort_parsed is not None else True
+        if c_field != expected_field or c_ascending != expected_ascending:
+            raise InvalidInputError(
+                "Cursor was built for a different sort than the current request; "
+                "start a new search without a cursor when changing sort."
+            )
+        return sort_key, id_value
 
     def _next_cursor(
         self,
@@ -299,8 +316,12 @@ class ResourceService:
         field = self._sort_key_field(sort_parsed)
         sort_key = getattr(last, field)
         id_value = getattr(last, self.id_field)
+        sort_field = sort_parsed[0] if sort_parsed is not None else None
+        ascending = sort_parsed[1] if sort_parsed is not None else True
         return encode_cursor(
             self._encryption_service(),
+            sort_field=sort_field,
+            ascending=ascending,
             sort_key=sort_key,
             id_value=id_value,
         )
@@ -568,7 +589,7 @@ class ResourceService:
                 )
             resolved = self._resolve_filters(request, filter_cls, filters)
             total = await service.count(session, filters=resolved)
-            return _json_response(total, self._ctx())
+            return _json_response(total, None)
 
         handler.__annotations__ = {"request": Request, "session": AsyncSession}
         self._route(router, count_path, ["GET"], handler, response_model=None)
