@@ -18,6 +18,7 @@ fill it in without reworking the action methods or the route wiring.
 
 from __future__ import annotations
 
+import enum
 import inspect
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
@@ -157,15 +158,21 @@ class ResourceService:
         *,
         limit: int = _DEFAULT_LIMIT,
         offset: int = 0,
-        sort: list[str] | None = None,
+        sort: str | None = None,
+        desc: bool = False,
         filters: SearchFilter[Any] | None = None,
     ) -> Page[Any]:
-        """Search with pagination, sort, and optional filters; return a :class:`Page`."""
+        """Search with pagination, sort, and optional filters; return a :class:`Page`.
+
+        ``sort`` is a single sortable field name (validated against the
+        resource's ``sortable`` flag); ``desc`` selects descending order
+        (default ascending). Both are surfaced to :meth:`authorize`.
+        """
         await self.authorize(
-            session, "search", limit=limit, offset=offset, sort=sort, filters=filters
+            session, "search", limit=limit, offset=offset, sort=sort, desc=desc, filters=filters
         )
         limit, offset = self._validate_pagination(limit, offset)
-        sort_parsed = self._parse_sort(sort)
+        sort_parsed = self._parse_sort(sort, desc)
         items = await self.repository.search(
             session,
             limit=limit,
@@ -215,28 +222,22 @@ class ResourceService:
             raise InvalidInputError(f"offset must be >= 0, got {offset}")
         return limit, offset
 
-    def _parse_sort(self, sort: list[str] | None) -> list[tuple[str, bool]] | None:
-        """Map ``field`` / ``-field`` tokens to ``(field, ascending)`` tuples.
+    def _parse_sort(self, sort: str | None, desc: bool) -> tuple[str, bool] | None:
+        """Map a sort field name + ``desc`` flag to a ``(field, ascending)`` tuple.
 
-        Validates each field against the resource's ``sortable`` flag
-        (unknown / non-sortable fields -> :class:`InvalidInputError`).
+        Validates the field against the resource's ``sortable`` flag (unknown
+        / non-sortable fields -> :class:`InvalidInputError`). Returns ``None``
+        when no sort is requested. ``ascending`` is ``not desc``.
         """
         if not sort:
             return None
-        parsed: list[tuple[str, bool]] = []
-        for token in sort:
-            if token.startswith("-"):
-                field_name, ascending = token[1:], False
-            else:
-                field_name, ascending = token, True
-            if field_name not in self.resource.model_fields:
-                raise InvalidInputError(f"Unknown sort field {field_name!r}")
-            field = self.resource.model_fields[field_name]
-            config = self.resource.get_config_for_field(field_name, field)
-            if not config.sortable:
-                raise InvalidInputError(f"Field {field_name!r} is not sortable")
-            parsed.append((field_name, ascending))
-        return parsed
+        if sort not in self.resource.model_fields:
+            raise InvalidInputError(f"Unknown sort field {sort!r}")
+        field = self.resource.model_fields[sort]
+        config = self.resource.get_config_for_field(sort, field)
+        if not config.sortable:
+            raise InvalidInputError(f"Field {sort!r} is not sortable")
+        return sort, not desc
 
     # ------------------------------------------------------------------
     # register — mount the seven actions onto a FastAPI app or router
@@ -347,30 +348,15 @@ class ResourceService:
         service = self
         filter_cls = self.resource.get_search_filter_type()
         filter_dep = self._filter_dependency(filter_cls) if filter_cls is not None else None
+        sortable = self.resource.get_sortable_fields()
         read_model = self.read_model
 
-        async def handler(  # type: ignore[no-untyped-def]
-            request,
-            limit=_DEFAULT_LIMIT,
-            offset=0,
-            sort=None,
-            filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
-            session=Depends(session_dep),  # noqa: B008
-        ):
-            sort_tokens = [t.strip() for t in sort.split(",")] if sort else None
-            resolved = self._resolve_filters(request, filter_cls, filters)
-            page = await service.search(
-                session, limit=limit, offset=offset, sort=sort_tokens, filters=resolved
+        if sortable:
+            handler = self._sortable_search_handler(
+                service, filter_cls, filter_dep, sortable, session_dep
             )
-            return _json_response(page, self._ctx())
-
-        handler.__annotations__ = {
-            "request": Request,
-            "limit": int,
-            "offset": int,
-            "sort": str | None,
-            "session": AsyncSession,
-        }
+        else:
+            handler = self._sortless_search_handler(service, filter_cls, filter_dep, session_dep)
         self._route(
             router,
             path,
@@ -378,6 +364,97 @@ class ResourceService:
             handler,
             response_model=Page[read_model],  # type: ignore[valid-type]
         )
+
+    def _sortable_search_handler(
+        self,
+        service: ResourceService,
+        filter_cls: type[SearchFilter[Any]] | None,
+        filter_dep: Callable[..., Any] | None,
+        sortable: list[str],
+        session_dep: Any,
+    ) -> Callable[..., Any]:
+        """Build the GET search handler for a resource with sortable fields.
+
+        ``sort`` is an enum of the resource's sortable fields, so FastAPI
+        validates it (422 on an unknown / injected value) before the handler
+        runs. ``desc`` selects direction (default ascending).
+        """
+        # A dynamic StrEnum (member names are the field names) gives OpenAPI a
+        # concrete enum and FastAPI request validation that rejects unknown /
+        # injected sort values.
+        sort_enum = enum.StrEnum(  # type: ignore[misc]
+            f"{self.resource.__name__}SortField", {n: n for n in sortable}
+        )
+        sort_default: Any = Query(default=None)
+        desc_default: Any = Query(default=False)
+
+        async def handler(  # type: ignore[no-untyped-def]
+            request,
+            limit=_DEFAULT_LIMIT,
+            offset=0,
+            sort=sort_default,
+            desc=desc_default,
+            filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
+            session=Depends(session_dep),  # noqa: B008
+        ):
+            resolved = self._resolve_filters(request, filter_cls, filters)
+            page = await service.search(
+                session,
+                limit=limit,
+                offset=offset,
+                sort=sort.value if sort is not None else None,
+                desc=desc,
+                filters=resolved,
+            )
+            return _json_response(page, self._ctx())
+
+        handler.__annotations__ = {
+            "request": Request,
+            "limit": int,
+            "offset": int,
+            "sort": sort_enum | None,
+            "desc": bool,
+            "session": AsyncSession,
+        }
+        return handler
+
+    def _sortless_search_handler(
+        self,
+        service: ResourceService,
+        filter_cls: type[SearchFilter[Any]] | None,
+        filter_dep: Callable[..., Any] | None,
+        session_dep: Any,
+    ) -> Callable[..., Any]:
+        """Build the GET search handler for a resource with no sortable fields.
+
+        ``sort`` / ``desc`` are not exposed. A residual check preserves the
+        contract that ``?sort=`` on a sortless resource is rejected (400)
+        rather than silently ignored.
+        """
+
+        async def handler(  # type: ignore[no-untyped-def]
+            request,
+            limit=_DEFAULT_LIMIT,
+            offset=0,
+            filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
+            session=Depends(session_dep),  # noqa: B008
+        ):
+            if "sort" in request.query_params or "desc" in request.query_params:
+                raise InvalidInputError(
+                    f"Sort parameters are not supported on {self.resource.__name__}; "
+                    f"it declares no sortable fields."
+                )
+            resolved = self._resolve_filters(request, filter_cls, filters)
+            page = await service.search(session, limit=limit, offset=offset, filters=resolved)
+            return _json_response(page, self._ctx())
+
+        handler.__annotations__ = {
+            "request": Request,
+            "limit": int,
+            "offset": int,
+            "session": AsyncSession,
+        }
+        return handler
 
     def _add_batch_read_route(
         self, router: APIRouter, path: str, id_type: Any, session_dep: Any

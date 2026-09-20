@@ -95,8 +95,22 @@ class SvcFilterableWidget(BaseResource):
         return _Filter
 
 
+class SvcUnsortableWidget(BaseResource):
+    """A resource whose every field is opted out of sorting.
+
+    Exercises the ``sort`` / ``desc`` params being omitted from the OpenAPI
+    schema and ``?sort=`` being rejected at runtime (#30).
+    """
+
+    id: Annotated[int, ResourceyField(sortable=False)]
+    label: Annotated[str, ResourceyField(sortable=False)]
+    created_at: Annotated[
+        datetime, Field(default_factory=lambda: datetime.now(UTC)), ResourceyField(sortable=False)
+    ]
+
+
 # Resolve ORM models eagerly so metadata is populated before table creation.
-for _r in (SvcWidget, SvcGadget, SvcFilterableWidget):
+for _r in (SvcWidget, SvcGadget, SvcFilterableWidget, SvcUnsortableWidget):
     _r.get_sql_alchemy_model()
 
 
@@ -254,7 +268,7 @@ class TestServiceSearch:
         svc = ResourceService(SvcWidget)
         for i in [3, 1, 2]:
             await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, sort=["size"])
+        page = await svc.search(session, sort="size")
         assert [item.size for item in page.items] == [1, 2, 3]
 
     @pytest.mark.asyncio
@@ -262,14 +276,14 @@ class TestServiceSearch:
         svc = ResourceService(SvcWidget)
         for i in [3, 1, 2]:
             await svc.create(session, SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search(session, sort=["-size"])
+        page = await svc.search(session, sort="size", desc=True)
         assert [item.size for item in page.items] == [3, 2, 1]
 
     @pytest.mark.asyncio
     async def test_search_sort_unknown_field_raises(self, session: AsyncSession) -> None:
         svc = ResourceService(SvcWidget)
         with pytest.raises(InvalidInputError):
-            await svc.search(session, sort=["nonsense"])
+            await svc.search(session, sort="nonsense")
 
     @pytest.mark.asyncio
     async def test_search_limit_below_one_raises(self, session: AsyncSession) -> None:
@@ -540,7 +554,7 @@ class TestHttpCrud:
         async with client_factory(svc) as client:
             for s in [3, 1, 2]:
                 await client.post("/svc-widgets", json={"label": "g", "size": s})
-            r = await client.get("/svc-widgets?sort=-size")
+            r = await client.get("/svc-widgets?sort=size&desc=true")
             assert [i["size"] for i in r.json()["items"]] == [3, 2, 1]
 
 
@@ -585,10 +599,35 @@ class TestHttpBatchEdit:
 
 class TestHttpErrors:
     @pytest.mark.asyncio
-    async def test_bad_sort_returns_400(self, client_factory, session_factory) -> None:
+    async def test_bad_sort_returns_422(self, client_factory, session_factory) -> None:
+        # ``sort`` is an enum of sortable fields; an unknown value is rejected
+        # by FastAPI's request validation (422), consistent with how typed
+        # filter params behave (#31).
         svc = ResourceService(SvcWidget, session_factory=session_factory)
         async with client_factory(svc) as client:
-            r = await client.get("/svc-widgets?sort=-nonsense")
+            r = await client.get("/svc-widgets?sort=nonsense")
+            assert r.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_sort_injection_attempt_returns_422(
+        self, client_factory, session_factory
+    ) -> None:
+        # The enum validates the value, so a SQL-injection-style payload never
+        # reaches the query layer.
+        svc = ResourceService(SvcWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            r = await client.get("/svc-widgets?sort=id;%20DROP%20TABLE%20users")
+            assert r.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_sort_on_sortless_resource_returns_400(
+        self, client_factory, session_factory
+    ) -> None:
+        # A resource with no sortable fields exposes no ``sort`` param; a
+        # residual check rejects ``?sort=`` with 400 invalid_input.
+        svc = ResourceService(SvcUnsortableWidget, session_factory=session_factory)
+        async with client_factory(svc) as client:
+            r = await client.get("/svc-unsortable-widgets?sort=id")
             assert r.status_code == 400
             assert r.json()["error"]["code"] == "invalid_input"
 
@@ -690,14 +729,14 @@ def _openapi(app: FastAPI) -> dict:
 
 
 class TestSearchOpenApiSchema:
-    """Issue #31: filter fields appear as individual query params in OpenAPI."""
+    """Issues #31 / #30: filter + sort params surface as typed query params in OpenAPI."""
 
     def test_filter_fields_appear_as_query_params(self) -> None:
         app = _build_app(SvcFilterableWidget)
         params = _openapi(app)["paths"]["/svc-filterable-widgets"]["get"]["parameters"]
         names = {p["name"] for p in params}
-        # standard search params are still present
-        assert {"limit", "offset", "sort"} <= names
+        # standard search params are still present (sort is now an enum, plus desc)
+        assert {"limit", "offset", "sort", "desc"} <= names
         # each declared filter field is its own query param (not a single $ref)
         assert {"label__eq", "label__contains", "size__eq", "size__gte", "size__in"} <= names
 
@@ -714,7 +753,7 @@ class TestSearchOpenApiSchema:
         app = _build_app(SvcWidget)
         params = _openapi(app)["paths"]["/svc-widgets"]["get"]["parameters"]
         names = {p["name"] for p in params}
-        assert {"limit", "offset", "sort"} <= names
+        assert {"limit", "offset", "sort", "desc"} <= names
         # no field__op params are advertised when the resource declares no filter
         assert not any("__" in n for n in names)
 
@@ -726,6 +765,35 @@ class TestSearchOpenApiSchema:
         assert by_name["size__eq"]["schema"]["anyOf"][0] == {"type": "integer"}
         # scalar str filter -> string
         assert by_name["label__contains"]["schema"]["anyOf"][0] == {"type": "string"}
+
+    def test_sort_is_enum_of_sortable_fields(self) -> None:
+        # Issue #30: ``sort`` advertises exactly the resource's sortable fields.
+        app = _build_app(SvcWidget)
+        params = _openapi(app)["paths"]["/svc-widgets"]["get"]["parameters"]
+        sort_param = next(p for p in params if p["name"] == "sort")
+        # the enum is exposed via a referenced component schema
+        ref = sort_param["schema"]["anyOf"][0]["$ref"]
+        enum_schema = _openapi(app)["components"]["schemas"][ref.split("/")[-1]]
+        assert set(enum_schema["enum"]) == set(SvcWidget.get_sortable_fields())
+        # SecretStr-free SvcWidget sorts id/label/size/created_at
+        assert {"id", "label", "size", "created_at"} <= set(enum_schema["enum"])
+
+    def test_desc_param_is_boolean_default_false(self) -> None:
+        app = _build_app(SvcWidget)
+        params = _openapi(app)["paths"]["/svc-widgets"]["get"]["parameters"]
+        desc_param = next(p for p in params if p["name"] == "desc")
+        assert desc_param["schema"] == {"type": "boolean", "default": False, "title": "Desc"}
+
+    def test_sort_omitted_when_no_sortable_fields(self) -> None:
+        # Issue #30: a resource with no sortable fields exposes neither
+        # ``sort`` nor ``desc`` on the search endpoint.
+        app = _build_app(SvcUnsortableWidget)
+        params = _openapi(app)["paths"]["/svc-unsortable-widgets"]["get"]["parameters"]
+        names = {p["name"] for p in params}
+        assert "sort" not in names
+        assert "desc" not in names
+        assert {"limit", "offset"} <= names
+        assert SvcUnsortableWidget.get_sortable_fields() == []
 
     def test_search_response_items_typed_as_read_model(self) -> None:
         """The search endpoint's 200 response references the read model, not bare Any."""

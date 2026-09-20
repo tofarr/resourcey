@@ -368,10 +368,10 @@ class TestAppHttpCrud:
 
     @pytest.mark.asyncio
     async def test_invalid_input_returns_envelope(self, client):
-        # Unknown sort field -> 400 invalid_input.
+        # Unknown sort field -> 422 (sort is now an enum validated by FastAPI,
+        # consistent with typed filter params #31).
         resp = await client.get("/app-widgets", params={"sort": "nonsense"})
-        assert resp.status_code == 400
-        assert resp.json()["error"]["code"] == "invalid_input"
+        assert resp.status_code == 422
 
 
 # ---------------------------------------------------------------------------

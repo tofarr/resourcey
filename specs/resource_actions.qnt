@@ -10,6 +10,10 @@
 // only). A filter combines attribute predicates (equality and `in`-membership);
 // an empty `in` list matches nothing, mirroring the portable SQL `false()`.
 //
+// Sort is a single field name drawn from the resource's sortable fields
+// (advertised as an OpenAPI enum) plus a `desc` direction flag; resources with
+// no sortable fields expose no sort parameters at all (#30).
+//
 // Invariants:
 //   - keysAreBelowCounter: nextId is always greater than every stored key.
 //   - readRequiresExisting: read fails for absent ids.
