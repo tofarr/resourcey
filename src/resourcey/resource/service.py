@@ -21,6 +21,8 @@ from __future__ import annotations
 import enum
 import inspect
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
+from email.utils import format_datetime
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
@@ -31,6 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request as StarletteRequest
 
+from resourcey.cache.cache_header import CacheHeader
 from resourcey.resource.cursor import decode_cursor, encode_cursor
 from resourcey.resource.errors import InvalidInputError, NotFoundError
 from resourcey.resource.missing import MISSING
@@ -249,6 +252,46 @@ class ResourceService:
         return results
 
     # ------------------------------------------------------------------
+    # Cache header computation (logic; delegates to the resource strategy)
+    # ------------------------------------------------------------------
+
+    def compute_cache_header(self, items: list[Any]) -> CacheHeader | None:
+        """Resolve the resource's cache strategy and compute a header for ``items``.
+
+        Returns the :class:`~resourcey.cache.cache_header.CacheHeader`, or
+        ``None`` when the strategy yields no validators and no expiry (so the
+        HTTP layer skips header setting entirely). The serialization context
+        (``self._ctx()``) is threaded into the strategy so the ETag validates
+        the same bytes the response body serializes to.
+        """
+        header = self.resource.get_cache_strategy().get_cache_header(items, context=self._ctx())
+        return header if header.has_any() else None
+
+    def compute_count_cache_header(
+        self,
+        count: int,
+        filters: SearchFilter[Any] | None,
+    ) -> CacheHeader | None:
+        """Compute a count-derived cache header for the ``count`` route.
+
+        ``count`` returns a bare integer, not read-model instances, so the
+        model-based ``get_cache_header`` does not apply. The ETag is a stable
+        hash of the count value together with the canonical-JSON serialization
+        of the resolved filter (distinct filters get distinct ETags). No
+        ``Last-Modified`` (a row delete changes the count without touching any
+        ``updated_at``, so last-modified is an unreliable validator for a
+        count). ``expire_in`` from the resource's strategy is honoured.
+        """
+        from resourcey.cache.cache_strategy import _digest, _stable_json
+
+        strategy = self.resource.get_cache_strategy()
+        parts: list[bytes] = [str(count).encode("utf-8"), b"\n"]
+        if filters is not None:
+            parts.append(_stable_json(filters.model_dump(mode="json")).encode("utf-8"))
+        header = CacheHeader(etag=f'"{_digest(parts)}"')
+        return strategy.with_expiry(header) if header.has_any() else None
+
+    # ------------------------------------------------------------------
     # Validation helpers
     # ------------------------------------------------------------------
 
@@ -412,21 +455,29 @@ class ResourceService:
     def _add_create_route(self, router: APIRouter, path: str, session_dep: Any) -> None:
         service = self
 
-        async def handler(payload, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
+        async def handler(request, payload, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
             result = await service.create(session, payload)
-            return _json_response(result, self._ctx(), status.HTTP_201_CREATED)
+            header = service.compute_cache_header([result])
+            return _cached_json_response(
+                request, result, self._ctx(), header, status.HTTP_201_CREATED
+            )
 
-        handler.__annotations__ = {"payload": self.create_model, "session": AsyncSession}
+        handler.__annotations__ = {
+            "request": Request,
+            "payload": self.create_model,
+            "session": AsyncSession,
+        }
         self._route(router, path, ["POST"], handler, response_model=None)
 
     def _add_read_route(self, router: APIRouter, path: str, id_type: Any, session_dep: Any) -> None:
         service = self
 
-        async def handler(id, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+        async def handler(request, id, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
             result = await service.read(session, id)
-            return _json_response(result, self._ctx())
+            header = service.compute_cache_header([result])
+            return _cached_json_response(request, result, self._ctx(), header)
 
-        handler.__annotations__ = {"id": id_type, "session": AsyncSession}
+        handler.__annotations__ = {"request": Request, "id": id_type, "session": AsyncSession}
         self._route(router, f"{path}/{{id}}", ["GET"], handler, response_model=None)
 
     def _add_update_route(
@@ -434,11 +485,13 @@ class ResourceService:
     ) -> None:
         service = self
 
-        async def handler(id, payload, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+        async def handler(request, id, payload, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
             result = await service.update(session, id, payload)
-            return _json_response(result, self._ctx())
+            header = service.compute_cache_header([result])
+            return _cached_json_response(request, result, self._ctx(), header)
 
         handler.__annotations__ = {
+            "request": Request,
             "id": id_type,
             "payload": self.update_model,
             "session": AsyncSession,
@@ -521,7 +574,8 @@ class ResourceService:
                 desc=desc,
                 filters=resolved,
             )
-            return _json_response(page, self._ctx())
+            header = service.compute_cache_header(page.items)
+            return _cached_json_response(request, page, self._ctx(), header)
 
         handler.__annotations__ = {
             "request": Request,
@@ -563,7 +617,8 @@ class ResourceService:
                 )
             resolved = self._resolve_filters(request, filter_cls, filters)
             page = await service.search(session, limit=limit, cursor=cursor, filters=resolved)
-            return _json_response(page, self._ctx())
+            header = service.compute_cache_header(page.items)
+            return _cached_json_response(request, page, self._ctx(), header)
 
         handler.__annotations__ = {
             "request": Request,
@@ -597,7 +652,8 @@ class ResourceService:
                 )
             resolved = self._resolve_filters(request, filter_cls, filters)
             total = await service.count(session, filters=resolved)
-            return _json_response(total, None)
+            header = service.compute_count_cache_header(total, resolved)
+            return _cached_json_response(request, total, None, header)
 
         handler.__annotations__ = {"request": Request, "session": AsyncSession}
         self._route(router, count_path, ["GET"], handler, response_model=None)
@@ -608,11 +664,12 @@ class ResourceService:
         service = self
         batch_path = f"{path}/batch-read"
 
-        async def handler(id=Query(default=[]), session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+        async def handler(request, id=Query(default=[]), session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
             result = await service.batch_read(session, list(id))
-            return _json_response(result, self._ctx())
+            header = service.compute_cache_header(result)
+            return _cached_json_response(request, result, self._ctx(), header)
 
-        handler.__annotations__ = {"id": list[id_type], "session": AsyncSession}
+        handler.__annotations__ = {"request": Request, "id": list[id_type], "session": AsyncSession}
         self._route(router, batch_path, ["GET"], handler, response_model=None)
 
     def _add_batch_edit_route(self, router: APIRouter, path: str, session_dep: Any) -> None:
@@ -620,14 +677,19 @@ class ResourceService:
         batch_path = f"{path}/batch-edit"
         item_model = self._batch_edit_item_model()
 
-        async def handler(edits, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
+        async def handler(request, edits, session=Depends(session_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
             tuples = [
                 (getattr(item, self.id_field), self._item_to_update_model(item)) for item in edits
             ]
             result = await service.batch_edit(session, tuples)
-            return _json_response(result, self._ctx())
+            header = service.compute_cache_header(result)
+            return _cached_json_response(request, result, self._ctx(), header)
 
-        handler.__annotations__ = {"edits": list[item_model], "session": AsyncSession}  # type: ignore[valid-type]
+        handler.__annotations__ = {
+            "request": Request,
+            "edits": list[item_model],  # type: ignore[valid-type]
+            "session": AsyncSession,
+        }
         self._route(router, batch_path, ["POST"], handler, response_model=None)
 
     # -- route escape hatch --------------------------------------------
@@ -805,6 +867,83 @@ def _json_response(
     else:
         body = payload
     return JSONResponse(content=jsonable_encoder(body), status_code=status_code)
+
+
+def _http_date(value: datetime) -> str:
+    """Format a datetime as an RFC 7231 IMF-fixdate (GMT)."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return format_datetime(value.astimezone(UTC), usegmt=True)
+
+
+def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
+    """Build the ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires``
+    response headers from a :class:`CacheHeader`'s non-``None`` fields."""
+    headers: dict[str, str] = {}
+    if header.etag is not None:
+        headers["ETag"] = header.etag
+    if header.updated_at is not None:
+        headers["Last-Modified"] = _http_date(header.updated_at)
+    if header.expire_at is not None:
+        # max-age is the remaining freshness window (the strategy's expire_in,
+        # computed moments ago). Rounding preserves the integer seconds clients
+        # expect in Cache-Control.
+        now = datetime.now(UTC)
+        max_age = max(0, int((header.expire_at - now).total_seconds()))
+        headers["Cache-Control"] = f"max-age={max_age}"
+        headers["Expires"] = _http_date(header.expire_at)
+    return headers
+
+
+def _client_cache_header(request: StarletteRequest) -> CacheHeader:
+    """Map a request's ``If-None-Match`` / ``If-Modified-Since`` into a
+    :class:`CacheHeader` (the client's validators). ``expire_at`` is not a
+    client validator, so it is always ``None`` here."""
+    from email.utils import parsedate_to_datetime
+
+    etag = request.headers.get("if-none-match")
+    if_modified_since = request.headers.get("if-modified-since")
+    updated_at: datetime | None = None
+    if if_modified_since:
+        try:
+            parsed = parsedate_to_datetime(if_modified_since)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            updated_at = parsed
+    return CacheHeader(etag=etag, updated_at=updated_at)
+
+
+def _cached_json_response(
+    request: StarletteRequest,
+    payload: Any,
+    context: dict[str, Any] | None,
+    header: CacheHeader | None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    """Serialise ``payload`` as JSON, applying cache headers and conditional
+    ``304`` short-circuiting.
+
+    When ``header`` is ``None`` (the strategy yielded nothing) this is a plain
+    JSON response. Otherwise the validator + freshness headers are set, and if
+    the request is a safe method (``GET`` / ``HEAD`` — RFC 7232 restricts
+    ``304 Not Modified`` to safe methods) and the client's conditional request
+    headers prove the copy is current (``header.is_modified(client)`` is
+    ``False``) a ``304 Not Modified`` with an empty body (but the validator +
+    ``Cache-Control`` headers) is returned. Unsafe methods (``POST`` / ``PATCH``
+    / ``DELETE``) still emit the headers on the response but always send the
+    body — they cannot short-circuit to ``304``.
+    """
+    if header is None or not header.has_any():
+        return _json_response(payload, context, status_code)
+    if request.method in ("GET", "HEAD") and not header.is_modified(_client_cache_header(request)):
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers=_cache_response_headers(header),
+        )
+    response = _json_response(payload, context, status_code)
+    response.headers.update(_cache_response_headers(header))
+    return response
 
 
 def register_error_handlers(app: FastAPI) -> None:

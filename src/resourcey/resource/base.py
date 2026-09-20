@@ -55,10 +55,11 @@ from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
 
 if TYPE_CHECKING:
-    # Used only in the ``get_search_filter_type`` annotation. Kept under
-    # TYPE_CHECKING (with ``from __future__ import annotations``) so the
-    # ``resource`` package never imports ``util.search_filter`` at runtime,
-    # avoiding a potential import cycle.
+    # Used only in annotations. Kept under TYPE_CHECKING (with
+    # ``from __future__ import annotations``) so the ``resource`` package
+    # never imports ``util.search_filter`` / ``cache`` at runtime, avoiding a
+    # potential import cycle.
+    from resourcey.cache.cache_strategy import CacheStrategy
     from resourcey.util.search_filter import SearchFilter
 
 
@@ -125,6 +126,7 @@ class BaseResource:
     _read_model: type[BaseModel]
     _update_model: type[BaseModel]
     _sqlalchemy_model: Any
+    _cache_strategy: Any
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -199,6 +201,38 @@ class BaseResource:
         Overridable.
         """
         return None
+
+    @classmethod
+    def get_cache_strategy(cls) -> CacheStrategy[Any]:
+        """Return the cache strategy for this resource (cached on the class).
+
+        Default selection: if the resource declares an ``updated_at`` field
+        and it is readable on the read model, return
+        :class:`~resourcey.cache.cache_strategy.LastModifiedCacheStrategy`;
+        otherwise return
+        :class:`~resourcey.cache.cache_strategy.ETagCacheStrategy`. Both
+        default to ``expire_in=0``.
+
+        Overridable: a developer returns any ``CacheStrategy`` instance (e.g.
+        ``OptimisticCacheStrategy(expire_in=60)``) to change the policy. This
+        is the single seam for cache policy — overriding it never touches the
+        service or routes.
+        """
+        cached = cls.__dict__.get("_cache_strategy")
+        if cached is not None:
+            return cast("CacheStrategy[Any]", cached)
+        from resourcey.cache.cache_strategy import (
+            ETagCacheStrategy,
+            LastModifiedCacheStrategy,
+        )
+
+        field = cls.model_fields.get("updated_at")
+        if field is not None and cls.get_config_for_field("updated_at", field).readable:
+            strategy: CacheStrategy[Any] = LastModifiedCacheStrategy()
+        else:
+            strategy = ETagCacheStrategy()
+        cls._cache_strategy = strategy
+        return strategy
 
     @classmethod
     def get_sortable_fields(cls) -> list[str]:
@@ -485,6 +519,7 @@ _INFRA_ATTRS: frozenset[str] = frozenset(
         "_read_model",
         "_update_model",
         "_sqlalchemy_model",
+        "_cache_strategy",
     }
 )
 
