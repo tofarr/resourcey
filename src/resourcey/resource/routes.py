@@ -22,7 +22,7 @@ import inspect
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
@@ -120,7 +120,7 @@ def _service_dependency(resource: type[BaseResource]) -> Callable[..., Any]:
     ``request.state``.
     """
 
-    async def dependency(request: Request) -> Any:  # type: ignore[no-untyped-def]
+    async def dependency(request: Request) -> Any:
         async with resource.open_service(request) as service:
             yield service
 
@@ -132,7 +132,9 @@ def _service_dependency(resource: type[BaseResource]) -> Callable[..., Any]:
 # ---------------------------------------------------------------------------
 
 
-def _add_create_route(router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any) -> None:
+def _add_create_route(
+    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+) -> None:
     create_model = resource.get_create_model()
 
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
@@ -146,7 +148,9 @@ def _add_create_route(router: APIRouter, path: str, resource: type[BaseResource]
     _route(router, path, ["POST"], handler, response_model=None)
 
 
-def _add_read_route(router: APIRouter, path: str, id_type: Any, resource: type[BaseResource], service_dep: Any) -> None:
+def _add_read_route(
+    router: APIRouter, path: str, id_type: Any, resource: type[BaseResource], service_dep: Any
+) -> None:
     async def handler(request, id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         result = await service.read(id)
         header = service.compute_cache_header([result])
@@ -186,7 +190,9 @@ def _add_delete_route(
     _route(router, f"{path}/{{id}}", ["DELETE"], handler, response_model=None)
 
 
-def _add_search_route(router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any) -> None:
+def _add_search_route(
+    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+) -> None:
     filter_cls = resource.get_search_filter_type()
     filter_dep = _filter_dependency(filter_cls) if filter_cls is not None else None
     sortable = resource.get_sortable_fields()
@@ -295,7 +301,9 @@ def _sortless_search_handler(
     return handler
 
 
-def _add_count_route(router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any) -> None:
+def _add_count_route(
+    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+) -> None:
     """Register ``GET /{resource}/count`` - matching row count for a filter.
 
     Accepts the same ``field__op=value`` filter query params as ``search``
@@ -339,7 +347,9 @@ def _add_batch_read_route(
     _route(router, batch_path, ["GET"], handler, response_model=None)
 
 
-def _add_batch_edit_route(router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any) -> None:
+def _add_batch_edit_route(
+    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+) -> None:
     batch_path = f"{path}/batch-edit"
     item_model = _batch_edit_item_model(resource)
 
@@ -473,7 +483,7 @@ def _batch_edit_item_model(resource: type[BaseResource]) -> type[BaseModel]:
         **{id_field: (id_type, ...)},  # id is required on each edit
         **update_fields,
     )
-    return model  # type: ignore[return-value]
+    return cast("type[BaseModel]", model)
 
 
 def _item_to_update_model(item: BaseModel, resource: type[BaseResource]) -> BaseModel:

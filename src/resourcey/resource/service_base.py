@@ -94,14 +94,14 @@ class BaseService:
         cursor: str | None = None,
         sort: str | None = None,
         desc: bool = False,
-        filters: SearchFilter[Any] | None = None,  # type: ignore[type-arg]
+        filters: SearchFilter[Any] | None = None,
     ) -> Any:
         raise NotImplementedError
 
     async def count(
         self,
         *,
-        filters: SearchFilter[Any] | None = None,  # type: ignore[type-arg]
+        filters: SearchFilter[Any] | None = None,
     ) -> int:
         raise NotImplementedError
 
@@ -132,7 +132,7 @@ class BaseService:
     def compute_count_cache_header(
         self,
         count: int,
-        filters: SearchFilter[Any] | None,  # type: ignore[type-arg]
+        filters: SearchFilter[Any] | None,
     ) -> CacheHeader | None:
         """Compute a count-derived cache header for the ``count`` route."""
         raise NotImplementedError

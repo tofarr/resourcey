@@ -254,7 +254,7 @@ class TestServiceSearch:
         svc = SqlService(SvcWidget, session=session)
         for i in range(3):
             await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search( limit=10)
+        page = await svc.search(limit=10)
         assert isinstance(page, Page)
         assert len(page.items) == 3
         assert page.limit == 10
@@ -266,14 +266,14 @@ class TestServiceSearch:
         svc = SqlService(SvcWidget, session=session)
         for i in range(5):
             await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search( limit=2)
+        page = await svc.search(limit=2)
         assert len(page.items) == 2
         assert page.next_cursor is not None
-        page2 = await svc.search( limit=2, cursor=page.next_cursor)
+        page2 = await svc.search(limit=2, cursor=page.next_cursor)
         assert len(page2.items) == 2
         # Cursor advances — no overlap with the first page.
         assert {item.id for item in page2.items}.isdisjoint({item.id for item in page.items})
-        page3 = await svc.search( limit=2, cursor=page2.next_cursor)
+        page3 = await svc.search(limit=2, cursor=page2.next_cursor)
         assert len(page3.items) == 1
         assert page3.next_cursor is None
 
@@ -282,10 +282,10 @@ class TestServiceSearch:
         svc = SqlService(SvcWidget, session=session)
         for i in [3, 1, 2]:
             await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search( limit=2, sort="size")
+        page = await svc.search(limit=2, sort="size")
         assert [item.size for item in page.items] == [1, 2]
         assert page.next_cursor is not None
-        page2 = await svc.search( limit=2, sort="size", cursor=page.next_cursor)
+        page2 = await svc.search(limit=2, sort="size", cursor=page.next_cursor)
         assert [item.size for item in page2.items] == [3]
         assert page2.next_cursor is None
 
@@ -294,7 +294,7 @@ class TestServiceSearch:
         svc = SqlService(SvcWidget, session=session)
         await svc.create(SvcWidget.get_create_model()(label="g0", size=0))
         with pytest.raises(InvalidInputError):
-            await svc.search( cursor="not-a-valid-cursor")
+            await svc.search(cursor="not-a-valid-cursor")
 
     @pytest.mark.asyncio
     async def test_search_cursor_sort_mismatch_raises(self, session: AsyncSession) -> None:
@@ -302,17 +302,17 @@ class TestServiceSearch:
         svc = SqlService(SvcWidget, session=session)
         for i in range(5):
             await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search( limit=2, sort="size")
+        page = await svc.search(limit=2, sort="size")
         assert page.next_cursor is not None
         # Reusing the size-sorted cursor under no sort -> 400.
         with pytest.raises(InvalidInputError):
-            await svc.search( limit=2, cursor=page.next_cursor)
+            await svc.search(limit=2, cursor=page.next_cursor)
         # Reusing under a different sort field -> 400.
         with pytest.raises(InvalidInputError):
-            await svc.search( limit=2, sort="label", cursor=page.next_cursor)
+            await svc.search(limit=2, sort="label", cursor=page.next_cursor)
         # Reusing under a different direction -> 400.
         with pytest.raises(InvalidInputError):
-            await svc.search( limit=2, sort="size", desc=True, cursor=page.next_cursor)
+            await svc.search(limit=2, sort="size", desc=True, cursor=page.next_cursor)
 
     @pytest.mark.asyncio
     async def test_search_cursor_datetime_sort_round_trip(self, session: AsyncSession) -> None:
@@ -326,20 +326,20 @@ class TestServiceSearch:
         svc = SqlService(SvcDtWidget, session=session)
         for i in range(5):
             await svc.create(
-                                SvcDtWidget.get_create_model()(ts=datetime(2026, 1, i + 1, 12, 0, 0, tzinfo=UTC)),
+                SvcDtWidget.get_create_model()(ts=datetime(2026, 1, i + 1, 12, 0, 0, tzinfo=UTC)),
             )
-        page = await svc.search( limit=2, sort="ts")
+        page = await svc.search(limit=2, sort="ts")
         assert [item.ts.replace(tzinfo=None) for item in page.items] == [
             datetime(2026, 1, 1, 12, 0, 0),
             datetime(2026, 1, 2, 12, 0, 0),
         ]
         assert page.next_cursor is not None
-        page2 = await svc.search( limit=2, sort="ts", cursor=page.next_cursor)
+        page2 = await svc.search(limit=2, sort="ts", cursor=page.next_cursor)
         assert [item.ts.replace(tzinfo=None) for item in page2.items] == [
             datetime(2026, 1, 3, 12, 0, 0),
             datetime(2026, 1, 4, 12, 0, 0),
         ]
-        page3 = await svc.search( limit=2, sort="ts", cursor=page2.next_cursor)
+        page3 = await svc.search(limit=2, sort="ts", cursor=page2.next_cursor)
         assert len(page3.items) == 1
         assert page3.next_cursor is None
 
@@ -348,7 +348,7 @@ class TestServiceSearch:
         svc = SqlService(SvcWidget, session=session)
         for i in [3, 1, 2]:
             await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search( sort="size")
+        page = await svc.search(sort="size")
         assert [item.size for item in page.items] == [1, 2, 3]
 
     @pytest.mark.asyncio
@@ -356,25 +356,25 @@ class TestServiceSearch:
         svc = SqlService(SvcWidget, session=session)
         for i in [3, 1, 2]:
             await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
-        page = await svc.search( sort="size", desc=True)
+        page = await svc.search(sort="size", desc=True)
         assert [item.size for item in page.items] == [3, 2, 1]
 
     @pytest.mark.asyncio
     async def test_search_sort_unknown_field_raises(self, session: AsyncSession) -> None:
         svc = SqlService(SvcWidget, session=session)
         with pytest.raises(InvalidInputError):
-            await svc.search( sort="nonsense")
+            await svc.search(sort="nonsense")
 
     @pytest.mark.asyncio
     async def test_search_limit_below_one_raises(self, session: AsyncSession) -> None:
         svc = SqlService(SvcWidget, session=session)
         with pytest.raises(InvalidInputError):
-            await svc.search( limit=0)
+            await svc.search(limit=0)
 
     @pytest.mark.asyncio
     async def test_search_limit_capped_to_max(self, session: AsyncSession) -> None:
         svc = SqlService(SvcWidget, session=session)
-        page = await svc.search( limit=999)
+        page = await svc.search(limit=999)
         assert page.limit == 100  # _MAX_LIMIT
 
     @pytest.mark.asyncio
@@ -385,7 +385,7 @@ class TestServiceSearch:
         for i in range(3):
             await svc.create(SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
         filters = filter_cls(size__gte=2)
-        page = await svc.search( filters=filters)
+        page = await svc.search(filters=filters)
         assert len(page.items) == 1
         assert page.items[0].size == 2
 
@@ -476,7 +476,7 @@ class TestServiceBatchEdit:
         a = await svc.create(SvcWidget.get_create_model()(label="a", size=1))
         b = await svc.create(SvcWidget.get_create_model()(label="b", size=2))
         results = await svc.batch_edit(
-                        [
+            [
                 (a.id, SvcWidget.get_update_model()(size=10)),
                 (b.id, SvcWidget.get_update_model()(size=20)),
             ],
@@ -488,7 +488,7 @@ class TestServiceBatchEdit:
         svc = SqlService(SvcWidget, session=session)
         a = await svc.create(SvcWidget.get_create_model()(label="a"))
         results = await svc.batch_edit(
-                        [
+            [
                 (a.id, SvcWidget.get_update_model()(size=5)),
                 (999, SvcWidget.get_update_model()(size=9)),  # absent -> null
             ],
@@ -502,7 +502,7 @@ class TestServiceBatchEdit:
         svc = SqlService(SvcWidget, session=session)
         a = await svc.create(SvcWidget.get_create_model()(label="a", size=1))
         results = await svc.batch_edit(
-                        [
+            [
                 (998, SvcWidget.get_update_model()(size=1)),  # absent
                 (a.id, SvcWidget.get_update_model()(size=7)),
                 (999, SvcWidget.get_update_model()(size=2)),  # absent

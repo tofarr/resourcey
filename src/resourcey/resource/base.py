@@ -138,7 +138,7 @@ class BaseResource:
 
         Returns a ``frozenset[Action]``.
         """
-        return cls.get_service_cls().actions
+        return cast("frozenset[Any]", cls.get_service_cls().actions)
 
     @classmethod
     def open_service(cls, request: Any) -> Any:
@@ -151,9 +151,7 @@ class BaseResource:
         :class:`~resourcey.resource.service.SqlService`). Suitable for use as
         an injected FastAPI dependency.
         """
-        raise NotImplementedError(
-            f"{cls.__name__} cannot open a service; override open_service()."
-        )
+        raise NotImplementedError(f"{cls.__name__} cannot open a service; override open_service().")
 
     # ------------------------------------------------------------------
     # Field config resolution
