@@ -36,9 +36,11 @@ is the integration test that API must keep satisfying).
 │   ├── resources.py     # registers Thread + Message with the framework
 │   ├── thread.py        # Thread resource declaration
 │   └── message.py       # Message resource declaration + MessageSearchFilter
-└── migrations/
-    ├── env.py           # Alembic environment (generated)
-    └── versions/        # generated + reviewed revisions
+├── migrations/
+│   ├── env.py           # Alembic environment (generated)
+│   └── versions/        # generated + reviewed revisions
+└── tests/
+    └── test_smoke.py    # HTTP smoke test (in-memory SQLite, httpx ASGI)
 ```
 
 ## Run it
@@ -65,6 +67,15 @@ uvicorn message_board.app:create_app --factory --reload
 ```
 
 Interactive API docs are at `http://127.0.0.1:8081/docs`.
+
+### Testing
+
+Run the smoke tests (in-memory SQLite, no server needed):
+
+```bash
+uv sync --extra test
+uv run pytest
+```
 
 ### Configuration
 
