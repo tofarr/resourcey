@@ -26,14 +26,17 @@ is the integration test that API must keep satisfying).
 ## Layout
 
 ```
-examples/message_board/
+01_message_board/
 ├── README.md            # this file
+├── pyproject.toml       # standalone project — depends on resourcey from git
 ├── .env.example         # copy to .env and edit
-├── app.py               # create_app() entry point (uvicorn factory)
-├── config.py            # MessageBoardConfig — SQLite by default
-├── resources.py         # registers Thread + Message with the framework
-├── thread.py            # Thread resource declaration
-├── message.py           # Message resource declaration + MessageSearchFilter
+├── .gitignore
+├── message_board/       # the importable app package
+│   ├── app.py           # create_app() entry point (uvicorn factory)
+│   ├── config.py        # MessageBoardConfig — SQLite by default
+│   ├── resources.py     # registers Thread + Message with the framework
+│   ├── thread.py        # Thread resource declaration
+│   └── message.py       # Message resource declaration + MessageSearchFilter
 └── migrations/
     ├── env.py           # Alembic environment (generated)
     └── versions/        # generated + reviewed revisions
@@ -41,27 +44,26 @@ examples/message_board/
 
 ## Run it
 
-From the repository root (so `examples.message_board` is importable):
+This example is a **standalone project**. From within the `01_message_board`
+directory:
 
 ```bash
-# 1. Install the framework + dev extras (once)
-uv sync --all-extras
+# 1. Install dependencies (pulls resourcey from its main branch on GitHub)
+uv sync
 
 # 2. Apply the database migration (creates message_board.db)
-cd examples/message_board
-cp .env.example .env             # optional — defaults already target SQLite
-RESOURCEY_MIGRATIONS_DIR=migrations \
-  ../../.venv/bin/resourcey migrate upgrade
+cp .env.example .env             # activate the SQLite config + resources
+resourcey migrate upgrade
 
 # 3. Start the server
-../../.venv/bin/resourcey run
-# → Uvicorn running on http://127.0.0.1:8081
+resourcey run
+# → Uvicorn running on http://0.0.0.0:8081
 ```
 
 Or with uvicorn directly (reload mode):
 
 ```bash
-PYTHONPATH=../.. ../../.venv/bin/uvicorn examples.message_board.app:create_app --factory --reload
+uvicorn message_board.app:create_app --factory --reload
 ```
 
 Interactive API docs are at `http://127.0.0.1:8081/docs`.

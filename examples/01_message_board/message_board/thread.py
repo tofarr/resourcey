@@ -11,7 +11,6 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from pydantic import Field
-
 from resourcey.resource.base import BaseResource
 
 

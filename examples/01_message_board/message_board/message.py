@@ -16,11 +16,10 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from pydantic import Field
-from sqlalchemy import Column, ForeignKey, Integer
-
 from resourcey.resource.base import BaseResource
 from resourcey.resource.field import ResourceyField
 from resourcey.util.search_filter import BaseSearchFilter
+from sqlalchemy import Column, ForeignKey, Integer
 
 
 class Message(BaseResource):
