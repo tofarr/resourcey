@@ -31,7 +31,16 @@ from __future__ import annotations
 
 import types
 from functools import reduce
-from typing import TYPE_CHECKING, Annotated, Any, cast, get_args, get_origin, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    ClassVar,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 
 from pydantic import BaseModel, Field, SecretStr, create_model, field_serializer, field_validator
 from pydantic.fields import FieldInfo
@@ -98,6 +107,53 @@ class BaseResource:
         build their backing model so it is available before migrations / table
         creation run.
         """
+
+    # ------------------------------------------------------------------
+    # Service + action surface
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_service_cls(cls) -> type[Any]:
+        """The service class this resource yields from :meth:`open_service`.
+
+        The base implementation raises: a storage-agnostic resource has no
+        service. Storage-specific subclasses override this (e.g.
+        :class:`~resourcey.resource.sql.SqlResource` returns
+        :class:`~resourcey.resource.service.SqlService`).
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} does not declare a service class; override get_service_cls()."
+        )
+
+    @classmethod
+    def get_supported_actions(cls) -> frozenset[Any]:
+        """The actions this resource exposes over HTTP.
+
+        Defaults to the service class's declared :attr:`actions`
+        (``cls.get_service_cls().actions``) - the service is the single source
+        of truth. A resource may override this to *narrow* (hide an action the
+        service supports but should not be exposed), but must never widen
+        beyond the service's ``actions``: the route builder asserts the
+        subset relation at registration time.
+
+        Returns a ``frozenset[Action]``.
+        """
+        return cls.get_service_cls().actions
+
+    @classmethod
+    def open_service(cls, request: Any) -> Any:
+        """Async context manager yielding a service instance for ``request``.
+
+        The base implementation raises: a storage-agnostic resource cannot
+        open a service. Storage-specific subclasses override this (e.g.
+        :class:`~resourcey.resource.sql.SqlResource` opens / reuses a session
+        on ``request.state`` and yields an
+        :class:`~resourcey.resource.service.SqlService`). Suitable for use as
+        an injected FastAPI dependency.
+        """
+        raise NotImplementedError(
+            f"{cls.__name__} cannot open a service; override open_service()."
+        )
 
     # ------------------------------------------------------------------
     # Field config resolution
@@ -384,6 +440,17 @@ def _collect_field_infos(cls: type[BaseResource]) -> dict[str, FieldInfo]:
     fields: dict[str, FieldInfo] = {}
     for name, annotation in _ordered_annotations(cls):
         if name in fields:
+            continue
+        # ``ClassVar``-annotated attributes are config / infrastructure, not
+        # model fields (e.g. ``SqlResource._session_factory``).
+        # ``get_type_hints`` strips the ``ClassVar`` wrapper (returning the
+        # inner type), and under ``from __future__ import annotations`` the
+        # raw annotation is a string, so check both forms.
+        if (
+            get_origin(annotation) is ClassVar
+            or annotation is ClassVar
+            or (isinstance(annotation, str) and annotation.lstrip().startswith("ClassVar"))
+        ):
             continue
         default = cls.__dict__.get(name, _NO_DEFAULT)
         ann_type = resolved.get(name, annotation)
