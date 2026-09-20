@@ -112,7 +112,15 @@ def _resolve_from_env() -> BaseConfig:
     (bare class name with no module, unimportable module, missing class, or a
     value that is not a :class:`BaseConfig` subclass) raises
     :class:`ResourceyConfigError` naming the env var.
+
+    Loads ``.env`` first so ``RESOURCEY_CONFIG_CLASS`` can be set in the file
+    (not only in the real environment) — otherwise the config-class indirection
+    would be invisible to ``resourcey migrate`` and other CLI entry points that
+    never call :func:`set_config`.
     """
+    from resourcey.config.config_loader import load_dotenv
+
+    load_dotenv()
     fqn = os.environ.get(_CONFIG_CLASS_ENV)
     if not fqn:
         return FrameworkConfig.get_instance()

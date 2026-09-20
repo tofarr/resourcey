@@ -201,6 +201,19 @@ class TestFrameworkConfig:
             == "postgresql+asyncpg://resourcey:resourcey@localhost:5432/resourcey"
         )
 
+    def test_database_url_full_db_url_override(self):
+        # When full_db_url is set, it takes precedence over structured fields.
+        cfg = FrameworkConfig()
+        cfg.database.full_db_url = "sqlite+aiosqlite:///example.db"
+        assert cfg.database.database_url == "sqlite+aiosqlite:///example.db"
+
+    def test_database_url_full_db_url_from_env(self, monkeypatch):
+        # full_db_url is readable from env (RESOURCEY_DATABASE_FULL_DB_URL).
+        monkeypatch.setenv("RESOURCEY_DATABASE_FULL_DB_URL", "sqlite+aiosqlite:///from_env.db")
+        FrameworkConfig.clear_instance_cache()
+        cfg = FrameworkConfig.get_instance()
+        assert cfg.database.database_url == "sqlite+aiosqlite:///from_env.db"
+
     def test_database_url_is_property_not_field(self):
         # database_url is a plain @property, not a model field — from_env/to_env ignore it.
         assert "database_url" not in DbConfig.model_fields

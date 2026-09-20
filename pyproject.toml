@@ -67,6 +67,9 @@ exclude_lines = [
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
+# Examples are standalone projects (own pyproject.toml + tooling); not linted
+# by the root config.
+extend-exclude = ["examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TID", "RUF"]
