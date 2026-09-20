@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
@@ -43,10 +43,13 @@ if TYPE_CHECKING:
     from resourcey.util.search_filter import SearchFilter
 
 
-class Page(BaseModel):
+T = TypeVar("T")
+
+
+class Page(BaseModel, Generic[T]):
     """A page of search results with pagination metadata."""
 
-    items: list[Any]
+    items: list[T]
     total: int
     limit: int
     offset: int
@@ -156,7 +159,7 @@ class ResourceService:
         offset: int = 0,
         sort: list[str] | None = None,
         filters: SearchFilter[Any] | None = None,
-    ) -> Page:
+    ) -> Page[Any]:
         """Search with pagination, sort, and optional filters; return a :class:`Page`."""
         await self.authorize(
             session, "search", limit=limit, offset=offset, sort=sort, filters=filters
@@ -344,6 +347,7 @@ class ResourceService:
         service = self
         filter_cls = self.resource.get_search_filter_type()
         filter_dep = self._filter_dependency(filter_cls) if filter_cls is not None else None
+        read_model = self.read_model
 
         async def handler(  # type: ignore[no-untyped-def]
             request,
@@ -367,7 +371,13 @@ class ResourceService:
             "sort": str | None,
             "session": AsyncSession,
         }
-        self._route(router, path, ["GET"], handler, response_model=None)
+        self._route(
+            router,
+            path,
+            ["GET"],
+            handler,
+            response_model=Page[read_model],  # type: ignore[valid-type]
+        )
 
     def _add_batch_read_route(
         self, router: APIRouter, path: str, id_type: Any, session_dep: Any
