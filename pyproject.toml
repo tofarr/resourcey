@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.7",
     "python-multipart>=0.0.9",
     "joserfc>=1.7.5",
+    "bcrypt>=5.0.0",
 ]
 
 [project.scripts]

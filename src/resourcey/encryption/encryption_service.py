@@ -1,18 +1,23 @@
-"""At-rest value encryption via JWE compact serialization (issue #7).
+"""At-rest value encryption and auth-token JWE encryption (issue #7, #4).
 
-``EncryptionService`` encrypts / decrypts sensitive field values using JWE
-compact serialization with ``alg=dir`` + ``enc=A256GCM`` (direct symmetric
-key, AES-256-GCM). The symmetric key is SHA-256 derived from the configured
-secret. The key ``id`` is carried in the JWE ``kid`` header so the correct
-decryption key can be selected on read, enabling key rotation.
+``EncryptionService`` provides two JWE compact-serialization paths, both using
+``alg=dir`` + ``enc=A256GCM`` (direct symmetric key, AES-256-GCM):
+
+* **Value encryption** (:meth:`encrypt_value` / :meth:`decrypt_value`) —
+  encrypts sensitive field values at rest. The plaintext is wrapped in a
+  ``{"v": plaintext}`` JSON payload before encryption.
+* **Auth-token encryption** (:meth:`create_jwe_token` / :meth:`decrypt_jwe_token`)
+  — encrypts arbitrary claim dicts (with optional ``exp``) as JWE tokens used
+  for session cookies, access tokens, refresh tokens, and authorization codes
+  by the auth layer (issue #4).
+
+The symmetric key is SHA-256 derived from the configured secret. The key
+``id`` is carried in the JWE ``kid`` header so the correct decryption key can
+be selected on read, enabling key rotation.
 
 A JWE algorithm registry pins ``dir`` + ``A256GCM`` only (no cryptographic
 agility) and caps ciphertext length. A process-wide cached accessor
 (:func:`get_encryption_service`) returns the singleton built from config.
-
-JWS token signing / verification is **out of scope** here (it belongs with
-auth in #4); only the JWE value-encryption path is shipped. The service is
-structured so JWS can be added later without rework.
 
 Ported from ohev2's ``encryption_service.py``; the vendored utilities stay
 self-contained (no external SDK dependency).
@@ -23,6 +28,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -40,6 +46,10 @@ def _derive_symmetric_key(secret: str) -> OctKey:
     """Derive a 256-bit symmetric key from a secret string (SHA-256)."""
     key_256 = hashlib.sha256(secret.encode()).digest()
     return OctKey.import_key(key_256)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _urlsafe_b64decode(data: str) -> bytes:
@@ -93,6 +103,59 @@ class EncryptionService:
         if key_id not in self._decryption_keys:
             raise ValueError(f"Key ID '{key_id}' not found")
         return self._decryption_keys[key_id]
+
+    def create_jwe_token(
+        self,
+        payload: dict[str, Any],
+        expires_in: timedelta | None = None,
+    ) -> str:
+        """Encrypt a claim dict into a JWE compact token for auth use.
+
+        Adds ``iat`` (issued-at) and, when *expires_in* is given, ``exp``
+        (expiry) claims to the payload before encryption. The encryption key's
+        ``id`` is carried in the ``kid`` header so the correct decryption key
+        can be selected on read.
+        """
+        now = _utc_now()
+        jwt_payload: dict[str, Any] = {
+            **payload,
+            "iat": int(now.timestamp()),
+        }
+        if expires_in is not None:
+            jwt_payload["exp"] = int((now + expires_in).timestamp())
+
+        symmetric_key = _derive_symmetric_key(self._encryption_key.value.get_secret_value())
+        protected_header = {
+            "alg": "dir",
+            "enc": "A256GCM",
+            "kid": self._encryption_key.id,
+        }
+        return jwe.encrypt_compact(
+            protected_header,
+            json.dumps(jwt_payload).encode("utf-8"),
+            symmetric_key,
+            registry=_JWE_REGISTRY,
+        )
+
+    def decrypt_jwe_token(self, token: str) -> dict[str, Any]:
+        """Decrypt a JWE compact token back to its claim dict.
+
+        Selects the decryption key from the ``kid`` header; an unknown ``kid``
+        raises ``ValueError``. Unlike :meth:`decrypt_value` (which unwraps a
+        ``{"v": ...}`` payload), this returns the raw claim dict so the auth
+        layer can read ``sub``, ``exp``, ``ttyp``, etc. directly.
+        """
+        key_id = _jwe_kid(token)
+        key = self._get_decryption_key(key_id)
+        symmetric_key = _derive_symmetric_key(key.value.get_secret_value())
+        try:
+            result = jwe.decrypt_compact(token, symmetric_key, registry=_JWE_REGISTRY)
+        except Exception as exc:
+            raise ValueError("Token decryption failed") from exc
+        if result.plaintext is None:
+            raise ValueError("Decryption produced no plaintext")
+        payload: dict[str, Any] = json.loads(result.plaintext)
+        return payload
 
     def encrypt_value(self, plaintext: str) -> str:
         """Encrypt a plaintext string into a JWE compact ciphertext.
