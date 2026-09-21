@@ -489,8 +489,8 @@ class TestCookieRefresh:
         access_row.expires_at = datetime.now(UTC) + timedelta(seconds=10)
         await session.flush()
 
+        from _auth_helpers import MockIdpClient as _MockIdpClient
         from starlette.responses import Response
-        from tests.unit.test_auth_service_coverage import _MockIdpClient
 
         from resourcey.auth.auth_dependencies import _maybe_refresh_cookie
 
@@ -902,7 +902,8 @@ class TestRefreshAccessToken:
         patched_enc: EncryptionService,
         framework_config: FrameworkConfig,
     ) -> None:
-        from tests.unit.test_auth_service_coverage import _make_user, _MockIdpClient
+        from _auth_helpers import MockIdpClient as _MockIdpClient
+        from _auth_helpers import make_user as _make_user
 
         enc = patched_enc
         auth_svc = AuthService(session, encryption_service=enc, config=framework_config)
