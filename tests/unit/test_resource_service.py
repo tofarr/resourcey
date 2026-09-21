@@ -61,7 +61,7 @@ class SvcGadget(SqlResource):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-_GadgetOrm = SvcGadget.get_sql_alchemy_model()
+_GadgetOrm = SvcGadget().get_sql_alchemy_model()
 
 
 class GadgetSearchFilter(BaseSearchFilter[_GadgetOrm]):
@@ -173,8 +173,8 @@ async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
 class TestServiceCreate:
     @pytest.mark.asyncio
     async def test_create_returns_read_model_with_generated_id(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        result = await svc.create(SvcWidget.get_create_model()(label="gadget"))
+        svc = SqlService(SvcWidget(), session=session)
+        result = await svc.create(SvcWidget().get_create_model()(label="gadget"))
         assert result.id == 1
         assert result.label == "gadget"
         assert result.size == 0
@@ -182,31 +182,31 @@ class TestServiceCreate:
 
     @pytest.mark.asyncio
     async def test_create_populates_default_factory_timestamps(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        result = await svc.create(SvcWidget.get_create_model()(label="x"))
+        svc = SqlService(SvcWidget(), session=session)
+        result = await svc.create(SvcWidget().get_create_model()(label="x"))
         # created_at is not creatable (excluded from create model) but the
         # repository supplements its default_factory so it is never NULL.
         assert result.created_at is not None
 
     @pytest.mark.asyncio
     async def test_create_drops_missing_optional_fields(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         # size is optional (default 0); omitting it should store 0, not MISSING.
-        result = await svc.create(SvcWidget.get_create_model()(label="x"))
+        result = await svc.create(SvcWidget().get_create_model()(label="x"))
         assert result.size == 0
 
 
 class TestServiceRead:
     @pytest.mark.asyncio
     async def test_read_returns_entity(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        created = await svc.create(SvcWidget.get_create_model()(label="g"))
+        svc = SqlService(SvcWidget(), session=session)
+        created = await svc.create(SvcWidget().get_create_model()(label="g"))
         result = await svc.read(created.id)
         assert result.label == "g"
 
     @pytest.mark.asyncio
     async def test_read_missing_raises_not_found(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         with pytest.raises(NotFoundError):
             await svc.read(999)
 
@@ -214,39 +214,39 @@ class TestServiceRead:
 class TestServiceUpdate:
     @pytest.mark.asyncio
     async def test_update_applies_patch(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        created = await svc.create(SvcWidget.get_create_model()(label="g", size=1))
-        result = await svc.update(created.id, SvcWidget.get_update_model()(size=99))
+        svc = SqlService(SvcWidget(), session=session)
+        created = await svc.create(SvcWidget().get_create_model()(label="g", size=1))
+        result = await svc.update(created.id, SvcWidget().get_update_model()(size=99))
         assert result.size == 99
         assert result.label == "g"  # untouched (PATCH semantics)
 
     @pytest.mark.asyncio
     async def test_update_missing_raises_not_found(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         with pytest.raises(NotFoundError):
-            await svc.update(999, SvcWidget.get_update_model()(size=1))
+            await svc.update(999, SvcWidget().get_update_model()(size=1))
 
     @pytest.mark.asyncio
     async def test_update_empty_payload_returns_current(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        created = await svc.create(SvcWidget.get_create_model()(label="g"))
+        svc = SqlService(SvcWidget(), session=session)
+        created = await svc.create(SvcWidget().get_create_model()(label="g"))
         # An update model with no fields set — nothing to change.
-        result = await svc.update(created.id, SvcWidget.get_update_model()())
+        result = await svc.update(created.id, SvcWidget().get_update_model()())
         assert result.id == created.id
 
 
 class TestServiceDelete:
     @pytest.mark.asyncio
     async def test_delete_removes_entity(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        created = await svc.create(SvcWidget.get_create_model()(label="g"))
+        svc = SqlService(SvcWidget(), session=session)
+        created = await svc.create(SvcWidget().get_create_model()(label="g"))
         await svc.delete(created.id)
         with pytest.raises(NotFoundError):
             await svc.read(created.id)
 
     @pytest.mark.asyncio
     async def test_delete_missing_raises_not_found(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         with pytest.raises(NotFoundError):
             await svc.delete(999)
 
@@ -254,9 +254,9 @@ class TestServiceDelete:
 class TestServiceSearch:
     @pytest.mark.asyncio
     async def test_search_returns_page_with_metadata(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         for i in range(3):
-            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcWidget().get_create_model()(label=f"g{i}", size=i))
         page = await svc.search(limit=10)
         assert isinstance(page, Page)
         assert len(page.items) == 3
@@ -266,9 +266,9 @@ class TestServiceSearch:
 
     @pytest.mark.asyncio
     async def test_search_cursor_pagination(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         for i in range(5):
-            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcWidget().get_create_model()(label=f"g{i}", size=i))
         page = await svc.search(limit=2)
         assert len(page.items) == 2
         assert page.next_cursor is not None
@@ -282,9 +282,9 @@ class TestServiceSearch:
 
     @pytest.mark.asyncio
     async def test_search_cursor_pagination_with_sort(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         for i in [3, 1, 2]:
-            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcWidget().get_create_model()(label=f"g{i}", size=i))
         page = await svc.search(limit=2, sort="size")
         assert [item.size for item in page.items] == [1, 2]
         assert page.next_cursor is not None
@@ -294,17 +294,17 @@ class TestServiceSearch:
 
     @pytest.mark.asyncio
     async def test_search_invalid_cursor_raises(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        await svc.create(SvcWidget.get_create_model()(label="g0", size=0))
+        svc = SqlService(SvcWidget(), session=session)
+        await svc.create(SvcWidget().get_create_model()(label="g0", size=0))
         with pytest.raises(InvalidInputError):
             await svc.search(cursor="not-a-valid-cursor")
 
     @pytest.mark.asyncio
     async def test_search_cursor_sort_mismatch_raises(self, session: AsyncSession) -> None:
         """A cursor built for sort=size must not be reused under a different sort."""
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         for i in range(5):
-            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcWidget().get_create_model()(label=f"g{i}", size=i))
         page = await svc.search(limit=2, sort="size")
         assert page.next_cursor is not None
         # Reusing the size-sorted cursor under no sort -> 400.
@@ -326,10 +326,10 @@ class TestServiceSearch:
         string) to the keyset predicate and the round-trip yields the right
         page ordering.
         """
-        svc = SqlService(SvcDtWidget, session=session)
+        svc = SqlService(SvcDtWidget(), session=session)
         for i in range(5):
             await svc.create(
-                SvcDtWidget.get_create_model()(ts=datetime(2026, 1, i + 1, 12, 0, 0, tzinfo=UTC)),
+                SvcDtWidget().get_create_model()(ts=datetime(2026, 1, i + 1, 12, 0, 0, tzinfo=UTC)),
             )
         page = await svc.search(limit=2, sort="ts")
         assert [item.ts.replace(tzinfo=None) for item in page.items] == [
@@ -348,45 +348,45 @@ class TestServiceSearch:
 
     @pytest.mark.asyncio
     async def test_search_sort_ascending(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         for i in [3, 1, 2]:
-            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcWidget().get_create_model()(label=f"g{i}", size=i))
         page = await svc.search(sort="size")
         assert [item.size for item in page.items] == [1, 2, 3]
 
     @pytest.mark.asyncio
     async def test_search_sort_descending(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         for i in [3, 1, 2]:
-            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcWidget().get_create_model()(label=f"g{i}", size=i))
         page = await svc.search(sort="size", desc=True)
         assert [item.size for item in page.items] == [3, 2, 1]
 
     @pytest.mark.asyncio
     async def test_search_sort_unknown_field_raises(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         with pytest.raises(InvalidInputError):
             await svc.search(sort="nonsense")
 
     @pytest.mark.asyncio
     async def test_search_limit_below_one_raises(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         with pytest.raises(InvalidInputError):
             await svc.search(limit=0)
 
     @pytest.mark.asyncio
     async def test_search_limit_capped_to_max(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         page = await svc.search(limit=999)
         assert page.limit == 100  # _MAX_LIMIT
 
     @pytest.mark.asyncio
     async def test_search_with_declared_filter(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcFilterableWidget, session=session)
-        filter_cls = SvcFilterableWidget.get_search_filter_type()
+        svc = SqlService(SvcFilterableWidget(), session=session)
+        filter_cls = SvcFilterableWidget().get_search_filter_type()
         assert filter_cls is not None
         for i in range(3):
-            await svc.create(SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcFilterableWidget().get_create_model()(label=f"g{i}", size=i))
         filters = filter_cls(size__gte=2)
         page = await svc.search(filters=filters)
         assert len(page.items) == 1
@@ -396,39 +396,39 @@ class TestServiceSearch:
 class TestServiceCount:
     @pytest.mark.asyncio
     async def test_count_all(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         for i in range(3):
-            await svc.create(SvcWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcWidget().get_create_model()(label=f"g{i}", size=i))
         assert await svc.count() == 3
 
     @pytest.mark.asyncio
     async def test_count_with_filter(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcFilterableWidget, session=session)
-        filter_cls = SvcFilterableWidget.get_search_filter_type()
+        svc = SqlService(SvcFilterableWidget(), session=session)
+        filter_cls = SvcFilterableWidget().get_search_filter_type()
         assert filter_cls is not None
         for i in range(5):
-            await svc.create(SvcFilterableWidget.get_create_model()(label=f"g{i}", size=i))
+            await svc.create(SvcFilterableWidget().get_create_model()(label=f"g{i}", size=i))
         assert await svc.count(filters=filter_cls(size__gte=3)) == 2
 
     @pytest.mark.asyncio
     async def test_count_empty(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         assert await svc.count() == 0
 
 
 class TestServiceBatchRead:
     @pytest.mark.asyncio
     async def test_batch_read_returns_in_input_order(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        a = await svc.create(SvcWidget.get_create_model()(label="a"))
-        b = await svc.create(SvcWidget.get_create_model()(label="b"))
+        svc = SqlService(SvcWidget(), session=session)
+        a = await svc.create(SvcWidget().get_create_model()(label="a"))
+        b = await svc.create(SvcWidget().get_create_model()(label="b"))
         result = await svc.batch_read([b.id, a.id])
         assert [r.id for r in result] == [b.id, a.id]
 
     @pytest.mark.asyncio
     async def test_batch_read_inserts_null_for_absent_ids(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        a = await svc.create(SvcWidget.get_create_model()(label="a"))
+        svc = SqlService(SvcWidget(), session=session)
+        a = await svc.create(SvcWidget().get_create_model()(label="a"))
         result = await svc.batch_read([a.id, 999])
         assert len(result) == 2
         assert result[0].id == a.id
@@ -436,9 +436,9 @@ class TestServiceBatchRead:
 
     @pytest.mark.asyncio
     async def test_batch_read_preserves_order_with_nulls(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        a = await svc.create(SvcWidget.get_create_model()(label="a"))
-        b = await svc.create(SvcWidget.get_create_model()(label="b"))
+        svc = SqlService(SvcWidget(), session=session)
+        a = await svc.create(SvcWidget().get_create_model()(label="a"))
+        b = await svc.create(SvcWidget().get_create_model()(label="b"))
         # [b, missing, a, missing] -> [b, None, a, None]
         result = await svc.batch_read([b.id, 998, a.id, 999])
         assert len(result) == 4
@@ -449,14 +449,14 @@ class TestServiceBatchRead:
 
     @pytest.mark.asyncio
     async def test_batch_read_empty_list(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         result = await svc.batch_read([])
         assert result == []
 
     @pytest.mark.asyncio
     async def test_batch_read_deduplicates_ids(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        a = await svc.create(SvcWidget.get_create_model()(label="a"))
+        svc = SqlService(SvcWidget(), session=session)
+        a = await svc.create(SvcWidget().get_create_model()(label="a"))
         # Duplicates each map to the same entity, length matches the input.
         result = await svc.batch_read([a.id, a.id])
         assert len(result) == 2
@@ -467,7 +467,7 @@ class TestServiceBatchRead:
     async def test_batch_read_duplicate_absent_id_maps_to_nulls(
         self, session: AsyncSession
     ) -> None:
-        svc = SqlService(SvcWidget, session=session)
+        svc = SqlService(SvcWidget(), session=session)
         result = await svc.batch_read([999, 999])
         assert result == [None, None]
 
@@ -475,25 +475,25 @@ class TestServiceBatchRead:
 class TestServiceBatchEdit:
     @pytest.mark.asyncio
     async def test_batch_edit_applies_updates(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        a = await svc.create(SvcWidget.get_create_model()(label="a", size=1))
-        b = await svc.create(SvcWidget.get_create_model()(label="b", size=2))
+        svc = SqlService(SvcWidget(), session=session)
+        a = await svc.create(SvcWidget().get_create_model()(label="a", size=1))
+        b = await svc.create(SvcWidget().get_create_model()(label="b", size=2))
         results = await svc.batch_edit(
             [
-                (a.id, SvcWidget.get_update_model()(size=10)),
-                (b.id, SvcWidget.get_update_model()(size=20)),
+                (a.id, SvcWidget().get_update_model()(size=10)),
+                (b.id, SvcWidget().get_update_model()(size=20)),
             ],
         )
         assert {r.id: r.size for r in results} == {a.id: 10, b.id: 10 + 10}
 
     @pytest.mark.asyncio
     async def test_batch_edit_inserts_null_for_absent_ids(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        a = await svc.create(SvcWidget.get_create_model()(label="a"))
+        svc = SqlService(SvcWidget(), session=session)
+        a = await svc.create(SvcWidget().get_create_model()(label="a"))
         results = await svc.batch_edit(
             [
-                (a.id, SvcWidget.get_update_model()(size=5)),
-                (999, SvcWidget.get_update_model()(size=9)),  # absent -> null
+                (a.id, SvcWidget().get_update_model()(size=5)),
+                (999, SvcWidget().get_update_model()(size=9)),  # absent -> null
             ],
         )
         assert len(results) == 2
@@ -502,13 +502,13 @@ class TestServiceBatchEdit:
 
     @pytest.mark.asyncio
     async def test_batch_edit_preserves_order_with_nulls(self, session: AsyncSession) -> None:
-        svc = SqlService(SvcWidget, session=session)
-        a = await svc.create(SvcWidget.get_create_model()(label="a", size=1))
+        svc = SqlService(SvcWidget(), session=session)
+        a = await svc.create(SvcWidget().get_create_model()(label="a", size=1))
         results = await svc.batch_edit(
             [
-                (998, SvcWidget.get_update_model()(size=1)),  # absent
-                (a.id, SvcWidget.get_update_model()(size=7)),
-                (999, SvcWidget.get_update_model()(size=2)),  # absent
+                (998, SvcWidget().get_update_model()(size=1)),  # absent
+                (a.id, SvcWidget().get_update_model()(size=7)),
+                (999, SvcWidget().get_update_model()(size=2)),  # absent
             ],
         )
         assert len(results) == 3
@@ -556,8 +556,8 @@ class TestServiceWrappable:
             async def count(self, **kwargs):
                 return await self._inner.count(**kwargs)
 
-        inner = SqlService(SvcWidget, session=session)
-        await inner.create(SvcWidget.get_create_model()(label="x"))
+        inner = SqlService(SvcWidget(), session=session)
+        await inner.create(SvcWidget().get_create_model()(label="x"))
         wrapped = ReadOnlyWrapper(inner)
         result = await wrapped.read(1)
         assert result.label == "x"
@@ -574,8 +574,8 @@ class TestServiceRepositoryOverride:
                 CountingRepo.insert_count += 1
                 return await super().insert(sess, payload, context=context)
 
-        svc = SqlService(SvcWidget, session=session, repository_cls=CountingRepo)
-        await svc.create(SvcWidget.get_create_model()(label="x"))
+        svc = SqlService(SvcWidget(), session=session, repository_cls=CountingRepo)
+        await svc.create(SvcWidget().get_create_model()(label="x"))
         assert CountingRepo.insert_count == 1
 
 
@@ -1003,7 +1003,7 @@ class TestSearchOpenApiSchema:
         # the enum is exposed via a referenced component schema
         ref = sort_param["schema"]["anyOf"][0]["$ref"]
         enum_schema = _openapi(app)["components"]["schemas"][ref.split("/")[-1]]
-        assert set(enum_schema["enum"]) == set(SvcWidget.get_sortable_fields())
+        assert set(enum_schema["enum"]) == set(SvcWidget().get_sortable_fields())
         # SecretStr-free SvcWidget sorts id/label/size/created_at
         assert {"id", "label", "size", "created_at"} <= set(enum_schema["enum"])
 
@@ -1022,7 +1022,7 @@ class TestSearchOpenApiSchema:
         assert "sort" not in names
         assert "desc" not in names
         assert {"limit", "cursor"} <= names
-        assert SvcUnsortableWidget.get_sortable_fields() == []
+        assert SvcUnsortableWidget().get_sortable_fields() == []
 
     def test_search_response_items_typed_as_read_model(self) -> None:
         """The search endpoint's 200 response references the read model, not bare Any."""

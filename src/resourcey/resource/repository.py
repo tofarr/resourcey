@@ -46,9 +46,9 @@ class ResourceRepository:
     construction. Each async method takes an ``AsyncSession``.
     """
 
-    def __init__(self, resource: type[SqlResource]) -> None:
+    def __init__(self, resource: SqlResource) -> None:
         self.resource = resource
-        self.model = resource.get_sql_alchemy_model()
+        self.model = type(resource).get_sql_alchemy_model()
         self.id_field = resource.get_id_field()
         self.read_model = resource.get_read_model()
 

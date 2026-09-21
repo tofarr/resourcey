@@ -72,8 +72,7 @@ class MongoResource(BaseResource):
     # Service + client configuration
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_service_cls(cls) -> type[Any]:
+    def get_service_cls(self) -> type[Any]:
         from resourcey.mongo.mongo_service import MongoService
 
         return MongoService
@@ -179,8 +178,7 @@ class MongoResource(BaseResource):
     # Id convention (client-generated, not auto-increment)
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_config_for_field(cls, field_name: str, field: Any) -> Any:
+    def get_config_for_field(self, field_name: str, field: Any) -> Any:
         """Make the ``id`` field creatable so a client supplies it on create.
 
         Unlike SQL (where ``id`` is auto-incremented by the DB and therefore

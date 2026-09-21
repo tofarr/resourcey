@@ -116,8 +116,7 @@ class SqlResource(BaseResource):
     # Service + session configuration
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_service_cls(cls) -> type[Any]:
+    def get_service_cls(self) -> type[Any]:
         """The service class this resource yields: :class:`SqlService`."""
         from resourcey.resource.service import SqlService
 
@@ -191,8 +190,7 @@ class SqlResource(BaseResource):
         """
         return pluralize(camel_to_snake(cls.__name__)).lower()
 
-    @classmethod
-    def get_column_for_field(cls, field_name: str, field: FieldInfo) -> Column[Any]:
+    def get_column_for_field(self, field_name: str, field: FieldInfo) -> Column[Any]:
         """Generate a SQLAlchemy ``Column`` for a field.
 
         Honours an explicit ``ResourceyField.column`` when provided. Otherwise
@@ -201,7 +199,7 @@ class SqlResource(BaseResource):
         enums -> String, nested models -> JSON, scalars per the default
         type-mapping table, unmapped types -> ``ResourceyConfigError``.
         """
-        config = cls.get_config_for_field(field_name, field)
+        config = self.get_config_for_field(field_name, field)
         if config.column is not None:
             return config.column
 
@@ -221,9 +219,9 @@ class SqlResource(BaseResource):
 
         if field_name.endswith("_id"):
             raise ResourceyConfigError(
-                f"Field '{field_name}' on {cls.__name__} ends in '_id'; the framework cannot infer "
-                "its column semantics (foreign key? on-delete behaviour?). Define an explicit "
-                "ResourceyField(column=Column(...)) for this field."
+                f"Field '{field_name}' on {type(self).__name__} ends in '_id'; the framework "
+                "cannot infer its column semantics (foreign key? on-delete behaviour?). Define "
+                "an explicit ResourceyField(column=Column(...)) for this field."
             )
 
         py_type = _resolve_scalar_type(field.annotation)
@@ -238,15 +236,27 @@ class SqlResource(BaseResource):
         for each column. The model extends the resourcey async declarative
         base. Caching is mandatory: the declarative registry keys generated
         classes by name, so regenerating would clash.
+
+        This is a classmethod because it is called both on an instance (via
+        ``type(self).get_sql_alchemy_model()`` in ``on_register``) and on the
+        class directly (e.g. ``User.get_sql_alchemy_model()`` at import time
+        to eagerly materialise the table for migrations). A wrapper does not
+        generate its own SQL model — it delegates to the inner resource.
         """
         cached = cls.__dict__.get("_sqlalchemy_model")
         if cached is not None:
             return cached
+        # Use a temporary instance to call the instance-method hooks
+        # (get_id_field, get_column_for_field) without requiring the caller
+        # to have a live instance. This works because those methods don't
+        # depend on instance state — they read from the class's model_fields
+        # and cache on type(self).
+        proto = cls()
         table_name = cls.get_table_name()
-        id_field = cls.get_id_field()
+        id_field = proto.get_id_field()
         columns: list[Column[Any]] = []
         for name, field in cls.model_fields.items():
-            columns.append(cls.get_column_for_field(name, field))
+            columns.append(proto.get_column_for_field(name, field))
         table = ResourceyBase.metadata.tables.get(table_name)
         if table is None:
             table = Table(table_name, ResourceyBase.metadata, *columns)
@@ -292,7 +302,7 @@ async def _open_sql_service(resource: SqlResource, request: Any) -> Any:
 
     session = getattr(request.state, "session", None)
     if session is not None:
-        yield SqlService(type(resource), session=session)
+        yield SqlService(resource, session=session)
         return
     factory = resource._session_factory
     if factory is None:
@@ -303,7 +313,7 @@ async def _open_sql_service(resource: SqlResource, request: Any) -> Any:
     async with factory() as session:
         request.state.session = session
         try:
-            yield SqlService(type(resource), session=session)
+            yield SqlService(resource, session=session)
             await session.commit()
         except Exception:
             await session.rollback()

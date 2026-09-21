@@ -141,19 +141,19 @@ def _encryption_service() -> EncryptionService:
 
 
 def test_get_id_field_returns_id():
-    assert User.get_id_field() == "id"
+    assert User().get_id_field() == "id"
 
 
 def test_get_id_field_cached():
-    first = User.get_id_field()
-    second = User.get_id_field()
+    first = User().get_id_field()
+    second = User().get_id_field()
     assert first is second
     assert "_id_field" in User.__dict__
 
 
 def test_get_id_field_raises_when_no_id():
     with pytest.raises(ResourceyConfigError):
-        NoId.get_id_field()
+        NoId().get_id_field()
 
 
 def test_get_id_field_overridable():
@@ -164,7 +164,7 @@ def test_get_id_field_overridable():
         def get_id_field(cls) -> str:
             return "email"
 
-    assert CustomId.get_id_field() == "email"
+    assert CustomId().get_id_field() == "email"
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ def test_get_id_field_overridable():
 
 
 def test_config_for_id_field():
-    cfg = User.get_config_for_field("id", User.model_fields["id"])
+    cfg = User().get_config_for_field("id", User.model_fields["id"])
     assert cfg.creatable is False
     assert cfg.updatable is False
     assert cfg.readable is True
@@ -181,7 +181,7 @@ def test_config_for_id_field():
 
 
 def test_config_for_email_field_defaults():
-    cfg = User.get_config_for_field("email", User.model_fields["email"])
+    cfg = User().get_config_for_field("email", User.model_fields["email"])
     assert cfg.creatable is True
     assert cfg.updatable is True
     assert cfg.readable is True
@@ -190,27 +190,27 @@ def test_config_for_email_field_defaults():
 
 
 def test_config_for_timestamp_with_default_factory():
-    cfg = User.get_config_for_field("created_at", User.model_fields["created_at"])
+    cfg = User().get_config_for_field("created_at", User.model_fields["created_at"])
     assert cfg.creatable is False
     assert cfg.updatable is False
 
 
 def test_config_for_timestamp_with_fixed_default_raises():
     with pytest.raises(ResourceyConfigError):
-        BadTimestampDefault.get_config_for_field(
+        BadTimestampDefault().get_config_for_field(
             "created_at", BadTimestampDefault.model_fields["created_at"]
         )
 
 
 def test_config_for_timestamp_with_no_default_raises():
     with pytest.raises(ResourceyConfigError):
-        BadTimestampNoDefault.get_config_for_field(
+        BadTimestampNoDefault().get_config_for_field(
             "created_at", BadTimestampNoDefault.model_fields["created_at"]
         )
 
 
 def test_config_reads_explicit_annotated_metadata():
-    cfg = WithFk.get_config_for_field("role_id", WithFk.model_fields["role_id"])
+    cfg = WithFk().get_config_for_field("role_id", WithFk.model_fields["role_id"])
     assert cfg.column is not None
     # The explicit config is preserved (not reset to defaults by conventions,
     # since role_id is not id / timestamp).
@@ -222,12 +222,11 @@ def test_get_config_for_field_overridable():
         id: int
         x: int
 
-        @classmethod
-        def get_config_for_field(cls, field_name, field):
+        def get_config_for_field(self, field_name, field):
             cfg = super().get_config_for_field(field_name, field)
             return cfg.model_copy(update={"creatable": False})
 
-    cfg = Override.get_config_for_field("x", Override.model_fields["x"])
+    cfg = Override().get_config_for_field("x", Override.model_fields["x"])
     assert cfg.creatable is False
 
 
@@ -237,7 +236,7 @@ def test_get_config_for_field_overridable():
 
 
 def test_config_for_secret_str_defaults_not_sortable():
-    cfg = SecretResource.get_config_for_field("token", SecretResource.model_fields["token"])
+    cfg = SecretResource().get_config_for_field("token", SecretResource.model_fields["token"])
     assert cfg.sortable is False
     # Other flags are unaffected -- secrets stay creatable/updatable/readable
     # (readability is governed by redaction/encryption at the storage boundary,
@@ -248,7 +247,7 @@ def test_config_for_secret_str_defaults_not_sortable():
 
 
 def test_config_for_optional_secret_str_defaults_not_sortable():
-    cfg = SecretResource.get_config_for_field(
+    cfg = SecretResource().get_config_for_field(
         "optional_token", SecretResource.model_fields["optional_token"]
     )
     assert cfg.sortable is False
@@ -262,7 +261,9 @@ def test_config_for_secret_str_explicit_override_is_respected():
         id: int
         token: Annotated[SecretStr, ResourceyField(sortable=True)]
 
-    cfg = SecretWithOverride.get_config_for_field("token", SecretWithOverride.model_fields["token"])
+    cfg = SecretWithOverride().get_config_for_field(
+        "token", SecretWithOverride.model_fields["token"]
+    )
     assert cfg.sortable is True
 
 
@@ -273,8 +274,8 @@ def test_config_for_secret_str_explicit_override_is_respected():
 
 def test_get_search_filter_type_defaults_to_none():
     """No filter class declared by default -> no filtering is available."""
-    assert User.get_search_filter_type() is None
-    assert SecretResource.get_search_filter_type() is None
+    assert User().get_search_filter_type() is None
+    assert SecretResource().get_search_filter_type() is None
 
 
 def test_get_search_filter_type_overridable():
@@ -290,7 +291,7 @@ def test_get_search_filter_type_overridable():
         def get_search_filter_type(cls) -> type[SearchFilter] | None:
             return CustomFilter
 
-    assert CustomResource.get_search_filter_type() is CustomFilter
+    assert CustomResource().get_search_filter_type() is CustomFilter
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +300,7 @@ def test_get_search_filter_type_overridable():
 
 
 def test_create_model_excludes_non_creatable_fields():
-    create_model = User.get_create_model()
+    create_model = User().get_create_model()
     fields = set(create_model.model_fields)
     assert "id" not in fields
     assert "created_at" not in fields
@@ -308,12 +309,12 @@ def test_create_model_excludes_non_creatable_fields():
 
 
 def test_create_model_required_fields_stay_required():
-    create_model = User.get_create_model()
+    create_model = User().get_create_model()
     assert create_model.model_fields["email"].is_required()
 
 
 def test_create_model_optional_fields_default_to_missing():
-    create_model = User.get_create_model()
+    create_model = User().get_create_model()
     name_field = create_model.model_fields["name"]
     assert not name_field.is_required()
     assert name_field.default is MISSING
@@ -321,7 +322,7 @@ def test_create_model_optional_fields_default_to_missing():
 
 
 def test_create_model_instance_detects_missing():
-    create_model = User.get_create_model()
+    create_model = User().get_create_model()
     instance = create_model(email="a@b.com")
     assert instance.name is MISSING
     assert instance.age is MISSING
@@ -330,12 +331,12 @@ def test_create_model_instance_detects_missing():
 
 
 def test_create_model_cached():
-    assert User.get_create_model() is User.get_create_model()
+    assert User().get_create_model() is User().get_create_model()
     assert "_create_model" in User.__dict__
 
 
 def test_create_model_per_subclass():
-    assert User.get_create_model() is not Widget.get_create_model()
+    assert User().get_create_model() is not Widget().get_create_model()
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +345,7 @@ def test_create_model_per_subclass():
 
 
 def test_read_model_contains_readable_fields():
-    read_model = User.get_read_model()
+    read_model = User().get_read_model()
     fields = set(read_model.model_fields)
     assert "id" in fields
     assert "email" in fields
@@ -356,13 +357,13 @@ def test_read_model_excludes_unreadable_field():
         id: int
         token: Annotated[str, ResourceyField(readable=False)] = "x"
 
-    read_model = Secret.get_read_model()
+    read_model = Secret().get_read_model()
     assert "token" not in read_model.model_fields
     assert "id" in read_model.model_fields
 
 
 def test_read_model_cached():
-    assert User.get_read_model() is User.get_read_model()
+    assert User().get_read_model() is User().get_read_model()
     assert "_read_model" in User.__dict__
 
 
@@ -372,7 +373,7 @@ def test_read_model_cached():
 
 
 def test_update_model_excludes_non_updatable_fields():
-    update_model = User.get_update_model()
+    update_model = User().get_update_model()
     fields = set(update_model.model_fields)
     assert "id" not in fields
     assert "created_at" not in fields
@@ -381,7 +382,7 @@ def test_update_model_excludes_non_updatable_fields():
 
 
 def test_update_model_all_fields_optional_with_missing():
-    update_model = User.get_update_model()
+    update_model = User().get_update_model()
     for name, field in update_model.model_fields.items():
         assert not field.is_required(), name
         assert field.default is MISSING, name
@@ -389,7 +390,7 @@ def test_update_model_all_fields_optional_with_missing():
 
 
 def test_update_model_instance_detects_missing():
-    update_model = User.get_update_model()
+    update_model = User().get_update_model()
     instance = update_model()
     assert instance.email is MISSING
     updated = update_model(email="new@x.com")
@@ -397,7 +398,7 @@ def test_update_model_instance_detects_missing():
 
 
 def test_update_model_cached():
-    assert User.get_update_model() is User.get_update_model()
+    assert User().get_update_model() is User().get_update_model()
     assert "_update_model" in User.__dict__
 
 
@@ -431,7 +432,7 @@ def test_get_table_name_overridable():
         def get_table_name(cls) -> str:
             return "custom_table"
 
-    assert Custom.get_table_name() == "custom_table"
+    assert Custom().get_table_name() == "custom_table"
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +452,7 @@ def test_get_table_name_overridable():
     ],
 )
 def test_get_resource_path(resource, expected):
-    assert resource.get_resource_path() == expected
+    assert resource().get_resource_path() == expected
 
 
 def test_get_resource_path_independent_of_table_name_override():
@@ -469,10 +470,10 @@ def test_get_resource_path_independent_of_table_name_override():
         def get_table_name(cls) -> str:
             return "custom_table"
 
-    assert Custom.get_table_name() == "custom_table"
+    assert Custom().get_table_name() == "custom_table"
     # Not "custom_table" / "custom_tables" -- derived independently from the
     # class name, so the URL path is unaffected by the table-name override.
-    assert Custom.get_resource_path() == "customs"
+    assert Custom().get_resource_path() == "customs"
 
 
 def test_get_resource_path_overridable():
@@ -483,7 +484,7 @@ def test_get_resource_path_overridable():
         def get_resource_path(cls) -> str:
             return "custom-path"
 
-    assert Custom.get_resource_path() == "custom-path"
+    assert Custom().get_resource_path() == "custom-path"
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +493,7 @@ def test_get_resource_path_overridable():
 
 
 def test_column_for_int_id_is_primary_key_with_autoincrement():
-    col = User.get_column_for_field("id", User.model_fields["id"])
+    col = User().get_column_for_field("id", User.model_fields["id"])
     assert col.primary_key is True
     assert col.autoincrement is True
     assert col.nullable is False
@@ -500,62 +501,62 @@ def test_column_for_int_id_is_primary_key_with_autoincrement():
 
 
 def test_column_for_created_at_is_indexed():
-    col = User.get_column_for_field("created_at", User.model_fields["created_at"])
+    col = User().get_column_for_field("created_at", User.model_fields["created_at"])
     assert col.index is True
     assert isinstance(col.type, DateTime)
 
 
 def test_column_for_string_field():
-    col = User.get_column_for_field("email", User.model_fields["email"])
+    col = User().get_column_for_field("email", User.model_fields["email"])
     assert isinstance(col.type, String)
     assert col.nullable is False  # email is required
 
 
 def test_column_nullable_for_optional_field():
-    col = User.get_column_for_field("name", User.model_fields["name"])
+    col = User().get_column_for_field("name", User.model_fields["name"])
     assert col.nullable is True
 
 
 def test_column_for_enum_is_string():
-    col = User.get_column_for_field("color", User.model_fields["color"])
+    col = User().get_column_for_field("color", User.model_fields["color"])
     assert isinstance(col.type, String)
 
 
 def test_column_for_nested_model_is_json():
-    col = User.get_column_for_field("address", User.model_fields["address"])
+    col = User().get_column_for_field("address", User.model_fields["address"])
     assert isinstance(col.type, JSON)
 
 
 def test_column_for_dict_is_json():
-    col = User.get_column_for_field("payload", User.model_fields["payload"])
+    col = User().get_column_for_field("payload", User.model_fields["payload"])
     assert isinstance(col.type, JSON)
 
 
 def test_column_for_list_is_json():
-    col = User.get_column_for_field("tags", User.model_fields["tags"])
+    col = User().get_column_for_field("tags", User.model_fields["tags"])
     assert isinstance(col.type, JSON)
 
 
 def test_column_for_ambiguous_id_raises():
     with pytest.raises(ResourceyConfigError):
-        WithAmbiguousId.get_column_for_field("owner_id", WithAmbiguousId.model_fields["owner_id"])
+        WithAmbiguousId().get_column_for_field("owner_id", WithAmbiguousId.model_fields["owner_id"])
 
 
 def test_column_honours_explicit_override():
-    col = WithFk.get_column_for_field("role_id", WithFk.model_fields["role_id"])
+    col = WithFk().get_column_for_field("role_id", WithFk.model_fields["role_id"])
     assert col.name == "role_id"
     assert len(col.foreign_keys) == 1
 
 
 def test_column_for_uuid_id():
-    col = WithUuidId.get_column_for_field("id", WithUuidId.model_fields["id"])
+    col = WithUuidId().get_column_for_field("id", WithUuidId.model_fields["id"])
     assert col.primary_key is True
     assert col.nullable is False
 
 
 def test_column_for_unmapped_type_raises():
     with pytest.raises(ResourceyConfigError):
-        WithUnmappedType.get_column_for_field("thing", WithUnmappedType.model_fields["thing"])
+        WithUnmappedType().get_column_for_field("thing", WithUnmappedType.model_fields["thing"])
 
 
 def test_get_column_for_field_overridable():
@@ -569,7 +570,7 @@ def test_get_column_for_field_overridable():
                 return Column("flag", Integer)
             return super().get_column_for_field(field_name, field)
 
-    col = Override.get_column_for_field("flag", Override.model_fields["flag"])
+    col = Override().get_column_for_field("flag", Override.model_fields["flag"])
     assert isinstance(col.type, Integer)
 
 
@@ -579,34 +580,34 @@ def test_get_column_for_field_overridable():
 
 
 def test_sql_alchemy_model_extends_resourcey_base():
-    sqla_model = User.get_sql_alchemy_model()
+    sqla_model = User().get_sql_alchemy_model()
     assert issubclass(sqla_model, ResourceyBase)
 
 
 def test_sql_alchemy_model_table_name_and_primary_key():
-    sqla_model = User.get_sql_alchemy_model()
+    sqla_model = User().get_sql_alchemy_model()
     assert sqla_model.__table__.name == "users"
     pk_cols = [c for c in sqla_model.__table__.columns if c.primary_key]
     assert [c.name for c in pk_cols] == ["id"]
 
 
 def test_sql_alchemy_model_has_all_columns():
-    sqla_model = User.get_sql_alchemy_model()
+    sqla_model = User().get_sql_alchemy_model()
     names = {c.name for c in sqla_model.__table__.columns}
     assert names == set(User.model_fields)
 
 
 def test_sql_alchemy_model_cached():
-    assert User.get_sql_alchemy_model() is User.get_sql_alchemy_model()
+    assert User().get_sql_alchemy_model() is User().get_sql_alchemy_model()
     assert "_sqlalchemy_model" in User.__dict__
 
 
 def test_sql_alchemy_model_per_subclass():
-    assert User.get_sql_alchemy_model() is not Widget.get_sql_alchemy_model()
+    assert User().get_sql_alchemy_model() is not Widget().get_sql_alchemy_model()
 
 
 def test_sql_alchemy_model_keyed_on_id_field():
-    sqla_model = User.get_sql_alchemy_model()
+    sqla_model = User().get_sql_alchemy_model()
     # primary_key mapper arg points at the id column
     pk_cols = sqla_model.__mapper__.primary_key
     assert [c.name for c in pk_cols] == ["id"]
@@ -615,7 +616,7 @@ def test_sql_alchemy_model_keyed_on_id_field():
 async def test_sql_alchemy_model_round_trip():
     # Build the ORM model first so its table is registered on the shared
     # metadata before create_all runs on a fresh in-memory engine.
-    sqla_model = Widget.get_sql_alchemy_model()
+    sqla_model = Widget().get_sql_alchemy_model()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     try:
         async with engine.begin() as conn:
@@ -640,13 +641,13 @@ async def test_sql_alchemy_model_round_trip():
 
 
 def test_column_for_secret_str_is_string():
-    col = SecretResource.get_column_for_field("token", SecretResource.model_fields["token"])
+    col = SecretResource().get_column_for_field("token", SecretResource.model_fields["token"])
     assert isinstance(col.type, String)
     assert col.nullable is False  # token is required
 
 
 def test_column_for_optional_secret_str_is_nullable_string():
-    col = SecretResource.get_column_for_field(
+    col = SecretResource().get_column_for_field(
         "optional_token", SecretResource.model_fields["optional_token"]
     )
     assert isinstance(col.type, String)
@@ -656,13 +657,13 @@ def test_column_for_optional_secret_str_is_nullable_string():
 def test_secret_str_field_no_longer_raises_unmapped_type():
     # Before issue #7 a SecretStr field raised ResourceyConfigError because it
     # was absent from _SCALAR_COLUMN_TYPES. Now it maps to a String column.
-    sqla_model = SecretResource.get_sql_alchemy_model()
+    sqla_model = SecretResource().get_sql_alchemy_model()
     names = {c.name for c in sqla_model.__table__.columns}
     assert {"id", "name", "token", "optional_token"} == names
 
 
 def test_create_model_with_secret_field_redacts_on_default_dump():
-    create_model = SecretResource.get_create_model()
+    create_model = SecretResource().get_create_model()
     instance = create_model(
         name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
     )
@@ -673,7 +674,7 @@ def test_create_model_with_secret_field_redacts_on_default_dump():
 
 
 def test_create_model_with_secret_field_redacts_on_json_dump():
-    create_model = SecretResource.get_create_model()
+    create_model = SecretResource().get_create_model()
     instance = create_model(
         name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
     )
@@ -685,7 +686,7 @@ def test_create_model_with_secret_field_redacts_on_json_dump():
 
 def test_create_model_secret_field_encrypts_with_context():
     enc = _encryption_service()
-    create_model = SecretResource.get_create_model()
+    create_model = SecretResource().get_create_model()
     instance = create_model(
         name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
     )
@@ -697,7 +698,7 @@ def test_create_model_secret_field_encrypts_with_context():
 
 
 def test_create_model_secret_field_exposes_plaintext_with_context():
-    create_model = SecretResource.get_create_model()
+    create_model = SecretResource().get_create_model()
     instance = create_model(
         name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
     )
@@ -708,7 +709,7 @@ def test_create_model_secret_field_exposes_plaintext_with_context():
 
 def test_create_model_non_secret_field_is_not_encrypted():
     enc = _encryption_service()
-    create_model = SecretResource.get_create_model()
+    create_model = SecretResource().get_create_model()
     instance = create_model(
         name="svc", token=SecretStr("plain-token"), optional_token=SecretStr("opt")
     )
@@ -719,8 +720,8 @@ def test_create_model_non_secret_field_is_not_encrypted():
 
 def test_read_model_secret_field_round_trip_with_encryption_context():
     enc = _encryption_service()
-    create_model = SecretResource.get_create_model()
-    read_model = SecretResource.get_read_model()
+    create_model = SecretResource().get_create_model()
+    read_model = SecretResource().get_read_model()
     instance = create_model(
         name="svc", token=SecretStr("round-trip-value"), optional_token=SecretStr("opt")
     )
@@ -741,7 +742,7 @@ def test_read_model_secret_field_round_trip_with_encryption_context():
 
 
 def test_read_model_secret_field_passes_through_without_encryption_context():
-    read_model = SecretResource.get_read_model()
+    read_model = SecretResource().get_read_model()
     # Without a service the stored value is treated as plaintext pass-through.
     loaded = read_model.model_validate(
         {"id": 1, "name": "svc", "token": "raw", "optional_token": "rawopt"},
@@ -753,7 +754,7 @@ def test_read_model_secret_field_passes_through_without_encryption_context():
 
 def test_update_model_secret_field_encrypts_with_context():
     enc = _encryption_service()
-    update_model = SecretResource.get_update_model()
+    update_model = SecretResource().get_update_model()
     instance = update_model(token=SecretStr("new-token"))
     dumped = instance.model_dump(
         context={"encryption_service": enc}, exclude={"name", "optional_token"}
@@ -764,7 +765,7 @@ def test_update_model_secret_field_encrypts_with_context():
 def test_update_model_secret_field_missing_when_omitted():
     # An omitted secret field defaults to MISSING (the service distinguishes
     # omitted from explicitly-supplied), matching the non-secret update contract.
-    update_model = SecretResource.get_update_model()
+    update_model = SecretResource().get_update_model()
     instance = update_model()
     assert instance.token is MISSING
 
@@ -772,7 +773,7 @@ def test_update_model_secret_field_missing_when_omitted():
 def test_resource_without_secret_fields_uses_plain_basemodel():
     # No secret fields -> the generated model's base is plain BaseModel
     # (the #1 generation contract is preserved).
-    create_model = Widget.get_create_model()
+    create_model = Widget().get_create_model()
     assert create_model.__bases__[0] is BaseModel
     instance = create_model(label="gadget")
     assert instance.model_dump() == {"label": "gadget"}
@@ -780,7 +781,7 @@ def test_resource_without_secret_fields_uses_plain_basemodel():
 
 def test_secret_field_optional_value_encrypts_when_set():
     enc = _encryption_service()
-    create_model = SecretResource.get_create_model()
+    create_model = SecretResource().get_create_model()
     instance = create_model(name="svc", token=SecretStr("req"), optional_token=SecretStr("opt"))
     dumped = instance.model_dump(context={"encryption_service": enc})
     assert enc.decrypt_value(dumped["optional_token"]) == "opt"
@@ -788,7 +789,7 @@ def test_secret_field_optional_value_encrypts_when_set():
 
 def test_secret_field_validator_accepts_secret_str_input():
     # A SecretStr passed directly to validation is preserved as-is.
-    read_model = SecretResource.get_read_model()
+    read_model = SecretResource().get_read_model()
     loaded = read_model.model_validate(
         {"id": 1, "name": "svc", "token": SecretStr("direct"), "optional_token": None},
         context={},

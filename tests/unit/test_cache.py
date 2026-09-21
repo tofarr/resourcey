@@ -363,19 +363,19 @@ for _r in (
 
 class TestGetCacheStrategy:
     def test_defaults_to_last_modified_when_updated_at_readable(self) -> None:
-        assert isinstance(HasUpdated.get_cache_strategy(), LastModifiedCacheStrategy)
+        assert isinstance(HasUpdated().get_cache_strategy(), LastModifiedCacheStrategy)
 
     def test_defaults_to_etag_when_no_updated_at(self) -> None:
-        assert isinstance(NoUpdated.get_cache_strategy(), ETagCacheStrategy)
+        assert isinstance(NoUpdated().get_cache_strategy(), ETagCacheStrategy)
 
     def test_defaults_to_etag_when_updated_at_not_readable(self) -> None:
-        assert isinstance(UpdatedUnreadable.get_cache_strategy(), ETagCacheStrategy)
+        assert isinstance(UpdatedUnreadable().get_cache_strategy(), ETagCacheStrategy)
 
     def test_cached_on_class(self) -> None:
-        assert HasUpdated.get_cache_strategy() is HasUpdated.get_cache_strategy()
+        assert HasUpdated().get_cache_strategy() is HasUpdated().get_cache_strategy()
 
     def test_override_seam(self) -> None:
-        s = CustomStrategy.get_cache_strategy()
+        s = CustomStrategy().get_cache_strategy()
         assert isinstance(s, OptimisticCacheStrategy)
         assert s.expire_in == 42
 
@@ -403,14 +403,14 @@ async def session(session_factory: async_sessionmaker[AsyncSession]) -> AsyncSes
 
 class TestServiceComputeCacheHeader:
     def test_compute_cache_header_etag_for_no_updated_resource(self) -> None:
-        svc = SqlService(NoUpdated, session=None)
-        header = svc.compute_cache_header([NoUpdated.get_read_model()(id=1, label="x")])
+        svc = SqlService(NoUpdated(), session=None)
+        header = svc.compute_cache_header([NoUpdated().get_read_model()(id=1, label="x")])
         assert header is not None
         assert header.etag is not None
 
     def test_compute_cache_header_last_modified_for_updated_resource(self) -> None:
-        svc = SqlService(HasUpdated, session=None)
-        rm = HasUpdated.get_read_model()(
+        svc = SqlService(HasUpdated(), session=None)
+        rm = HasUpdated().get_read_model()(
             id=1, label="x", updated_at=datetime(2026, 1, 1, tzinfo=UTC)
         )
         header = svc.compute_cache_header([rm])
@@ -418,14 +418,14 @@ class TestServiceComputeCacheHeader:
         assert header.updated_at is not None
 
     def test_compute_count_cache_header_etag(self) -> None:
-        svc = SqlService(NoUpdated, session=None)
+        svc = SqlService(NoUpdated(), session=None)
         h1 = svc.compute_count_cache_header(3, None)
         assert h1 is not None
         assert h1.etag is not None
         assert h1.updated_at is None
 
     def test_compute_count_cache_header_distinct_for_distinct_count(self) -> None:
-        svc = SqlService(NoUpdated, session=None)
+        svc = SqlService(NoUpdated(), session=None)
         a = svc.compute_count_cache_header(3, None)
         b = svc.compute_count_cache_header(4, None)
         assert a is not None and b is not None
@@ -434,9 +434,11 @@ class TestServiceComputeCacheHeader:
     def test_compute_count_cache_header_always_returns_etag(self) -> None:
         # Count is count-derived (independent of the strategy's get_cache_header),
         # so it always produces an ETag even when the strategy yields nothing.
-        svc = SqlService(NoCacheResource, session=None)
+        svc = SqlService(NoCacheResource(), session=None)
         # compute_cache_header yields None (strategy produces nothing)...
-        assert svc.compute_cache_header([NoCacheResource.get_read_model()(id=1, label="x")]) is None
+        assert (
+            svc.compute_cache_header([NoCacheResource().get_read_model()(id=1, label="x")]) is None
+        )
         # ...but count is count-derived, so it still has an ETag.
         h = svc.compute_count_cache_header(5, None)
         assert h is not None
@@ -692,11 +694,11 @@ class TestETagSerializationContext:
             def get_cache_strategy(cls):  # type: ignore[override]
                 return ETagCacheStrategy()
 
-        CtxResource.get_sql_alchemy_model()
+        CtxResource().get_sql_alchemy_model()
         rm_cls = type("CtxRead", (_ContextSensitiveItem,), {})
-        svc_no_ctx = SqlService(CtxResource, session=None)
+        svc_no_ctx = SqlService(CtxResource(), session=None)
         svc_with_ctx = SqlService(
-            CtxResource,
+            CtxResource(),
             session=None,
             serialization_context={"expose": True},
         )
