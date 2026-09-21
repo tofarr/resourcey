@@ -16,27 +16,18 @@ schema-version field, but the framework does not prescribe it.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any
 
+from resourcey.app_context import AppContext
 from resourcey.resource.base import BaseResource
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.util.naming import camel_to_snake, pluralize
-
-if TYPE_CHECKING:
-    pass
 
 # AppContext cache key for the shared Mongo client. Resources look this up on
 # the context so an escape-hatch caller can pre-seed a client and skip the
 # default build.
 _MONGO_CLIENT_KEY = object()
-
-
-async def _clear_mongo_client() -> None:
-    """Disposer: null the cached Mongo client so a fresh app starts clean."""
-    MongoResource._client = None
-    MongoResource._db = None
 
 
 async def _noop_dispose() -> None:
@@ -47,21 +38,19 @@ class MongoResource(BaseResource):
     """A resource declaration backed by a MongoDB collection.
 
     Adds the Mongo concerns on top of :class:`BaseResource`: the collection
-    name, a ``motor`` client / database built by :meth:`lifespan` (via
+    name, a ``motor`` client / database built by ``__aenter__`` (via
     :meth:`build_client`), and :meth:`open_service` yielding a
     :class:`~resourcey.mongo.mongo_service.MongoService`. There is no ORM
-    model and no Alembic migration — a Mongo resource stores documents
+    model and no Alembic migration -- a Mongo resource stores documents
     directly and upgrades them lazily via :meth:`migrate_document`.
     """
 
-    # ``motor`` client / collection used by ``open_service``. Set by
-    # :meth:`lifespan` before the app serves requests. ``None`` means
-    # unconfigured. Cached on :class:`MongoResource` so all Mongo resources
-    # share one client (one connection pool). ``ClassVar`` keeps it out of
-    # ``model_fields``.
-    _client: ClassVar[Any] = None
-    _database_name: ClassVar[str] = "resourcey"
-    _db: ClassVar[Any] = None
+    # Per-instance ``motor`` client / collection used by ``open_service``.
+    # Set by ``__aenter__`` before the app serves requests. ``None`` means
+    # unconfigured.
+    _client: Any = None
+    _database_name: str = "resourcey"
+    _db: Any = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -71,14 +60,12 @@ class MongoResource(BaseResource):
     # Registration hook
     # ------------------------------------------------------------------
 
-    @classmethod
-    def _on_register(cls) -> None:
-        """No eager materialisation is needed for a Mongo resource.
+    def on_register(self) -> None:
+        """No eager materialisation needed for a Mongo resource.
 
-        Unlike ``SqlResource`` (which builds its ORM model so the table lands
-        in metadata before migrations run), a Mongo resource has no schema to
-        materialise. Indexes are created in :meth:`lifespan` via
-        :meth:`ensure_indexes`.
+        Unlike ``SqlResource`` (which builds its ORM model), a Mongo resource
+        has no schema to materialise. Indexes are created in ``__aenter__``
+        via :meth:`ensure_indexes`.
         """
 
     # ------------------------------------------------------------------
@@ -91,54 +78,42 @@ class MongoResource(BaseResource):
 
         return MongoService
 
-    @classmethod
-    @asynccontextmanager
-    async def lifespan(cls, ctx: Any) -> AsyncIterator[None]:
-        """Build (or reuse) the shared Mongo client, run indexes, then yield.
+    async def __aenter__(self, ctx: AppContext) -> AppContext:
+        """Build (or reuse) the shared Mongo client, run indexes, then enter.
 
-        On entry: if no client is cached on :class:`MongoResource`, build one
-        via :meth:`build_client` and cache it on the base so all Mongo
-        resources share one connection pool. The client's disposer is
-        registered on ``ctx`` for app-level shutdown. A client pre-seeded on
-        ``ctx`` (the escape hatch) is adopted onto the class cache instead of
-        building — no disposer, the caller owns it. Then ``ensure_indexes``
-        runs for this resource's collection.
-
-        On exit: the disposer (registered on ``ctx``) closes the client and
-        clears the cached state, so a fresh ``create_app`` in the same process
-        starts clean.
+        If no client is cached on this instance, build one via
+        :meth:`build_client`. The client's disposer is registered on ``ctx``.
+        A client pre-seeded on ``ctx`` (the escape hatch) is adopted without
+        building. Then ``ensure_indexes`` runs for this resource's collection.
         """
-        if MongoResource.__dict__.get("_client") is None:
+        await super().__aenter__(ctx)
+        if self._client is None:
             if ctx.has(_MONGO_CLIENT_KEY):
-                # Escape hatch: adopt the caller-supplied client onto the
-                # class cache — the request path (get_collection) reads the
-                # class attributes, never ctx.
-                MongoResource._client = ctx.get(_MONGO_CLIENT_KEY)
-                MongoResource._db = MongoResource._client[MongoResource._database_name]
+                self._client = ctx.get(_MONGO_CLIENT_KEY)
+                self._db = self._client[self._database_name]
             else:
-                client, database_name, dispose = cls.build_client(ctx)
-                MongoResource._client = client
-                MongoResource._database_name = database_name
-                MongoResource._db = client[database_name]
+                client, database_name, dispose = self.build_client(ctx)
+                self._client = client
+                self._database_name = database_name
+                self._db = client[database_name]
                 ctx.set(_MONGO_CLIENT_KEY, client)
                 ctx.add_disposer(dispose)
-        await cls.ensure_indexes()
-        # Always clear the class-level cache on shutdown so a fresh app in the
-        # same process does not see a stale (possibly closed) client.
-        ctx.add_disposer(_clear_mongo_client)
-        async with super().lifespan(ctx):
-            yield
+        await self.ensure_indexes()
+        return ctx
 
-    @classmethod
-    def build_client(cls, ctx: Any) -> tuple[Any, str, Any]:
+    async def __aexit__(self, *exc: object) -> None:
+        """Clear instance client state so a fresh manifest starts clean."""
+        self._client = None
+        self._db = None
+        await super().__aexit__(*exc)
+
+    def build_client(self, ctx: AppContext) -> tuple[Any, str, Any]:
         """Build the shared ``motor`` client + return its disposer.
 
         Default: read ``mongo.url`` / ``mongo.database`` from the app config
         (``ctx.config``). When the URL is ``embedded`` (or empty), use the
-        in-process :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient` — no
-        external MongoDB server required. Otherwise build a real ``motor``
-        client against the URL. Override to supply a custom client or point a
-        resource at a different database.
+        in-process :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient``. Otherwise
+        build a real ``motor`` client against the URL.
 
         Returns:
             ``(client, database_name, disposer)`` where ``disposer`` is a
@@ -164,31 +139,29 @@ class MongoResource(BaseResource):
         client = AsyncIOMotorClient(url)
         return client, database_name, client.close
 
-    @classmethod
-    def get_collection(cls) -> Any:
+    def get_collection(self) -> Any:
         """The configured ``motor`` collection for this resource.
 
-        Raises if :meth:`lifespan` has not run — a Mongo resource cannot open
+        Raises if ``__aenter__`` has not run -- a Mongo resource cannot open
         a service without a client.
         """
-        if cls._db is None:
+        if self._db is None:
             raise ResourceyConfigError(
-                f"{cls.__name__} has no Mongo client configured; "
-                "the app lifespan sets this via MongoResource.build_client."
+                f"{type(self).__name__} has no Mongo client configured; "
+                "the manifest lifecycle sets this via build_client."
             )
-        return cls._db[cls.get_collection_name()]
+        return self._db[type(self).get_collection_name()]
 
-    @classmethod
-    def open_service(cls, request: Any) -> Any:
+    def open_service(self, request: Any) -> Any:
         """Async context manager yielding a :class:`MongoService` for ``request``.
 
         Yields a :class:`~resourcey.mongo.mongo_service.MongoService` bound to
-        this resource's collection. Suitable for use as an injected FastAPI
-        dependency (the route builder drives the ``async with``).
+        this resource's collection.
         """
-        return _open_mongo_service(cls)
+        return _open_mongo_service(self)
 
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
+
     # Collection naming
     # ------------------------------------------------------------------
 
@@ -226,25 +199,23 @@ class MongoResource(BaseResource):
     # Indexes (opt-in, application-driven — no DDL / migration step)
     # ------------------------------------------------------------------
 
-    @classmethod
-    async def ensure_indexes(cls) -> None:
+    async def ensure_indexes(self) -> None:
         """Create indexes declared by :meth:`get_indexes`.
 
-        Called by the app factory at startup (or manually) since there is no
-        migration step. Override :meth:`get_indexes` to declare index specs;
-        the default returns an empty list (no indexes beyond ``_id``).
+        Called by the manifest lifecycle at startup (or manually) since there
+        is no migration step. Override :meth:`get_indexes` to declare index
+        specs; the default returns an empty list (no indexes beyond ``_id``).
         """
-        indexes = cls.get_indexes()
+        indexes = self.get_indexes()
         if not indexes:
             return
-        collection = cls.get_collection()
+        collection = self.get_collection()
         for spec in indexes:
             await collection.create_index(
                 spec["key"], name=spec.get("name"), **spec.get("options", {})
             )
 
-    @classmethod
-    def get_indexes(cls) -> list[dict[str, Any]]:
+    def get_indexes(self) -> list[dict[str, Any]]:
         """Index specifications for :meth:`ensure_indexes`.
 
         Each spec is ``{"key": [(field, direction)], "name": str|None,
@@ -257,8 +228,7 @@ class MongoResource(BaseResource):
     # Manual migration on read (opt-in, application-defined)
     # ------------------------------------------------------------------
 
-    @classmethod
-    def migrate_document(cls, doc: dict[str, Any]) -> dict[str, Any]:
+    def migrate_document(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Lazily upgrade a document to the current shape on read (default no-op).
 
         Invoked by :meth:`MongoService._doc_to_read_model` before projecting
@@ -275,7 +245,7 @@ class MongoResource(BaseResource):
 
 
 @asynccontextmanager
-async def _open_mongo_service(cls: type[MongoResource]) -> Any:
+async def _open_mongo_service(resource: MongoResource) -> Any:
     """Yield a :class:`MongoService` bound to the resource's collection.
 
     Motor manages its own connection pool, so unlike the SQL path there is no
@@ -284,8 +254,8 @@ async def _open_mongo_service(cls: type[MongoResource]) -> Any:
     """
     from resourcey.mongo.mongo_service import MongoService
 
-    collection = cls.get_collection()
-    yield MongoService(cls, collection=collection)
+    collection = resource.get_collection()
+    yield MongoService(resource, collection=collection)
 
 
 def _make_id_optional(cls: type[MongoResource]) -> None:

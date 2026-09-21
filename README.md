@@ -91,17 +91,18 @@ resourcey migrate downgrade -1     # one step back
 
 The migrations directory is configured under the `migrations` key of
 `FrameworkConfig` (env prefix `RESOURCEY_MIGRATIONS_`). The resource set is the
-**app-level** `FrameworkConfig.resources` field (env `RESOURCEY_RESOURCES`) —
-the same source of truth the REST service layer and RBAC use, so migrations
-never diverge from what the app actually serves:
+**app-level** `FrameworkConfig.manifest` field (env `RESOURCEY_MANIFEST`) —
+a `module:attr` path to the app's `ResourceManifest`, which owns the resource
+instances and materialises their tables. The same manifest drives the REST
+service layer and RBAC, so migrations never diverge from what the app serves:
 
 | Env var | Default | Purpose |
 | --- | --- | --- |
-| `RESOURCEY_RESOURCES` | `[]` | Dotted import paths to the app's `BaseResource` subclasses (JSON array, or `RESOURCEY_RESOURCES_0`, `_1`, ...). Resolved lazily on access; `env.py` resolves + registers them before autogenerating. |
+| `RESOURCEY_MANIFEST` | `""` | Dotted/colon path (`module:attr`) to the app's `ResourceManifest` instance. `env.py` imports it and calls `materialize()` before autogenerating. |
 | `RESOURCEY_MIGRATIONS_MIGRATIONS_DIR` | `migrations` | Directory holding `env.py` and `versions/`. |
 
 ```bash
-RESOURCEY_RESOURCES='["myapp.user.User","myapp.widget.Widget"]' resourcey migrate autogenerate -m "init"
+RESOURCEY_MANIFEST='myapp.app:manifest' resourcey migrate autogenerate -m "init"
 ```
 
 **Generated revisions are drafts.** Alembic's autogeneration cannot detect

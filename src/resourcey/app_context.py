@@ -8,9 +8,9 @@ shutdown. The app factory builds one per app and enters each resource's
 lifecycle with it.
 
 The escape hatch: a caller pre-seeds the context before resources enter (e.g.
-``ctx.set(async_sessionmaker, my_factory)``) so a resource finds its
-dependency already cached and skips building — exactly the old
-``create_app(engine=..., session_factory=...)`` override, now backend-neutral.
+``ctx.set(_SESSION_FACTORY_KEY, my_factory)``) so a resource finds its
+dependency already cached and skips building — the
+``manifest.create_app(app_context=ctx)`` escape hatch, now backend-neutral.
 
 Disposers are coroutines registered via :meth:`add_disposer`; :meth:`aclose`
 runs them in reverse registration order. A caller-supplied (pre-seeded)

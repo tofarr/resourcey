@@ -6,25 +6,18 @@ parsed with the ``RESOURCEY`` prefix. The database connection is a structured
 each component can be injected independently — e.g. a secret store populates
 ``password`` while the rest comes from plaintext env vars.
 
-The :attr:`resources` field carries the registered ``BaseResource`` subclasses
-this app serves. Its env representation is a list of dotted import paths — a
-JSON array (``RESOURCEY_RESOURCES=["myapp.user.User","myapp.rbac.Role"]``) or
-the sequential form (``RESOURCEY_RESOURCES_0`` / ``RESOURCEY_RESOURCES_1`` …)
-— resolved to the classes lazily on first access via :class:`LazyField`, never
-at import time. This makes the config the single source of truth for "what
-does this app serve", and doubles as the mechanism the migrations CLI (#3)
-needs to ensure all resource modules are imported before ``env.py`` runs.
+The :attr:`manifest` field is a dotted/colon import path
+(``module:attr``) to the app's :class:`~resourcey.manifest.ResourceManifest`
+instance. The framework resolves it lazily (e.g. in the Alembic ``env.py``)
+to materialise the resource tables before migrations diff. This is the single
+source of truth for "what does this app serve".
 """
 
 from __future__ import annotations
 
-from typing import ClassVar
-
 from pydantic import BaseModel, Field
 
 from resourcey.config.config_base import BaseConfig
-from resourcey.config.lazy_field import LazyField
-from resourcey.resource.base import BaseResource
 
 MIGRATIONS_DIR_DEFAULT = "migrations"
 
@@ -100,10 +93,9 @@ class MigrationConfig(BaseModel):
 
     ``migrations_dir`` is the directory (relative to the working directory
     unless absolute) that holds ``env.py`` and the ``versions/`` revisions.
-    The resource set is read from :attr:`FrameworkConfig.resources` (the
-    app-level source of truth) — migrations register those classes via
-    :func:`resourcey.resource.registry.register_resource` so Alembic's
-    autogeneration sees every table before diffing.
+    The resource set is read from :attr:`FrameworkConfig.manifest` (the
+    app-level source of truth) — ``env.py`` resolves and materialises the
+    manifest so Alembic's autogeneration sees every table before diffing.
     """
 
     migrations_dir: str = Field(
@@ -134,9 +126,11 @@ class FrameworkConfig(BaseConfig):
     cors_origins: list[str] = Field(
         default_factory=list, description="Allowed CORS origins (JSON array or sequential indices)."
     )
-    # LazyField is resolved on first access (get_type_hints + env read), so
-    # importing this module never imports the resource modules. The env
-    # representation is a JSON array (``RESOURCEY_RESOURCES``) or the
-    # sequential form (``RESOURCEY_RESOURCES_0`` / ``_1`` …) of dotted
-    # import paths.
-    resources: ClassVar[list[type[BaseResource]]] = LazyField()  # type: ignore[assignment]
+    # The manifest is a dotted/colon import path (``module:attr``) pointing at
+    # the app's :class:`~resourcey.manifest.ResourceManifest` instance. The
+    # migrations CLI uses it to import the manifest (and materialise its tables)
+    # before Alembic diffs. This is config-as-discovery, not config-as-definition:
+    # the manifest instance owns the resource set, not config.
+    manifest: str = Field(
+        default="", description="Dotted/colon path to the app's ResourceManifest."
+    )

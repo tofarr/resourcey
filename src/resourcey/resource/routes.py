@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import enum
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -32,15 +32,13 @@ from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request as StarletteRequest
 
 from resourcey.cache.cache_header import CacheHeader
+from resourcey.resource.base import BaseResource
 from resourcey.resource.errors import InvalidInputError, NotFoundError, ResourceyConfigError
 from resourcey.resource.missing import MISSING
 from resourcey.resource.service import Page, SqlService
 from resourcey.resource.service_base import ServiceError
 
 if TYPE_CHECKING:
-    from fastapi import APIRouter, FastAPI
-
-    from resourcey.resource.base import BaseResource
     from resourcey.util.search_filter import SearchFilter
 
 
@@ -51,10 +49,10 @@ _DEFAULT_LIMIT = 20
 
 def register_routes(
     app_or_router: FastAPI | APIRouter,
-    resource: type[BaseResource],
+    resource: BaseResource,
     *,
     prefix: str = "",
-    tags: list[str] | None = None,
+    tags: Sequence[str] | None = None,
 ) -> APIRouter:
     """Build an :class:`APIRouter` with the resource's supported-action routes and include it.
 
@@ -72,7 +70,8 @@ def register_routes(
     the target router - a developer who registers a custom route first keeps
     it (escape hatch). Returns the built :class:`APIRouter`.
     """
-    router = APIRouter(tags=tags or [resource.__name__])  # type: ignore[arg-type]
+    resource_name = type(resource).__name__
+    router = APIRouter(tags=list(tags) if tags else [resource_name])
     path = "/" + resource.get_resource_path().lstrip("/")
     id_type = _id_python_type(resource)
     service_dep = _service_dependency(resource)
@@ -85,7 +84,7 @@ def register_routes(
     service_actions = resource.get_service_cls().actions
     if not supported <= service_actions:
         raise ResourceyConfigError(
-            f"{resource.__name__}.get_supported_actions()={sorted(supported)} is not a "
+            f"{resource_name}.get_supported_actions()={sorted(supported)} is not a "
             f"subset of {resource.get_service_cls().__name__}.actions={sorted(service_actions)}; "
             f"narrowing is allowed, widening is not."
         )
@@ -122,7 +121,7 @@ def register_routes(
 # ---------------------------------------------------------------------------
 
 
-def _service_dependency(resource: type[BaseResource]) -> Callable[..., Any]:
+def _service_dependency(resource: BaseResource) -> Callable[..., Any]:
     """Build a FastAPI dependency that yields a service via ``open_service``.
 
     ``open_service`` is an async context manager that opens (or reuses) a
@@ -145,7 +144,7 @@ def _service_dependency(resource: type[BaseResource]) -> Callable[..., Any]:
 
 
 def _add_create_route(
-    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, resource: BaseResource, service_dep: Any
 ) -> None:
     create_model = resource.get_create_model()
 
@@ -161,7 +160,7 @@ def _add_create_route(
 
 
 def _add_read_route(
-    router: APIRouter, path: str, id_type: Any, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, id_type: Any, resource: BaseResource, service_dep: Any
 ) -> None:
     async def handler(request, id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         result = await service.read(id)
@@ -173,7 +172,7 @@ def _add_read_route(
 
 
 def _add_update_route(
-    router: APIRouter, path: str, id_type: Any, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, id_type: Any, resource: BaseResource, service_dep: Any
 ) -> None:
     update_model = resource.get_update_model()
 
@@ -192,7 +191,7 @@ def _add_update_route(
 
 
 def _add_delete_route(
-    router: APIRouter, path: str, id_type: Any, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, id_type: Any, resource: BaseResource, service_dep: Any
 ) -> None:
     async def handler(id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         await service.delete(id)
@@ -203,7 +202,7 @@ def _add_delete_route(
 
 
 def _add_search_route(
-    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, resource: BaseResource, service_dep: Any
 ) -> None:
     filter_cls = resource.get_search_filter_type()
     filter_dep = _filter_dependency(filter_cls) if filter_cls is not None else None
@@ -218,7 +217,7 @@ def _add_search_route(
 
 
 def _sortable_search_handler(
-    resource: type[BaseResource],
+    resource: BaseResource,
     filter_cls: type[SearchFilter[Any]] | None,
     filter_dep: Callable[..., Any] | None,
     sortable: list[str],
@@ -235,7 +234,7 @@ def _sortable_search_handler(
     # concrete enum and FastAPI request validation that rejects unknown /
     # injected sort values.
     sort_enum = enum.StrEnum(  # type: ignore[misc]
-        f"{resource.__name__}SortField", {n: n for n in sortable}
+        f"{type(resource).__name__}SortField", {n: n for n in sortable}
     )
     sort_default: Any = Query(default=None)
     desc_default: Any = Query(default=False)
@@ -273,7 +272,7 @@ def _sortable_search_handler(
 
 
 def _sortless_search_handler(
-    resource: type[BaseResource],
+    resource: BaseResource,
     filter_cls: type[SearchFilter[Any]] | None,
     filter_dep: Callable[..., Any] | None,
     service_dep: Any,
@@ -296,7 +295,7 @@ def _sortless_search_handler(
     ):
         if "sort" in request.query_params or "desc" in request.query_params:
             raise InvalidInputError(
-                f"Sort parameters are not supported on {resource.__name__}; "
+                f"Sort parameters are not supported on {type(resource).__name__}; "
                 f"it declares no sortable fields."
             )
         resolved = _resolve_filters(request, filter_cls, filters, resource)
@@ -314,7 +313,7 @@ def _sortless_search_handler(
 
 
 def _add_count_route(
-    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, resource: BaseResource, service_dep: Any
 ) -> None:
     """Register ``GET /{resource}/count`` - matching row count for a filter.
 
@@ -346,7 +345,7 @@ def _add_count_route(
 
 
 def _add_batch_read_route(
-    router: APIRouter, path: str, id_type: Any, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, id_type: Any, resource: BaseResource, service_dep: Any
 ) -> None:
     batch_path = f"{path}/batch-read"
 
@@ -360,7 +359,7 @@ def _add_batch_read_route(
 
 
 def _add_batch_edit_route(
-    router: APIRouter, path: str, resource: type[BaseResource], service_dep: Any
+    router: APIRouter, path: str, resource: BaseResource, service_dep: Any
 ) -> None:
     batch_path = f"{path}/batch-edit"
     item_model = _batch_edit_item_model(resource)
@@ -405,7 +404,7 @@ def _route(
     router.add_api_route(path, handler, methods=methods, **kwargs)
 
 
-def _id_python_type(resource: type[BaseResource]) -> Any:
+def _id_python_type(resource: BaseResource) -> Any:
     """The Python type of the id field, for the ``{id}`` path parameter."""
     from resourcey.resource.base import _resolve_scalar_type
 
@@ -451,7 +450,7 @@ def _resolve_filters(
     request: StarletteRequest,
     filter_cls: type[SearchFilter[Any]] | None,
     filters: SearchFilter[Any] | None,
-    resource: type[BaseResource],
+    resource: BaseResource,
 ) -> SearchFilter[Any] | None:
     """Reject unknown ``field__op`` query params; return the validated filter.
 
@@ -470,7 +469,7 @@ def _resolve_filters(
     if filter_cls is None:
         raise InvalidInputError(
             f"Filter parameters {sorted(filter_params)} are not supported on "
-            f"{resource.__name__}; it declares no search filter."
+            f"{type(resource).__name__}; it declares no search filter."
         )
     unknown = filter_params - set(filter_cls.model_fields)
     if unknown:
@@ -478,7 +477,7 @@ def _resolve_filters(
     return filters
 
 
-def _batch_edit_item_model(resource: type[BaseResource]) -> type[BaseModel]:
+def _batch_edit_item_model(resource: BaseResource) -> type[BaseModel]:
     """Build the request-body item model for ``batch-edit``: id + update fields.
 
     Combines the id field (typed) with the update model's fields so the JSON
@@ -491,14 +490,14 @@ def _batch_edit_item_model(resource: type[BaseResource]) -> type[BaseModel]:
     }
     id_field = resource.get_id_field()
     model = create_model(  # type: ignore[call-overload]
-        f"{resource.__name__}BatchEditItem",
+        f"{type(resource).__name__}BatchEditItem",
         **{id_field: (id_type, ...)},  # id is required on each edit
         **update_fields,
     )
     return cast("type[BaseModel]", model)
 
 
-def _item_to_update_model(item: BaseModel, resource: type[BaseResource]) -> BaseModel:
+def _item_to_update_model(item: BaseModel, resource: BaseResource) -> BaseModel:
     """Project a batch-edit item into an update-model instance (drop the id).
 
     Only fields the client explicitly supplied (not ``MISSING``) are carried

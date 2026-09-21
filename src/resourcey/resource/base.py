@@ -30,8 +30,6 @@ treated as declared fields) and are stored per-subclass.
 from __future__ import annotations
 
 import types
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from functools import reduce
 from typing import (
     TYPE_CHECKING,
@@ -47,6 +45,7 @@ from typing import (
 from pydantic import BaseModel, Field, SecretStr, create_model, field_serializer, field_validator
 from pydantic.fields import FieldInfo
 
+from resourcey.app_context import AppContext
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.field import ResourceyField
 from resourcey.resource.missing import MISSING
@@ -90,6 +89,7 @@ class BaseResource:
     _read_model: type[BaseModel]
     _update_model: type[BaseModel]
     _cache_strategy: Any
+    _ctx: Any
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -99,9 +99,8 @@ class BaseResource:
     # Registration hook
     # ------------------------------------------------------------------
 
-    @classmethod
-    def _on_register(cls) -> None:
-        """Hook invoked by :func:`~resourcey.resource.registry.register_resource`.
+    def on_register(self) -> None:
+        """Materialise backend artifacts (called by the manifest at construction).
 
         The base implementation is a no-op: a storage-agnostic resource has
         nothing to materialise. Storage-specific subclasses (e.g.
@@ -114,30 +113,19 @@ class BaseResource:
     # App lifecycle
     # ------------------------------------------------------------------
 
-    @classmethod
-    @asynccontextmanager
-    async def lifespan(cls, ctx: Any) -> AsyncIterator[None]:
-        """App-level async context manager: build + tear down backend state.
+    async def __aenter__(self, ctx: AppContext) -> AppContext:
+        """Enter runtime lifecycle: build/cache backend state.
 
-        Entered by :func:`resourcey.app.create_app`'s lifespan for each
-        registered resource, with the shared :class:`~resourcey.app_context.AppContext`.
-        A storage-agnostic resource has nothing to build, so the base
-        implementation is a no-op yield. Storage-specific subclasses
-        (:class:`~resourcey.resource.sql.SqlResource`,
-        :class:`~resourcey.mongo.mongo_resource.MongoResource`) override this
-        to build / cache their connection pool and register disposal.
-
-        The resource pulls its dependencies from ``ctx`` (e.g.
-        ``ctx.config.database.database_url``) rather than receiving them as
-        ``configure()`` parameters, so the app factory stays storage-agnostic.
-        Override by replacing the whole method, or factor the build / teardown
-        into ``build_*`` hooks and keep this method's structure.
-
-        Args:
-            ctx: The app's :class:`~resourcey.app_context.AppContext` — a
-                trivial cache + disposer list, bypassable by pre-seeding.
+        Called by :class:`~resourcey.manifest.ResourceManifest.__aenter__`
+        with the shared :class:`~resourcey.app_context.AppContext`. A
+        storage-agnostic resource has nothing to build; subclasses override
+        to build connection pools and register disposal.
         """
-        yield
+        self._ctx = ctx
+        return ctx
+
+    async def __aexit__(self, *exc: object) -> None:
+        """Tear down runtime state. Base implementation is a no-op."""
 
     # ------------------------------------------------------------------
     # Service + action surface
@@ -171,8 +159,7 @@ class BaseResource:
         """
         return cast("frozenset[Any]", cls.get_service_cls().actions)
 
-    @classmethod
-    def open_service(cls, request: Any) -> Any:
+    def open_service(self, request: Any) -> Any:
         """Async context manager yielding a service instance for ``request``.
 
         The base implementation raises: a storage-agnostic resource cannot
@@ -182,7 +169,9 @@ class BaseResource:
         :class:`~resourcey.resource.service.SqlService`). Suitable for use as
         an injected FastAPI dependency.
         """
-        raise NotImplementedError(f"{cls.__name__} cannot open a service; override open_service().")
+        raise NotImplementedError(
+            f"{type(self).__name__} cannot open a service; override open_service()."
+        )
 
     # ------------------------------------------------------------------
     # Field config resolution
@@ -506,6 +495,13 @@ _INFRA_ATTRS: frozenset[str] = frozenset(
         "_update_model",
         "_sqlalchemy_model",
         "_cache_strategy",
+        "_ctx",
+        "_session_factory",
+        "_client",
+        "_database_name",
+        "_db",
+        "_instances",
+        "_entered",
     }
 )
 

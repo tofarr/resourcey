@@ -451,9 +451,11 @@ class TestServiceComputeCacheHeader:
 @pytest_asyncio.fixture
 async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
     def _build(resource: type[SqlResource]) -> AsyncClient:
-        resource._session_factory = session_factory
+        instance = resource()
+        instance.on_register()
+        instance._session_factory = session_factory
         app = FastAPI()
-        register_routes(app, resource)
+        register_routes(app, instance)
         register_error_handlers(app)
         return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 

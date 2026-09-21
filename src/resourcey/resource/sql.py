@@ -15,10 +15,9 @@ to materialise the ORM model whose table lands in
 from __future__ import annotations
 
 import enum
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time
-from typing import Any, ClassVar
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, SecretStr
@@ -40,6 +39,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, registry
 
+from resourcey.app_context import AppContext
 from resourcey.resource.base import BaseResource, _resolve_scalar_type
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.util.naming import camel_to_snake, pluralize
@@ -48,16 +48,6 @@ from resourcey.util.naming import camel_to_snake, pluralize
 # up on the context so an escape-hatch caller can pre-seed a factory and skip
 # the default engine build.
 _SESSION_FACTORY_KEY = object()
-
-
-async def _clear_sql_factory() -> None:
-    """Disposer: null the cached session factory so a fresh app starts clean.
-
-    ClassVars survive across app instances in the same process (tests,
-    reload); without this, a second ``create_app`` would see a stale factory
-    bound to a disposed engine.
-    """
-    SqlResource._session_factory = None
 
 
 class ResourceyBase(DeclarativeBase):
@@ -109,27 +99,18 @@ class SqlResource(BaseResource):
     """
 
     _sqlalchemy_model: Any
-    # Session factory used by ``open_service`` to open a per-request session.
-    # Set by :meth:`lifespan` (typically via :meth:`build_session_factory`)
-    # before the app serves requests. ``None`` means unconfigured. Cached on
-    # :class:`SqlResource` itself so all SQL resources share one pool.
-    # ``ClassVar`` keeps it out of the Pydantic model_fields collection.
-    _session_factory: ClassVar[Any] = None
+    # Per-instance session factory used by ``open_service``. Set by
+    # ``__aenter__`` (typically via ``build_session_factory``) before the app
+    # serves requests. ``None`` means unconfigured.
+    _session_factory: Any = None
 
     # ------------------------------------------------------------------
     # Registration hook
     # ------------------------------------------------------------------
 
-    @classmethod
-    def _on_register(cls) -> None:
-        """Eagerly build the ORM model so its table lands in metadata.
-
-        Called by :func:`~resourcey.resource.registry.register_resource` when
-        a resource is registered. Building the model here (rather than lazily)
-        ensures the derived table is in ``ResourceyBase.metadata`` before
-        migrations or table creation run.
-        """
-        cls.get_sql_alchemy_model()
+    def on_register(self) -> None:
+        """Eagerly build the ORM model so its table lands in metadata."""
+        type(self).get_sql_alchemy_model()
 
     # ------------------------------------------------------------------
     # Service + session configuration
@@ -142,81 +123,49 @@ class SqlResource(BaseResource):
 
         return SqlService
 
-    @classmethod
-    def get_session_factory(cls) -> Any:
-        """The configured ``async_sessionmaker`` used by :meth:`open_service`.
+    async def __aenter__(self, ctx: AppContext) -> AppContext:
+        """Build (or reuse) the shared session factory, then enter.
 
-        Set by :meth:`lifespan` via :meth:`build_session_factory` (cached on
-        :class:`SqlResource` so all SQL resources share one pool), or set
-        directly on a subclass to override. Raises if unconfigured - a SQL
-        resource cannot open a session without one.
+        If no factory is cached on this instance, build one via
+        :meth:`build_session_factory` and register the engine disposer on
+        ``ctx``. A factory pre-seeded on ``ctx`` (the escape hatch) is adopted
+        without building -- no disposer, the caller owns it.
         """
-        # Subclass-level override wins over the shared base cache.
-        factory = cls.__dict__.get("_session_factory")
-        if factory is None:
-            factory = SqlResource.__dict__.get("_session_factory")
-        if factory is None:
-            raise ResourceyConfigError(
-                f"{cls.__name__} has no session factory configured; "
-                "the app lifespan sets this via SqlResource.build_session_factory."
-            )
-        return factory
-
-    @classmethod
-    @asynccontextmanager
-    async def lifespan(cls, ctx: Any) -> AsyncIterator[None]:
-        """Build (or reuse) the shared session factory, then yield.
-
-        On entry: if no session factory is cached on :class:`SqlResource`,
-        build one via :meth:`build_session_factory` and cache it on the base
-        so all SQL resources share a single connection pool. The engine's
-        disposer is registered on ``ctx`` for app-level shutdown. A factory
-        pre-seeded on ``ctx`` (the escape hatch) is adopted onto the class
-        cache instead of building — no disposer, the caller owns it.
-
-        On exit: the cached factory is always cleared (registered as a
-        disposer) so a fresh ``create_app`` in the same process starts clean
-        (tests, reload). For a built engine, the engine is disposed too; a
-        pre-seeded (caller-supplied) factory is left intact — the caller
-        owns it.
-        """
-        if SqlResource.__dict__.get("_session_factory") is None:
+        await super().__aenter__(ctx)
+        if self._session_factory is None:
             if ctx.has(_SESSION_FACTORY_KEY):
-                # Escape hatch: adopt the caller-supplied factory onto the
-                # class cache — the request path (get_session_factory) reads
-                # the class attribute, never ctx.
-                SqlResource._session_factory = ctx.get(_SESSION_FACTORY_KEY)
+                self._session_factory = ctx.get(_SESSION_FACTORY_KEY)
             else:
-                factory, dispose = cls.build_session_factory(ctx)
-                SqlResource._session_factory = factory
+                factory, dispose = self.build_session_factory(ctx)
+                self._session_factory = factory
                 ctx.set(_SESSION_FACTORY_KEY, factory)
                 ctx.add_disposer(dispose)
-        # Always clear the class-level cache on shutdown so a fresh app in the
-        # same process does not see a stale (possibly disposed) factory.
-        ctx.add_disposer(_clear_sql_factory)
-        async with super().lifespan(ctx):
-            yield
+        return ctx
 
-    @classmethod
-    def build_session_factory(cls, ctx: Any) -> tuple[Any, Any]:
-        """Build the shared ``async_sessionmaker`` + return its disposer.
+    async def __aexit__(self, *exc: object) -> None:
+        """Clear the instance session factory so a fresh manifest starts clean."""
+        self._session_factory = None
+        await super().__aexit__(*exc)
+
+    def build_session_factory(self, ctx: AppContext) -> tuple[Any, Any]:
+        """Build an ``async_sessionmaker`` + return its disposer.
 
         Default: one async engine from the configured database URL
         (``ctx.config.database.database_url``) with ``expire_on_commit=False``.
         Override to point a resource at a different database or supply a
-        custom engine — the returned factory is cached on
-        :class:`SqlResource` so all SQL resources share one pool unless an
-        override writes to the subclass instead.
+        custom engine.
 
         Returns:
             ``(factory, disposer)`` where ``disposer`` is a no-arg async
             callable (e.g. ``engine.dispose``) run on app shutdown.
         """
-        engine = create_async_engine(ctx.config.database.database_url)
+        from resourcey.config.config_framework import FrameworkConfig
+
+        cfg = ctx.config if isinstance(ctx.config, FrameworkConfig) else FrameworkConfig()
+        engine = create_async_engine(cfg.database.database_url)
         return async_sessionmaker(engine, expire_on_commit=False), engine.dispose
 
-    @classmethod
-    def open_service(cls, request: Any) -> Any:
+    def open_service(self, request: Any) -> Any:
         """Async context manager yielding a :class:`SqlService` for ``request``.
 
         Opens a session (or reuses one already on ``request.state.session`` so
@@ -225,7 +174,7 @@ class SqlResource(BaseResource):
         commits / closes on exit. Suitable for use as an injected FastAPI
         dependency.
         """
-        return _open_sql_service(cls, request)
+        return _open_sql_service(self, request)
 
     # ------------------------------------------------------------------
     # SQLAlchemy model generation
@@ -330,7 +279,7 @@ def _column_type_for(field_name: str, annotation: Any, py_type: Any) -> Any:
 
 
 @asynccontextmanager
-async def _open_sql_service(cls: type[SqlResource], request: Any) -> Any:
+async def _open_sql_service(resource: SqlResource, request: Any) -> Any:
     """Open (or reuse) a session and yield a :class:`SqlService` for ``request``.
 
     If ``request.state.session`` already holds a session (opened by another
@@ -343,13 +292,18 @@ async def _open_sql_service(cls: type[SqlResource], request: Any) -> Any:
 
     session = getattr(request.state, "session", None)
     if session is not None:
-        yield SqlService(cls, session=session)
+        yield SqlService(type(resource), session=session)
         return
-    factory = cls.get_session_factory()
+    factory = resource._session_factory
+    if factory is None:
+        raise ResourceyConfigError(
+            f"{type(resource).__name__} has no session factory — its lifespan "
+            "was not entered (no manifest / app_context)."
+        )
     async with factory() as session:
         request.state.session = session
         try:
-            yield SqlService(cls, session=session)
+            yield SqlService(type(resource), session=session)
             await session.commit()
         except Exception:
             await session.rollback()

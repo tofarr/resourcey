@@ -1,26 +1,23 @@
 """Tests for Alembic migration generation (issue #3).
 
-Covers ``MigrationConfig`` defaults/env parsing, the resource registry
-(``register_resource`` / ``get_registered_resources``), ``build_alembic_config``
+Covers ``MigrationConfig`` defaults/env parsing, ``build_alembic_config``
 (env.py + script.py.mako + versions/ materialisation, sync-URL conversion),
-``register_resources_from_env`` (JSON array + sequential indices + unresolvable
-error + registry population), the end-to-end generate -> upgrade -> downgrade
-round trip, add-column autogeneration + rollback, ``init``, the CLI
+the manifest-driven env.py (imports ``RESOURCEY_MANIFEST`` and materialises
+tables), the end-to-end generate -> upgrade -> downgrade round trip,
+add-column autogeneration + rollback, ``init``, the CLI
 (``resourcey migrate ...`` wired into the top-level dispatcher), and the
 env-var-driven config path.
 
 Uses a real on-disk SQLite database (Alembic drives a sync engine and must own
 the connection lifecycle, so the in-memory savepoint isolation from
 ``conftest.py`` does not apply here). Each test gets its own temp directory and
-database file. ``ResourceyBase.metadata``, the class registry, and the resource
-registry are snapshotted and restored per test so generated tables/classes do
-not leak into other test modules.
+database file. ``ResourceyBase.metadata`` and the class registry are
+snapshotted and restored per test so generated tables/classes do not leak into
+other test modules.
 """
 
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 
 import pytest
@@ -31,16 +28,9 @@ from resourcey.config.config_framework import FrameworkConfig, MigrationConfig
 from resourcey.config.config_runtime import clear_config_cache, set_config
 from resourcey.migrate import migrate_runner
 from resourcey.resource.base import BaseResource
-from resourcey.resource.registry import (
-    clear_registry,
-    get_registered_resources,
-    register_resource,
-)
-from resourcey.resource.sql import ResourceyBase, SqlResource
+from resourcey.resource.sql import ResourceyBase
 
-_RESOURCE_A = "migrate_resources_a.Widget"
-_RESOURCE_B = "migrate_resources_b.Gadget"
-_RESOURCES_ENV = "RESOURCEY_RESOURCES"
+_MANIFEST_PATH = "migrate_manifest:manifest"
 
 
 @pytest.fixture
@@ -53,27 +43,13 @@ def isolated_db(tmp_path: Path) -> tuple[str, str]:
 
 @pytest.fixture(autouse=True)
 def _reset_metadata_and_env(monkeypatch):
-    """Isolate ``ResourceyBase.metadata`` + class registry + resource registry.
+    """Isolate ``ResourceyBase.metadata`` + class registry.
 
     Save/restore rather than clear: the metadata and class registry are
     process-global, and other test modules' resources stay registered in them.
-    Clearing would break those modules when they run after this one. Instead we
-    snapshot the tables, registry entries, and the resource registry, let each
-    test rebuild from its own resource paths, and restore the snapshot on
-    teardown so no test leaks generated tables/classes into the global state.
     """
-    monkeypatch.delenv(_RESOURCES_ENV, raising=False)
-    i = 0
-    while True:
-        key = f"{_RESOURCES_ENV}_{i}"
-        if key not in os.environ:
-            break
-        monkeypatch.delenv(key, raising=False)
-        i += 1
-
     saved_tables = dict(ResourceyBase.metadata.tables)
     saved_registry = dict(ResourceyBase.registry._class_registry)
-    saved_resource_registry = get_registered_resources()
     saved_caches: dict[type, dict[str, object]] = {}
     for cls in _all_subclasses(BaseResource):
         saved_caches[cls] = {
@@ -81,25 +57,17 @@ def _reset_metadata_and_env(monkeypatch):
             for attr in ("_sqlalchemy_model", "_id_field")
             if attr in cls.__dict__
         }
-        # Drop the cached model so the next get_sql_alchemy_model() rebuilds
-        # the table into the freshly-cleared metadata. Without this the cached
-        # model still references the old (now-cleared) Table.
         for attr in ("_sqlalchemy_model", "_id_field"):
             if attr in cls.__dict__:
                 delattr(cls, attr)
     ResourceyBase.metadata.clear()
     ResourceyBase.registry._class_registry.clear()
-    clear_registry()
     yield
-    # Restore: drop test-generated tables/classes, then re-register the snapshot.
     ResourceyBase.metadata.clear()
     ResourceyBase.registry._class_registry.clear()
-    clear_registry()
     for table in saved_tables.values():
         ResourceyBase.metadata._add_table(table.name, table.schema, table)
     ResourceyBase.registry._class_registry.update(saved_registry)
-    for cls in saved_resource_registry:
-        register_resource(cls)
     for cls, cache in saved_caches.items():
         for attr in ("_sqlalchemy_model", "_id_field"):
             if attr in cache:
@@ -133,17 +101,25 @@ def _tables(db_file: str) -> list[str]:
         engine.dispose()
 
 
-def _set_resources_env(monkeypatch: pytest.MonkeyPatch, paths: list[str]) -> None:
-    """Set RESOURCEY_RESOURCES as a JSON array (the env.py convention)."""
-    monkeypatch.setenv(_RESOURCES_ENV, json.dumps(paths))
+def _set_manifest_env(monkeypatch: pytest.MonkeyPatch, path: str = _MANIFEST_PATH) -> None:
+    """Set RESOURCEY_MANIFEST (the env.py convention)."""
+    monkeypatch.setenv("RESOURCEY_MANIFEST", path)
 
 
 def _config(tmp_path: Path) -> tuple[FrameworkConfig, str]:
     """Build a FrameworkConfig pointing at a temp migrations dir + db."""
     migrations_dir = str(tmp_path / "migrations")
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
-    cfg = FrameworkConfig(migrations=MigrationConfig(migrations_dir=migrations_dir))
+    cfg = FrameworkConfig(
+        migrations=MigrationConfig(migrations_dir=migrations_dir),
+        manifest=_MANIFEST_PATH,
+    )
     return cfg, db_url
+
+
+# ---------------------------------------------------------------------------
+# MigrationConfig
+# ---------------------------------------------------------------------------
 
 
 class TestMigrationConfig:
@@ -153,91 +129,49 @@ class TestMigrationConfig:
 
     def test_framework_config_has_migrations(self):
         cfg = FrameworkConfig()
-        assert isinstance(cfg.migrations, MigrationConfig)
         assert cfg.migrations.migrations_dir == "migrations"
 
     def test_env_overrides_migrations_dir(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_MIGRATIONS_MIGRATIONS_DIR", "/tmp/custom_migrations")
+        monkeypatch.setenv("RESOURCEY_MIGRATIONS_MIGRATIONS_DIR", "/tmp/envmigs")
         FrameworkConfig.clear_instance_cache()
         try:
             cfg = FrameworkConfig.get_instance()
-            assert cfg.migrations.migrations_dir == "/tmp/custom_migrations"
+            assert cfg.migrations.migrations_dir == "/tmp/envmigs"
         finally:
             FrameworkConfig.clear_instance_cache()
 
 
-class TestResourceRegistry:
-    def test_register_materialises_model_and_records(self):
-        class Gadget(SqlResource):
-            id: int
-            name: str
-
-        register_resource(Gadget)
-        assert Gadget in get_registered_resources()
-        assert "gadgets" in ResourceyBase.metadata.tables
-
-    def test_register_returns_class(self):
-        class Gizmo(SqlResource):
-            id: int
-
-        result = register_resource(Gizmo)
-        assert result is Gizmo
-
-    def test_register_is_idempotent(self):
-        class Doohickey(SqlResource):
-            id: int
-
-        register_resource(Doohickey)
-        register_resource(Doohickey)
-        assert get_registered_resources().count(Doohickey) == 1
-
-    def test_register_rejects_non_resource(self):
-        with pytest.raises(TypeError, match=r"BaseResource subclass"):
-            register_resource(int)  # type: ignore[arg-type]
-
-    def test_register_preserves_order(self):
-        class Alpha(SqlResource):
-            id: int
-
-        class Beta(SqlResource):
-            id: int
-
-        register_resource(Beta)
-        register_resource(Alpha)
-        resources = get_registered_resources()
-        assert resources.index(Beta) < resources.index(Alpha)
-
-    def test_clear_registry(self):
-        class Ephemeral(SqlResource):
-            id: int
-
-        register_resource(Ephemeral)
-        assert Ephemeral in get_registered_resources()
-        clear_registry()
-        assert get_registered_resources() == []
+# ---------------------------------------------------------------------------
+# _sync_database_url
+# ---------------------------------------------------------------------------
 
 
 class TestSyncDatabaseUrl:
     def test_asyncpg_to_psycopg2(self):
         assert (
-            migrate_runner._sync_database_url("postgresql+asyncpg://u:p@h:5432/db")
-            == "postgresql+psycopg2://u:p@h:5432/db"
+            migrate_runner._sync_database_url("postgresql+asyncpg://u:p@h/d")
+            == "postgresql+psycopg2://u:p@h/d"
         )
 
     def test_aiosqlite_to_sqlite(self):
         assert (
-            migrate_runner._sync_database_url("sqlite+aiosqlite:///./db.sqlite")
-            == "sqlite:///./db.sqlite"
+            migrate_runner._sync_database_url("sqlite+aiosqlite:///./test.db")
+            == "sqlite:///./test.db"
         )
 
     def test_unknown_driver_passthrough(self):
         assert (
-            migrate_runner._sync_database_url("mysql+pymysql://u:p@h/db")
-            == "mysql+pymysql://u:p@h/db"
+            migrate_runner._sync_database_url("mysql+pymysql://u:p@h/d")
+            == "mysql+pymysql://u:p@h/d"
         )
 
     def test_already_sync_passthrough(self):
         assert migrate_runner._sync_database_url("sqlite:///:memory:") == "sqlite:///:memory:"
+
+
+# ---------------------------------------------------------------------------
+# build_alembic_config
+# ---------------------------------------------------------------------------
 
 
 class TestBuildAlembicConfig:
@@ -250,9 +184,10 @@ class TestBuildAlembicConfig:
         assert (d / "script.py.mako").is_file()
         assert config.get_main_option("sqlalchemy.url") == "sqlite:///./x.db"
 
-    def test_env_py_source_targets_resourcey_metadata_and_registry(self):
+    def test_env_py_source_targets_resourcey_metadata(self):
         assert "ResourceyBase" in migrate_runner.ENV_PY_SOURCE
-        assert "register_resources_from_env" in migrate_runner.ENV_PY_SOURCE
+        assert "manifest" in migrate_runner.ENV_PY_SOURCE
+        assert "materialize" in migrate_runner.ENV_PY_SOURCE
 
     def test_existing_env_not_overwritten(self, tmp_path):
         d = tmp_path / "migs"
@@ -270,46 +205,16 @@ class TestBuildAlembicConfig:
         assert config.get_main_option("script_location") == str(tmp_path / "override")
 
 
-class TestRegisterResourcesFromEnv:
-    def test_json_array_imports_and_registers(self, monkeypatch):
-        _set_resources_env(monkeypatch, [_RESOURCE_A])
-        migrate_runner.register_resources_from_env()
-        assert "widgets" in ResourceyBase.metadata.tables
-        assert any(c.__name__ == "Widget" for c in get_registered_resources())
-
-    def test_sequential_indices_import_multiple(self, monkeypatch):
-        monkeypatch.delenv(_RESOURCES_ENV, raising=False)
-        monkeypatch.setenv(f"{_RESOURCES_ENV}_0", _RESOURCE_A)
-        monkeypatch.setenv(f"{_RESOURCES_ENV}_1", _RESOURCE_B)
-        migrate_runner.register_resources_from_env()
-        assert "widgets" in ResourceyBase.metadata.tables
-        assert "gadgets" in ResourceyBase.metadata.tables
-
-    def test_empty_env_no_error(self, monkeypatch):
-        monkeypatch.delenv(_RESOURCES_ENV, raising=False)
-        migrate_runner.register_resources_from_env()  # no resources -> no-op
-
-    def test_unresolvable_path_raises_config_error(self, monkeypatch):
-        monkeypatch.setenv(_RESOURCES_ENV, "no_such_module.Widget")
-        from resourcey.resource.errors import ResourceyConfigError
-
-        with pytest.raises(ResourceyConfigError, match=r"no_such_module\.Widget"):
-            migrate_runner.register_resources_from_env()
-
-    def test_non_resource_path_raises_config_error(self, monkeypatch):
-        # ``migrate_resources_a`` has no attribute ``NotAClass``.
-        monkeypatch.setenv(_RESOURCES_ENV, "migrate_resources_a.NotAClass")
-        from resourcey.resource.errors import ResourceyConfigError
-
-        with pytest.raises(ResourceyConfigError):
-            migrate_runner.register_resources_from_env()
+# ---------------------------------------------------------------------------
+# End-to-end round trip
+# ---------------------------------------------------------------------------
 
 
 class TestRoundTrip:
     def test_generate_upgrade_downgrade(self, tmp_path, isolated_db, monkeypatch):
         db_url, db_file = isolated_db
         cfg, _ = _config(tmp_path)
-        _set_resources_env(monkeypatch, [_RESOURCE_A])
+        _set_manifest_env(monkeypatch)
         set_config(cfg)
         try:
             path = migrate_runner.generate(cfg.migrations, database_url=db_url, message="init")
@@ -328,7 +233,7 @@ class TestRoundTrip:
     def test_upgrade_head_then_downgrade_one(self, tmp_path, isolated_db, monkeypatch):
         db_url, db_file = isolated_db
         cfg, _ = _config(tmp_path)
-        _set_resources_env(monkeypatch, [_RESOURCE_A])
+        _set_manifest_env(monkeypatch)
         set_config(cfg)
         try:
             migrate_runner.generate(cfg.migrations, database_url=db_url, message="first")
@@ -345,19 +250,13 @@ class TestAddColumn:
     def test_generate_add_column_and_rollback(self, tmp_path, isolated_db, monkeypatch):
         db_url, db_file = isolated_db
         cfg, _ = _config(tmp_path)
-        _set_resources_env(monkeypatch, [_RESOURCE_A])
+        _set_manifest_env(monkeypatch)
         set_config(cfg)
         try:
             migrate_runner.generate(cfg.migrations, database_url=db_url, message="v1")
             migrate_runner.upgrade(cfg.migrations, database_url=db_url)
             assert "weight" not in _columns(db_file, "widgets")
 
-            # Simulate the resource gaining a ``weight`` field: append a column
-            # to the materialised Table in metadata. Autogeneration then diffs
-            # the metadata table against the live DB and emits ``add_column``.
-            # (Switching resource modules is impractical here because two
-            # resources named ``Widget`` collide in SQLAlchemy's class
-            # registry; direct table mutation exercises the same code path.)
             from sqlalchemy import Column, Float
 
             table = ResourceyBase.metadata.tables["widgets"]
@@ -406,16 +305,22 @@ class TestScriptPath:
 
         assert migrate_runner._script_path(Fake()) is None
 
-    def test_generate_with_no_resources_returns_pass_revision(
+    def test_generate_with_no_manifest_returns_pass_revision(
         self, tmp_path, isolated_db, monkeypatch
     ):
-        # No RESOURCEY_RESOURCES -> metadata empty -> revision body is ``pass``.
-        monkeypatch.delenv(_RESOURCES_ENV, raising=False)
+        # No manifest -> metadata empty -> revision body is ``pass``.
+        monkeypatch.delenv("RESOURCEY_MANIFEST", raising=False)
         db_url, _ = isolated_db
         cfg = MigrationConfig(migrations_dir=str(tmp_path / "migs"))
-        path = migrate_runner.generate(cfg, database_url=db_url, message="empty")
-        body = Path(path).read_text()
-        assert "pass" in body
+        # Set a config with no manifest so env.py finds nothing to materialise.
+        fw_cfg = FrameworkConfig(migrations=cfg, manifest="")
+        set_config(fw_cfg)
+        try:
+            path = migrate_runner.generate(cfg, database_url=db_url, message="empty")
+            body = Path(path).read_text()
+            assert "pass" in body
+        finally:
+            clear_config_cache()
 
 
 class TestCli:
@@ -428,9 +333,6 @@ class TestCli:
             cli_main(["migrate", "autogenerate"])
 
     def test_generate_alias_accepted(self, tmp_path, monkeypatch):
-        # ``generate`` is an alias for ``autogenerate``. Verify the parser
-        # accepts it and ``run`` normalises the alias before dispatching —
-        # patch the runner so no real Alembic call is made.
         cfg = FrameworkConfig(
             migrations=MigrationConfig(migrations_dir=str(tmp_path / "migs")),
         )
@@ -469,11 +371,9 @@ class TestCli:
         db_url, db_file = isolated_db
         cfg = FrameworkConfig(
             migrations=MigrationConfig(migrations_dir=str(tmp_path / "migs")),
+            manifest=_MANIFEST_PATH,
         )
-        _set_resources_env(monkeypatch, [_RESOURCE_A])
-        # ``DbConfig.database_url`` assembles ``protocol://user:pass@host:port/db``
-        # which is invalid for sqlite; monkeypatch the property to return the
-        # temp-file URL the CLI reads.
+        _set_manifest_env(monkeypatch)
         monkeypatch.setattr(type(cfg.database), "database_url", property(lambda self: db_url))
         set_config(cfg)
         try:
@@ -487,13 +387,13 @@ class TestCli:
 
 
 class TestEnvDrivenConfig:
-    def test_resources_from_env(self, tmp_path, monkeypatch):
+    def test_manifest_from_env(self, tmp_path, monkeypatch):
         monkeypatch.setenv("RESOURCEY_MIGRATIONS_MIGRATIONS_DIR", str(tmp_path / "envmigs"))
-        _set_resources_env(monkeypatch, [_RESOURCE_A])
+        _set_manifest_env(monkeypatch)
         FrameworkConfig.clear_instance_cache()
         try:
             cfg = FrameworkConfig.get_instance()
             assert cfg.migrations.migrations_dir == str(tmp_path / "envmigs")
-            assert [c.__name__ for c in cfg.resources] == ["Widget"]
+            assert cfg.manifest == _MANIFEST_PATH
         finally:
             FrameworkConfig.clear_instance_cache()
