@@ -33,7 +33,12 @@ from starlette.requests import Request as StarletteRequest
 
 from resourcey.cache.cache_header import CacheHeader
 from resourcey.resource.base import BaseResource
-from resourcey.resource.errors import InvalidInputError, NotFoundError, ResourceyConfigError
+from resourcey.resource.errors import (
+    ForbiddenError,
+    InvalidInputError,
+    NotFoundError,
+    ResourceyConfigError,
+)
 from resourcey.resource.missing import MISSING
 from resourcey.resource.service import Page, SqlService
 from resourcey.resource.service_base import ServiceError
@@ -616,6 +621,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
     * ``NotFoundError`` -> 404 ``not_found``
     * ``InvalidInputError`` -> 400 ``invalid_input``
+    * ``ForbiddenError`` -> 403 ``forbidden``
     * :class:`sqlalchemy.exc.IntegrityError` -> 409 ``conflict``
     * ``ServiceError`` -> 500 ``internal_error``
     * Pydantic validation failures keep FastAPI's 422 (its default handler).
@@ -628,6 +634,10 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(InvalidInputError)
     async def _invalid_input(_: Request, exc: InvalidInputError) -> JSONResponse:
         return _error_response("invalid_input", str(exc), status.HTTP_400_BAD_REQUEST)
+
+    @app.exception_handler(ForbiddenError)
+    async def _forbidden(_: Request, exc: ForbiddenError) -> JSONResponse:
+        return _error_response("forbidden", str(exc), status.HTTP_403_FORBIDDEN)
 
     @app.exception_handler(IntegrityError)
     async def _conflict(_: Request, exc: IntegrityError) -> JSONResponse:
