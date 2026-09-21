@@ -73,7 +73,7 @@ uv sync
 uv run resourcey migrate upgrade
 
 # 3. Start the server.
-uv run uvicorn users_and_permissions.app:app --reload
+uv run uvicorn users_and_permissions.app:app --reload --port 8083
 ```
 
 Open http://localhost:8083/docs for the OpenAPI UI.
