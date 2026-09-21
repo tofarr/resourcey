@@ -15,10 +15,8 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from resourcey.app_context import AppContext
-from resourcey.auth.auth_models import AuthBase
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.resource.sql import _SESSION_FACTORY_KEY, ResourceyBase
-from sqlalchemy import MetaData
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -27,16 +25,9 @@ from users_and_permissions.app import manifest
 from users_and_permissions.user import User
 from users_and_permissions.user_permission import UserPermission
 
-
-def _combined_metadata() -> MetaData:
-    """Merge ResourceyBase + AuthBase tables (ResourceyBase wins collisions)."""
-    combined = MetaData()
-    for table in ResourceyBase.metadata.tables.values():
-        table.to_metadata(combined)
-    for name, table in AuthBase.metadata.tables.items():
-        if name not in combined.tables:
-            table.to_metadata(combined)
-    return combined
+# Every entity is a resource, so ResourceyBase.metadata alone holds every table
+# (no AuthBase merge needed).
+_TARGET_METADATA = ResourceyBase.metadata
 
 
 async def _seed(engine) -> None:
@@ -91,9 +82,7 @@ async def _seed(engine) -> None:
         )
 
         admin_perm = Permitted().model_dump(mode="json")
-        own = CreatorPermission(on_match=Permitted(), on_create=Permitted()).model_dump(
-            mode="json"
-        )
+        own = CreatorPermission(on_match=Permitted(), on_create=Permitted()).model_dump(mode="json")
         rows: list[dict] = []
         for rt in ("Thread", "Message", "User", "UserPermission"):
             rows.append(
@@ -142,7 +131,7 @@ async def app() -> AsyncIterator[FastAPI]:
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     async with engine.begin() as conn:
-        await conn.run_sync(_combined_metadata().create_all)
+        await conn.run_sync(_TARGET_METADATA.create_all)
     await _seed(engine)
 
     factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -179,17 +168,13 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 async def _login(client: AsyncClient, username: str, password: str) -> None:
     """Log in via the dev IdP so the client holds the session cookie."""
-    resp = await client.post(
-        "/auth/dev/login", json={"username": username, "password": password}
-    )
+    resp = await client.post("/auth/dev/login", json={"username": username, "password": password})
     assert resp.status_code == 200, resp.text
 
 
 async def _bearer(client: AsyncClient, username: str, password: str) -> str:
     """Log in and return the raw cookie value as a Bearer token."""
-    resp = await client.post(
-        "/auth/dev/login", json={"username": username, "password": password}
-    )
+    resp = await client.post("/auth/dev/login", json={"username": username, "password": password})
     assert resp.status_code == 200, resp.text
     from resourcey.config.config_runtime import get_config_as
 
@@ -335,7 +320,5 @@ async def test_admin_can_list_user_permissions(client: AsyncClient) -> None:
 async def test_bearer_token_works(client: AsyncClient) -> None:
     """The dev IdP cookie also works as a Bearer header."""
     token = await _bearer(client, "admin", "admin")
-    resp = await client.get(
-        "/threads", headers={"Authorization": f"Bearer {token}"}
-    )
+    resp = await client.get("/threads", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
