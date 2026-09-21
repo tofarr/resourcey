@@ -137,6 +137,23 @@ class BaseService:
         """Compute a count-derived cache header for the ``count`` route."""
         raise NotImplementedError
 
+    # ------------------------------------------------------------------
+    # Serialization context (optional; overrides supply an encryption context)
+    # ------------------------------------------------------------------
+
+    def serialization_context(self) -> dict[str, Any] | None:
+        """The pydantic serialization context used for secret fields.
+
+        ``None`` means no context (secrets redact on dump). Concrete
+        services that manage ``SecretStr`` fields override this to supply
+        an ``encryption_service`` / ``expose_secrets`` context.
+        """
+        return None
+
+    def _ctx(self) -> dict[str, Any] | None:
+        """Alias for :meth:`serialization_context` (used by route handlers)."""
+        return self.serialization_context()
+
 
 class ServiceError(Exception):
     """A service is misconfigured (e.g. no session available).

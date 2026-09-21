@@ -165,7 +165,7 @@ class SecuredService(BaseService):
             # Frozen / immutable models can't be mutated here; the resource
             # is responsible for stamping creator_id itself in that case.
             with suppress(AttributeError, ValueError):
-                payload.creator_id = self._user_id  # type: ignore[attr-defined]
+                payload.creator_id = self._user_id
 
     async def read(self, id: Any) -> Any:  # noqa: A002
         result = await self._inner.read(id)
