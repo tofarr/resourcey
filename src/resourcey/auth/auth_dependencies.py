@@ -35,6 +35,7 @@ from resourcey.auth.session import SessionDep
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import get_config_as
 from resourcey.encryption.encryption_service import EncryptionService, get_encryption_service
+from resourcey.util import utc_now
 
 _bearer_scheme = HTTPBearer(
     scheme_name="BearerAuth",
@@ -128,7 +129,7 @@ async def _maybe_refresh_cookie(
     enc = get_encryption_service()
     payload = enc.decrypt_jwe_token(token)
     access_id_raw = payload.get(_AUTH2_ACCESS_ID_CLAIM)
-    now = datetime.now(UTC)
+    now = utc_now()
 
     if not isinstance(access_id_raw, str):
         fresh = _reissue_plain_cookie(enc, payload, now)

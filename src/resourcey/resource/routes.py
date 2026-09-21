@@ -42,6 +42,7 @@ from resourcey.resource.errors import (
 from resourcey.resource.missing import MISSING
 from resourcey.resource.service import Page, SqlService
 from resourcey.resource.service_base import ServiceError
+from resourcey.util import utc_now
 
 if TYPE_CHECKING:
     from resourcey.util.search_filter import SearchFilter
@@ -558,7 +559,7 @@ def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
         # max-age is the remaining freshness window (the strategy's expire_in,
         # computed moments ago). Rounding preserves the integer seconds clients
         # expect in Cache-Control.
-        now = datetime.now(UTC)
+        now = utc_now()
         max_age = max(0, int((header.expire_at - now).total_seconds()))
         headers["Cache-Control"] = f"max-age={max_age}"
         headers["Expires"] = _http_date(header.expire_at)

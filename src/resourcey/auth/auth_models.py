@@ -33,6 +33,8 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from resourcey.util import utc_now
+
 
 class AuthBase(DeclarativeBase):
     """Declarative base for hand-written auth ORM models.
@@ -49,10 +51,6 @@ class AuthBase(DeclarativeBase):
 
 
 _TZ = DateTime(timezone=True)
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 def _aware(dt: datetime) -> datetime:
@@ -142,12 +140,12 @@ class User(AuthBase):
     )
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
@@ -171,12 +169,12 @@ class IdpRefreshToken(AuthBase):
     expires_at: Mapped[datetime] = mapped_column(_TZ)
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
@@ -205,12 +203,12 @@ class IdpAccessToken(AuthBase):
     expires_at: Mapped[datetime] = mapped_column(_TZ)
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
@@ -235,12 +233,12 @@ class OAuthClient(AuthBase):
     enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
@@ -263,7 +261,7 @@ class OAuthClientRedirectUri(AuthBase):
     uri: Mapped[str] = mapped_column(String(2048))
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
     )
 
@@ -299,12 +297,12 @@ class ApiKey(AuthBase):
     )
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
@@ -347,12 +345,12 @@ class UserPermission(AuthBase):
     permission: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow,
+        default=utc_now,
         server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )

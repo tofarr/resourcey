@@ -31,6 +31,7 @@ from typing import Any, Generic, TypeVar
 from pydantic import model_validator
 
 from resourcey.cache.cache_header import CacheHeader
+from resourcey.util import utc_now
 from resourcey.util.models import DiscriminatedUnionMixin
 
 T = TypeVar("T")
@@ -41,16 +42,11 @@ T = TypeVar("T")
 _ETAG_DIGEST_LEN = 32
 
 
-def _utcnow() -> datetime:
-    """UTC now (aware). Centralized so tests can monkeypatch if needed."""
-    return datetime.now(UTC)
-
-
 def _expire_at(expire_in: int) -> datetime | None:
     """The expiry timestamp when ``expire_in > 0``, else ``None``."""
     if expire_in <= 0:
         return None
-    return _utcnow() + timedelta(seconds=expire_in)
+    return utc_now() + timedelta(seconds=expire_in)
 
 
 def _digest(parts: list[bytes]) -> str:

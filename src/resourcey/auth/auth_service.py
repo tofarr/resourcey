@@ -50,6 +50,7 @@ from resourcey.encryption.encryption_service import (
     EncryptionService,
     get_encryption_service,
 )
+from resourcey.util import utc_now
 
 _SUB_CLAIM = "sub"
 _TYP_CLAIM = "ttyp"
@@ -102,10 +103,6 @@ class IdpError(AuthError):
 
 class RefreshLockTimeoutError(AuthError):
     """The refresh-row lock could not be acquired within the timeout."""
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
 
 
 class AuthService:
@@ -264,7 +261,7 @@ class AuthService:
         access_id = _uuid(payload, _ACCESS_ID_CLAIM)
         scopes = _scopes_from_payload(payload)
         refresh_row, access_row = await self._load_token_rows(row_id, access_id)
-        if _aware(refresh_row.expires_at) <= _now():
+        if _aware(refresh_row.expires_at) <= utc_now():
             raise InvalidGrantError("refresh token expired")
         return await self._mint_token_pair(
             user_id=user_id,
@@ -331,11 +328,11 @@ class AuthService:
             if "timeout" in str(exc).lower() or "lock" in str(exc).lower():
                 raise RefreshLockTimeoutError(str(exc)) from exc
             raise
-        if locked_row is None or _aware(locked_row.expires_at) <= _now():
+        if locked_row is None or _aware(locked_row.expires_at) <= utc_now():
             raise InvalidGrantError("refresh token expired or revoked")
 
         access_row = await self._load_access_row_for_refresh(locked_row.id)
-        if access_row is not None and _aware(access_row.expires_at) > _now() + timedelta(
+        if access_row is not None and _aware(access_row.expires_at) > utc_now() + timedelta(
             seconds=self._idp.expire_drift_tolerance
         ):
             return  # A concurrent refresh already refreshed it.
@@ -360,11 +357,11 @@ class AuthService:
             if "timeout" in str(exc).lower() or "lock" in str(exc).lower():
                 raise RefreshLockTimeoutError(str(exc)) from exc
             raise
-        if refresh_row is None or _aware(refresh_row.expires_at) <= _now():
+        if refresh_row is None or _aware(refresh_row.expires_at) <= utc_now():
             raise InvalidGrantError("refresh token expired or revoked")
 
         access_row = await self._load_access_row_for_refresh(refresh_row.id)
-        if access_row is not None and _aware(access_row.expires_at) > _now() + timedelta(
+        if access_row is not None and _aware(access_row.expires_at) > utc_now() + timedelta(
             seconds=self._idp.expire_drift_tolerance
         ):
             # A concurrent refresh already refreshed; re-mint from the existing rows.
@@ -934,11 +931,11 @@ def _idp_access_expiry(
 ) -> datetime:
     expires_in = idp_tokens.get("expires_in")
     if isinstance(expires_in, int | float) and expires_in > 0:
-        return _now() + timedelta(seconds=max(0, int(expires_in) - drift_seconds))
+        return utc_now() + timedelta(seconds=max(0, int(expires_in) - drift_seconds))
     expires_at = idp_tokens.get("expires_at")
     if isinstance(expires_at, int | float) and expires_at > 0:
         return datetime.fromtimestamp(max(0, int(expires_at) - drift_seconds), tz=UTC)
-    return _now() + timedelta(seconds=max(1, idp.access_token_expires_in - drift_seconds))
+    return utc_now() + timedelta(seconds=max(1, idp.access_token_expires_in - drift_seconds))
 
 
 def _idp_refresh_expiry(
@@ -948,15 +945,15 @@ def _idp_refresh_expiry(
 ) -> datetime:
     refresh_expires_in = idp_tokens.get("refresh_expires_in")
     if isinstance(refresh_expires_in, int | float) and refresh_expires_in > 0:
-        return _now() + timedelta(seconds=max(0, int(refresh_expires_in) - drift_seconds))
+        return utc_now() + timedelta(seconds=max(0, int(refresh_expires_in) - drift_seconds))
     refresh_expires_at = idp_tokens.get("refresh_expires_at")
     if isinstance(refresh_expires_at, int | float) and refresh_expires_at > 0:
         return datetime.fromtimestamp(max(0, int(refresh_expires_at) - drift_seconds), tz=UTC)
-    return _now() + timedelta(seconds=max(1, idp.refresh_token_expires_in - drift_seconds))
+    return utc_now() + timedelta(seconds=max(1, idp.refresh_token_expires_in - drift_seconds))
 
 
 def _seconds_until(expires_at: datetime) -> int:
-    return max(0, int((_aware(expires_at) - _now()).total_seconds()))
+    return max(0, int((_aware(expires_at) - utc_now()).total_seconds()))
 
 
 def _mint_cookie_jwe(
@@ -967,7 +964,7 @@ def _mint_cookie_jwe(
     access_expires_at: datetime,
 ) -> str:
     """Mint a session-cookie JWE synced to an IdP access-token row."""
-    ttl = _aware(access_expires_at) - _now()
+    ttl = _aware(access_expires_at) - utc_now()
     if ttl.total_seconds() <= 0:
         ttl = timedelta(seconds=1)
     return enc.create_jwe_token(
