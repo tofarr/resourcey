@@ -15,7 +15,9 @@ source of truth for "what does this app serve".
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field, SecretStr
 
 from resourcey.config.config_base import BaseConfig
 
@@ -104,6 +106,130 @@ class MigrationConfig(BaseModel):
     )
 
 
+class IdpConfig(BaseModel):
+    """Federated OAuth (auth) — identity provider configuration.
+
+    The project delegates authentication to an external identity provider
+    (OIDC/OAuth2). It acts as an OAuth provider to first-party clients and an
+    OAuth client to the IdP. These fields wire the federated flow.
+
+    Ported from ohev2's ``IdpConfig``; adapted to resourcey's config framework.
+    """
+
+    url: str = Field(
+        default="/auth/dev",
+        description=(
+            "Base URL of the identity provider. Defaults to the built-in dev "
+            "identity provider mounted at '/auth/dev'; set to a real IdP URL "
+            "for production."
+        ),
+    )
+    client_id: str = Field(
+        default="resourcey",
+        description="Client id registered at the identity provider.",
+    )
+    client_secret: SecretStr = Field(
+        default=SecretStr("changeme"),
+        description="Client secret registered at the identity provider.",
+    )
+    expire_drift_tolerance: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Seconds subtracted from IdP-advertised expiries to avoid treating "
+            "a token as valid past its real expiry due to clock drift."
+        ),
+    )
+    scopes: list[str] = Field(
+        default_factory=lambda: ["openid", "email", "profile"],
+        description="OAuth scopes requested from the identity provider.",
+    )
+    authorize_path: str = Field(
+        default="/authorize",
+        description="Path appended to idp.url for the authorization endpoint.",
+    )
+    token_path: str = Field(
+        default="/token",
+        description="Path appended to idp.url for the token exchange endpoint.",
+    )
+    refresh_path: str = Field(
+        default="/token",
+        description="Path appended to idp.url for the refresh-token exchange endpoint.",
+    )
+    revocation_path: str | None = Field(
+        default=None,
+        description="Path appended to idp.url for RFC 7009 token revocation. None = local-only.",
+    )
+    access_token_expires_in: int = Field(
+        default=900,
+        ge=1,
+        description="Fallback access-token lifetime (seconds) when the IdP does not advertise one.",
+    )
+    refresh_token_expires_in: int = Field(
+        default=2_592_000,
+        ge=1,
+        description="Fallback refresh-token lifetime (seconds) when the IdP does not advertise one.",
+    )
+    refresh_lock_timeout_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        description="Max seconds to wait for the refresh-row lock during a concurrent IdP token refresh.",
+    )
+    sync_api_keys: bool = Field(
+        default=False,
+        description="When true, an API key is only accepted if the user has a live IdP session.",
+    )
+
+
+class AuthConfig(BaseModel):
+    """Authentication / session configuration (issue #4).
+
+    Controls the session cookie attributes and the IdP integration. Ported
+    from ohev2's auth-related ``AppConfig`` fields.
+    """
+
+    cookie_name: str = Field(
+        default="resourcey_session",
+        description="Name of the HTTP-only session cookie set by the auth callback.",
+    )
+    cookie_secure: bool = Field(
+        default=True,
+        description="Whether the session cookie requires HTTPS (Secure flag).",
+    )
+    cookie_samesite: Literal["lax", "strict", "none"] = Field(
+        default="strict",
+        description="SameSite attribute for the session cookie.",
+    )
+    idp: IdpConfig = Field(
+        default_factory=IdpConfig,
+        description="Identity provider (OAuth/OIDC) configuration.",
+    )
+    default_permissions_json: str = Field(
+        default="",
+        description=(
+            "App-level default permission policies as a JSON string: "
+            '{"resource_type": [{"kind": "permitted"}, ...]}. '
+            "Applied to every principal (including anonymous). "
+            "Empty string means no defaults."
+        ),
+    )
+
+    @property
+    def default_permissions(self) -> dict[str, list[dict[str, Any]]]:
+        """Parse ``default_permissions_json`` into a dict (empty on error)."""
+        import json
+
+        if not self.default_permissions_json:
+            return {}
+        try:
+            parsed = json.loads(self.default_permissions_json)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return parsed
+
+
 class FrameworkConfig(BaseConfig):
     """Top-level framework configuration (prefix ``RESOURCEY``)."""
 
@@ -120,9 +246,20 @@ class FrameworkConfig(BaseConfig):
     migrations: MigrationConfig = Field(
         default_factory=MigrationConfig, description="Alembic migration configuration."
     )
+    auth: AuthConfig = Field(
+        default_factory=AuthConfig,
+        description="Authentication / session configuration (issue #4).",
+    )
     debug: bool = Field(default=False, description="Enable debug mode.")
     host: str = Field(default="127.0.0.1", description="App server (uvicorn) host.")
     port: int = Field(default=8000, ge=1, le=65535, description="App server (uvicorn) port.")
+    base_url: str = Field(
+        default="http://localhost:8000",
+        description=(
+            "Public base URL of the application. Used to build absolute URLs "
+            "(OAuth callback, OIDC discovery issuer) behind proxies/ingresses."
+        ),
+    )
     cors_origins: list[str] = Field(
         default_factory=list, description="Allowed CORS origins (JSON array or sequential indices)."
     )

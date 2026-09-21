@@ -33,3 +33,16 @@ class NotFoundError(ResourceyError):
 
 class InvalidInputError(ResourceyError):
     """Malformed input detected by the framework before validation (HTTP 400)."""
+
+
+class ForbiddenError(ResourceyError):
+    """The authenticated principal is not permitted to perform an action (HTTP 403).
+
+    Raised by the secured service wrapper when a permission check denies an
+    action (e.g. a ``create`` whose policy reduces to ``NoneSearchFilter``).
+    """
+
+    def __init__(self, resource_name: str, action: str) -> None:
+        self.resource_name = resource_name
+        self.action = action
+        super().__init__(f"Permission denied: action={action} resource={resource_name}")
