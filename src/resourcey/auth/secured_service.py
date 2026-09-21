@@ -39,15 +39,16 @@ to the inner service unchanged.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
 from resourcey.resource.errors import ForbiddenError, NotFoundError
+from resourcey.resource.missing import MISSING
 from resourcey.resource.service_base import Action, BaseService
 from resourcey.util.search_filter import (
     NONE,
@@ -150,14 +151,21 @@ class SecuredService(BaseService):
         authenticated. This makes :class:`~resourcey.auth.permission.CreatorPermission`
         work out of the box for resources that declare a ``creator_id`` field.
         Resources without a ``creator_id`` field are unaffected.
+
+        "Not set" covers both ``None`` and the framework's ``MISSING`` sentinel
+        (the create model uses ``MISSING`` for optional fields so it can tell
+        an explicitly-supplied ``None`` from an omitted one).
         """
         if self._user_id is None:
             return
         if not hasattr(payload, "creator_id"):
             return
-        if getattr(payload, "creator_id", None) is None:
-            with contextlib.suppress(AttributeError, ValueError):
-                object.__setattr__(payload, "creator_id", self._user_id)
+        current = getattr(payload, "creator_id", None)
+        if current is None or current is MISSING:
+            # Frozen / immutable models can't be mutated here; the resource
+            # is responsible for stamping creator_id itself in that case.
+            with suppress(AttributeError, ValueError):
+                payload.creator_id = self._user_id
 
     async def read(self, id: Any) -> Any:  # noqa: A002
         result = await self._inner.read(id)
@@ -258,3 +266,14 @@ class SecuredService(BaseService):
         filters: SearchFilter[Any] | None,
     ) -> CacheHeader | None:
         return self._inner.compute_count_cache_header(count, filters)
+
+    # ------------------------------------------------------------------
+    # Serialization context (delegate to inner unchanged)
+    # ------------------------------------------------------------------
+
+    def serialization_context(self) -> dict[str, Any] | None:
+        """The inner service's serialization context (for secret fields)."""
+        return self._inner.serialization_context()
+
+    def _ctx(self) -> dict[str, Any] | None:
+        return self._inner._ctx()

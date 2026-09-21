@@ -1,0 +1,42 @@
+[project]
+name = "users-and-permissions"
+version = "0.1.0"
+description = "Example 03 — a message board with users and per-action permissions (SQLite by default)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Pull resourcey from its main branch on GitHub. This mirrors the real
+    # consumer situation: copy this directory anywhere, `uv sync`, and run.
+    "resourcey @ git+https://github.com/tofarr/resourcey.git@main",
+    # SQLite async driver — the example defaults to a local SQLite file.
+    "aiosqlite>=0.22",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+# Run with `uvicorn users_and_permissions.app:app` (the manifest-built FastAPI app).
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["users_and_permissions"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["migrations"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
