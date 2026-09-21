@@ -44,7 +44,13 @@ class UserPermission(SecuredSqlResource):
     user_id: Annotated[
         UUID,
         ResourceyField(
-            column=Column("user_id", Uuid, ForeignKey("users.id"), nullable=False, index=True)
+            column=Column(
+                "user_id",
+                Uuid,
+                ForeignKey("users.id", ondelete="CASCADE"),
+                nullable=False,
+                index=True,
+            )
         ),
     ]
     resource_type: str
