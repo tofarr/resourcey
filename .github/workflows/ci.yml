@@ -38,3 +38,29 @@ jobs:
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
+
+  examples-e2e:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: examples/01_message_board
+            name: message-board (SQLite)
+          - example: examples/02_mongodb
+            name: message-board (MongoDB)
+    name: E2E — ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+      - name: Install example dependencies
+        working-directory: ${{ matrix.example }}
+        run: uv sync --extra test
+      # Overlay the local (PR) resourcey source over the git@main dependency
+      # so the E2E suites verify the code under review, not the published main.
+      - name: Install local resourcey (editable)
+        working-directory: ${{ matrix.example }}
+        run: uv pip install -e ${GITHUB_WORKSPACE}
+      - name: Run E2E suite
+        working-directory: ${{ matrix.example }}
+        run: uv run pytest -q
