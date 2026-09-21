@@ -556,6 +556,7 @@ def _http_date(value: datetime) -> str:
 def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
     """Build the ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires``
     response headers from a :class:`CacheHeader`'s non-``None`` fields."""
+    has_validator = header.etag is not None or header.updated_at is not None
     headers: dict[str, str] = {}
     if header.etag is not None:
         headers["ETag"] = header.etag
@@ -569,6 +570,12 @@ def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
         max_age = max(0, int((header.expire_at - now).total_seconds()))
         headers["Cache-Control"] = f"max-age={max_age}"
         headers["Expires"] = _http_date(header.expire_at)
+    elif has_validator:
+        # Validators with no freshness window: force revalidation on every use.
+        # Without a Cache-Control directive a browser falls back to heuristic
+        # freshness and serves from cache without ever echoing the validator
+        # back, so the conditional-request path (and 304s) never fires.
+        headers["Cache-Control"] = "no-cache"
     return headers
 
 
