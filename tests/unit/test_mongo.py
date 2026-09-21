@@ -127,7 +127,7 @@ def _collection(resource: Any) -> Any:
 
 
 def _create_widget(label: str, *, size: int = 0, id: UUID | None = None) -> Any:  # noqa: A002
-    return MongoWidget.get_create_model()(label=label, size=size, id=id or uuid4())
+    return MongoWidget().get_create_model()(label=label, size=size, id=id or uuid4())
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +179,7 @@ class TestMongoUpdate:
     async def test_update_applies_patch(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g", size=1))
-        result = await svc.update(created.id, MongoWidget.get_update_model()(size=99))
+        result = await svc.update(created.id, MongoWidget().get_update_model()(size=99))
         assert result.size == 99
         assert result.label == "g"
 
@@ -187,13 +187,13 @@ class TestMongoUpdate:
     async def test_update_missing_raises_not_found(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(NotFoundError):
-            await svc.update(uuid4(), MongoWidget.get_update_model()(size=1))
+            await svc.update(uuid4(), MongoWidget().get_update_model()(size=1))
 
     @pytest.mark.asyncio
     async def test_update_empty_payload_returns_current(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g"))
-        result = await svc.update(created.id, MongoWidget.get_update_model()())
+        result = await svc.update(created.id, MongoWidget().get_update_model()())
         assert result.id == created.id
 
 
@@ -267,7 +267,7 @@ class TestMongoSearch:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
-                MongoDoc.get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
+                MongoDoc().get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
             )
         page = await svc.search(limit=10, sort="ts")
         assert [item.ts.day for item in page.items] == [1, 2, 3]
@@ -278,7 +278,7 @@ class TestMongoSearch:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
-                MongoDoc.get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
+                MongoDoc().get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
             )
         page = await svc.search(limit=10, sort="ts", desc=True)
         assert [item.ts.day for item in page.items] == [3, 2, 1]
@@ -318,7 +318,7 @@ class TestMongoCount:
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
-                MongoDoc.get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
+                MongoDoc().get_create_model()(title=f"t{i}", ts=base.replace(day=i + 1), id=uuid4())
             )
         f = DocSearchFilter(ts__gte=base.replace(day=2))
         assert await svc.count(filters=f) == 2
@@ -351,8 +351,8 @@ class TestMongoBatchEdit:
         missing_id = uuid4()
         results = await svc.batch_edit(
             [
-                (a.id, MongoWidget.get_update_model()(size=99)),
-                (missing_id, MongoWidget.get_update_model()(size=5)),
+                (a.id, MongoWidget().get_update_model()(size=99)),
+                (missing_id, MongoWidget().get_update_model()(size=5)),
             ]
         )
         assert results[0].size == 99
@@ -455,7 +455,7 @@ class TestMongoMigrateOnRead:
     async def test_migrate_document_invoked_on_read(self, versioned_resource) -> None:
         svc = MongoService(versioned_resource, collection=_collection(versioned_resource))
         new_id = uuid4()
-        await svc.create(MongoVersioned.get_create_model()(name="foo", id=new_id))
+        await svc.create(MongoVersioned().get_create_model()(name="foo", id=new_id))
         # The stored doc has no schema_version; read migrates it.
         result = await svc.read(new_id)
         assert result.name == "foo"
@@ -466,7 +466,7 @@ class TestMongoMigrateOnRead:
     async def test_migrate_document_invoked_on_search(self, versioned_resource) -> None:
         svc = MongoService(versioned_resource, collection=_collection(versioned_resource))
         for i in range(3):
-            await svc.create(MongoVersioned.get_create_model()(name=f"n{i}", id=uuid4()))
+            await svc.create(MongoVersioned().get_create_model()(name=f"n{i}", id=uuid4()))
         page = await svc.search(limit=10)
         assert len(page.items) == 3
 
@@ -488,10 +488,10 @@ class TestMongoResourceMeta:
         assert MongoWidget.get_collection_name() == "mongo_widgets"
 
     def test_get_service_cls(self) -> None:
-        assert MongoResource.get_service_cls() is MongoService
+        assert MongoResource().get_service_cls() is MongoService
 
     def test_supported_actions_all(self) -> None:
-        assert MongoResource.get_supported_actions() == frozenset(Action)
+        assert MongoResource().get_supported_actions() == frozenset(Action)
 
     def test_get_collection_raises_when_unconfigured(self) -> None:
         class Unconfigured(MongoResource):

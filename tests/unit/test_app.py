@@ -58,8 +58,8 @@ class _AppConfig(FrameworkConfig):
 @pytest_asyncio.fixture
 async def sqlite_factory() -> async_sessionmaker[AsyncSession]:
     """In-memory SQLite factory with resource tables created."""
-    AppWidget.get_sql_alchemy_model()
-    AppGadget.get_sql_alchemy_model()
+    AppWidget().get_sql_alchemy_model()
+    AppGadget().get_sql_alchemy_model()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     async with engine.begin() as conn:
         await conn.run_sync(ResourceyBase.metadata.create_all)
@@ -285,8 +285,18 @@ class TestResourceLifecycle:
     async def test_base_resource_lifecycle_is_noop(self):
         from resourcey.resource.base import BaseResource
 
+        # BaseResource is an ABC; use a minimal concrete subclass to test
+        # that the base lifecycle (on_register, __aenter__, __aexit__) is a
+        # no-op for storage-agnostic resources.
+        class _NoopResource(BaseResource):
+            def get_service_cls(self) -> type:
+                raise NotImplementedError
+
+            def open_service(self, request: object) -> object:
+                raise NotImplementedError
+
         ctx = AppContext(FrameworkConfig())
-        instance = BaseResource()
+        instance = _NoopResource()
         await instance.__aenter__(ctx)
         await instance.__aexit__(None, None, None)
 

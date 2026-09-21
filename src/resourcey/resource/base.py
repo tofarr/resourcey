@@ -1,12 +1,13 @@
 """``BaseResource`` and the storage-agnostic resource declaration layer.
 
-A resource is the central unit of resourcey. ``BaseResource`` is a plain
-declaration class (not a Pydantic model): a subclass declares fields with the
-ordinary annotation + ``Field()`` / default syntax, and the framework
-introspects that declaration to drive the generated Pydantic create / read /
-update models. Every generation step is a single-purpose, overridable hook so
-a subtype can replace any piece without touching the rest (progressive
-enhancement / escape hatches).
+A resource is the central unit of resourcey. ``BaseResource`` is an ABC (not a
+Pydantic model): a subclass declares fields with the ordinary annotation +
+``Field()`` / default syntax, and the framework introspects that declaration
+to drive the generated Pydantic create / read / update models. Every
+generation step is a single-purpose, overridable *instance* method so a
+subtype (or a :class:`~resourcey.resource.wrapper.WrapperResourceBase`) can
+replace any piece without touching the rest (progressive enhancement / escape
+hatches).
 
 ``BaseResource`` is deliberately storage-agnostic: it knows nothing about
 SQLAlchemy, sessions, or persistence. SQL-backed resources subclass
@@ -19,17 +20,24 @@ Field metadata is collected at subclass-creation time into
 :class:`~pydantic.fields.FieldInfo`, the same type the generation hooks
 already consume. Building it ourselves (rather than inheriting it from
 ``BaseModel``) is what lets ``BaseResource`` be a declaration rather than a
-data record: it is never instantiated, never validated, and carries no
-Pydantic model machinery.
+data record: it is never validated, and carries no Pydantic model machinery.
 
 Generated models and resolved values are cached on the class so repeated calls
 are cheap. The caches are non-annotated class attributes (so they are not
 treated as declared fields) and are stored per-subclass.
+
+All generation hooks are **instance methods** (not classmethods). This lets a
+wrapper hold a reference to an inner resource and selectively override
+individual hooks while delegating the rest (the composition pattern of choice
+for customisation — see :class:`~resourcey.resource.wrapper.WrapperResourceBase`).
+Caching stays per-class via ``type(self).__dict__`` so non-wrapper resources
+behave exactly as before; a wrapper overrides caching to be per-instance.
 """
 
 from __future__ import annotations
 
 import types
+from abc import ABC, abstractmethod
 from functools import reduce
 from typing import (
     TYPE_CHECKING,
@@ -61,8 +69,8 @@ if TYPE_CHECKING:
     from resourcey.util.search_filter import SearchFilter
 
 
-class BaseResource:
-    """Base class for resource declarations.
+class BaseResource(ABC):
+    """Abstract base class for resource declarations.
 
     A *declaration* class, not a data model: subclass it and declare fields
     with the ordinary annotation + ``Field()`` / default syntax, and the
@@ -77,6 +85,12 @@ class BaseResource:
     metadata is collected into :attr:`model_fields` at subclass-creation time
     by :meth:`__init_subclass__`, so the generation hooks introspect a
     registry the framework owns rather than Pydantic's model machinery.
+
+    All hooks are instance methods (not classmethods) so that a
+    :class:`~resourcey.resource.wrapper.WrapperResourceBase` can hold a
+    reference to an inner resource and selectively override individual hooks
+    while delegating the rest. Caching stays per-class via
+    ``type(self).__dict__``; a wrapper overrides caching to be per-instance.
     """
 
     # Per-subclass field registry and caches. Non-annotated so they are not
@@ -93,13 +107,21 @@ class BaseResource:
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        # WrapperResourceBase proxies model_fields to its inner resource via
+        # a property; skip field collection so it doesn't shadow the property.
+        # Detected via a class-level marker (``_is_wrapper_base = True``) to
+        # avoid an import cycle (wrapper.py imports base.py).
+        if cls.__dict__.get("_is_wrapper_base") or any(
+            getattr(b, "__dict__", {}).get("_is_wrapper_base") for b in cls.__mro__
+        ):
+            return
         cls.model_fields = _collect_field_infos(cls)
 
     # ------------------------------------------------------------------
     # Registration hook
     # ------------------------------------------------------------------
 
-    def on_register(self) -> None:
+    def on_register(self) -> None:  # noqa: B027
         """Materialise backend artifacts (called by the manifest at construction).
 
         The base implementation is a no-op: a storage-agnostic resource has
@@ -108,6 +130,7 @@ class BaseResource:
         build their backing model so it is available before migrations / table
         creation run.
         """
+        # no-op: storage-agnostic resources have nothing to materialise.
 
     # ------------------------------------------------------------------
     # App lifecycle
@@ -124,61 +147,76 @@ class BaseResource:
         self._ctx = ctx
         return ctx
 
-    async def __aexit__(self, *exc: object) -> None:
+    async def __aexit__(self, *exc: object) -> None:  # noqa: B027
         """Tear down runtime state. Base implementation is a no-op."""
+        # no-op: storage-agnostic resources have nothing to tear down.
+
+    # ------------------------------------------------------------------
+    # Exposure control
+    # ------------------------------------------------------------------
+
+    def is_exposed(self) -> bool:
+        """Whether this resource appears in the REST API (default: ``True``).
+
+        When ``False`` the route builder skips this resource entirely — no
+        endpoints are registered. This separates *exposure* (REST presence)
+        from *support* (what the service can do): an internal-only resource
+        returns ``False`` here while still being usable by the service /
+        repository layer for background work. A
+        :class:`~resourcey.resource.wrapper.WrapperResourceBase` that wraps
+        an internal resource returns ``True`` to expose a (possibly narrowed)
+        public variant.
+        """
+        return True
 
     # ------------------------------------------------------------------
     # Service + action surface
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_service_cls(cls) -> type[Any]:
+    @abstractmethod
+    def get_service_cls(self) -> type[Any]:
         """The service class this resource yields from :meth:`open_service`.
 
-        The base implementation raises: a storage-agnostic resource has no
-        service. Storage-specific subclasses override this (e.g.
+        Storage-specific subclasses override this (e.g.
         :class:`~resourcey.resource.sql.SqlResource` returns
         :class:`~resourcey.resource.service.SqlService`).
         """
-        raise NotImplementedError(
-            f"{cls.__name__} does not declare a service class; override get_service_cls()."
-        )
 
-    @classmethod
-    def get_supported_actions(cls) -> frozenset[Any]:
-        """The actions this resource exposes over HTTP.
+    def get_supported_actions(self) -> frozenset[Any]:
+        """The actions this resource supports (exposed over HTTP by default).
 
         Defaults to the service class's declared :attr:`actions`
-        (``cls.get_service_cls().actions``) - the service is the single source
-        of truth. A resource may override this to *narrow* (hide an action the
-        service supports but should not be exposed), but must never widen
-        beyond the service's ``actions``: the route builder asserts the
-        subset relation at registration time.
+        (``self.get_service_cls().actions``) — the service is the single
+        source of truth. A resource (or a wrapper) may override this to
+        *narrow* (hide an action the service supports but should not be
+        exposed), but must never widen beyond the service's ``actions``: the
+        route builder asserts the subset relation at registration time.
+
+        Combined with :meth:`is_exposed`, this gives two levels of
+        exposure control: resource-level (``is_exposed`` — does this resource
+        appear in REST at all?) and action-level (this method — which actions
+        does it expose?).
 
         Returns a ``frozenset[Action]``.
         """
-        return cast("frozenset[Any]", cls.get_service_cls().actions)
+        return cast("frozenset[Any]", self.get_service_cls().actions)
 
+    @abstractmethod
     def open_service(self, request: Any) -> Any:
         """Async context manager yielding a service instance for ``request``.
 
-        The base implementation raises: a storage-agnostic resource cannot
-        open a service. Storage-specific subclasses override this (e.g.
+        Storage-specific subclasses override this (e.g.
         :class:`~resourcey.resource.sql.SqlResource` opens / reuses a session
         on ``request.state`` and yields an
         :class:`~resourcey.resource.service.SqlService`). Suitable for use as
         an injected FastAPI dependency.
         """
-        raise NotImplementedError(
-            f"{type(self).__name__} cannot open a service; override open_service()."
-        )
 
     # ------------------------------------------------------------------
     # Field config resolution
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_config_for_field(cls, field_name: str, field: FieldInfo) -> ResourceyField:
+    def get_config_for_field(self, field_name: str, field: FieldInfo) -> ResourceyField:
         """Return the ``ResourceyField`` for a field.
 
         Reads it from the field metadata if an explicit ``ResourceyField`` is
@@ -211,9 +249,10 @@ class BaseResource:
                 config = config.model_copy(update={"creatable": False, "updatable": False})
             else:
                 raise ResourceyConfigError(
-                    f"Field '{field_name}' on {cls.__name__} is a timestamp and must declare a "
-                    "default_factory (e.g. default_factory=datetime.utcnow). A fixed default or no "
-                    "default is ambiguous; supply an explicit ResourceyField override if intended."
+                    f"Field '{field_name}' on {type(self).__name__} is a timestamp and must "
+                    "declare a default_factory (e.g. default_factory=datetime.utcnow). A fixed "
+                    "default or no default is ambiguous; supply an explicit ResourceyField "
+                    "override if intended."
                 )
         # SecretStr fields are not sortable by default: allowing `sort=field`
         # against a secret lets a client infer the relative ordering of secret
@@ -224,8 +263,7 @@ class BaseResource:
             config = config.model_copy(update={"sortable": False})
         return config
 
-    @classmethod
-    def get_search_filter_type(cls) -> type[SearchFilter] | None:  # type: ignore[type-arg]
+    def get_search_filter_type(self) -> type[SearchFilter] | None:  # type: ignore[type-arg]
         """Return the declared search filter class for this resource, or ``None``.
 
         When ``None`` (the default) the ``search`` action exposes **no**
@@ -243,8 +281,7 @@ class BaseResource:
         """
         return None
 
-    @classmethod
-    def get_cache_strategy(cls) -> CacheStrategy[Any]:
+    def get_cache_strategy(self) -> CacheStrategy[Any]:
         """Return the cache strategy for this resource (cached on the class).
 
         Default selection: if the resource declares an ``updated_at`` field
@@ -259,7 +296,7 @@ class BaseResource:
         is the single seam for cache policy — overriding it never touches the
         service or routes.
         """
-        cached = cls.__dict__.get("_cache_strategy")
+        cached = type(self).__dict__.get("_cache_strategy")
         if cached is not None:
             return cast("CacheStrategy[Any]", cached)
         from resourcey.cache.cache_strategy import (
@@ -267,16 +304,15 @@ class BaseResource:
             LastModifiedCacheStrategy,
         )
 
-        field = cls.model_fields.get("updated_at")
-        if field is not None and cls.get_config_for_field("updated_at", field).readable:
+        field = self.model_fields.get("updated_at")
+        if field is not None and self.get_config_for_field("updated_at", field).readable:
             strategy: CacheStrategy[Any] = LastModifiedCacheStrategy()
         else:
             strategy = ETagCacheStrategy()
-        cls._cache_strategy = strategy
+        type(self)._cache_strategy = strategy
         return strategy
 
-    @classmethod
-    def get_sortable_fields(cls) -> list[str]:
+    def get_sortable_fields(self) -> list[str]:
         """Names of fields whose ``ResourceyField.sortable`` is ``True``.
 
         The single source of truth for what the search endpoint's ``sort``
@@ -284,40 +320,39 @@ class BaseResource:
         is explicitly opted out (e.g. ``SecretStr`` fields default to
         ``sortable=False`` -- see :meth:`get_config_for_field`).
         """
-        cached = cls.__dict__.get("_sortable_fields")
+        cached = type(self).__dict__.get("_sortable_fields")
         if cached is not None:
             return cast(list[str], cached)
         sortable = [
             name
-            for name, field in cls.model_fields.items()
-            if cls.get_config_for_field(name, field).sortable
+            for name, field in self.model_fields.items()
+            if self.get_config_for_field(name, field).sortable
         ]
-        cls._sortable_fields = sortable
+        type(self)._sortable_fields = sortable
         return sortable
 
-    @classmethod
-    def get_id_field(cls) -> str:
+    def get_id_field(self) -> str:
         """Return the name of the primary identifier field (default: ``id``).
 
         Cached on the class. Raises ``ResourceyConfigError`` if no ``id``
         field exists.
         """
-        cached = cls.__dict__.get("_id_field")
+        cached = type(self).__dict__.get("_id_field")
         if cached is not None:
             return cast(str, cached)
-        if "id" in cls.model_fields:
-            cls._id_field = "id"
+        if "id" in self.model_fields:
+            type(self)._id_field = "id"
             return "id"
         raise ResourceyConfigError(
-            f"Resource {cls.__name__} has no 'id' field; override get_id_field() to specify one."
+            f"Resource {type(self).__name__} has no 'id' field; override get_id_field() "
+            "to specify one."
         )
 
     # ------------------------------------------------------------------
     # Pydantic model generation
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_create_model(cls) -> type[BaseModel]:
+    def get_create_model(self) -> type[BaseModel]:
         """Build (and cache) the create model: only ``creatable`` fields.
 
         Required fields (no original default) stay required. Optional fields
@@ -327,13 +362,13 @@ class BaseResource:
         ``load_secret_str`` validator so encryption / redaction happens at the
         storage boundary driven by the serialization context.
         """
-        cached = cls.__dict__.get("_create_model")
+        cached = type(self).__dict__.get("_create_model")
         if cached is not None:
             return cast(type[BaseModel], cached)
         fields: dict[str, Any] = {}
         secret_names: set[str] = set()
-        for name, field in cls.model_fields.items():
-            config = cls.get_config_for_field(name, field)
+        for name, field in self.model_fields.items():
+            config = self.get_config_for_field(name, field)
             if not config.creatable:
                 continue
             annotation = _strip_config(field.annotation)
@@ -344,43 +379,32 @@ class BaseResource:
             if _resolve_scalar_type(field.annotation) is SecretStr:
                 secret_names.add(name)
         model = create_model(
-            f"{cls.__name__}Create",
+            f"{type(self).__name__}Create",
             __base__=_secret_base(secret_names),
             **fields,
         )
-        cls._create_model = model
+        type(self)._create_model = model
         return model
 
-    @classmethod
-    def get_read_model(cls) -> type[BaseModel]:
+    def get_read_model(self) -> type[BaseModel]:
         """Build (and cache) the read model: only ``readable`` fields.
 
         Secret-bearing (``SecretStr``) fields gain the ``dump_secret_str``
         serializer and ``load_secret_str`` validator so encryption / redaction
         happens at the storage boundary driven by the serialization context.
         """
-        cached = cls.__dict__.get("_read_model")
+        cached = type(self).__dict__.get("_read_model")
         if cached is not None:
             return cast(type[BaseModel], cached)
-        fields: dict[str, Any] = {}
-        secret_names: set[str] = set()
-        for name, field in cls.model_fields.items():
-            config = cls.get_config_for_field(name, field)
-            if not config.readable:
-                continue
-            fields[name] = (_strip_config(field.annotation), _clean_field(field))
-            if _resolve_scalar_type(field.annotation) is SecretStr:
-                secret_names.add(name)
-        model = create_model(
-            f"{cls.__name__}Read",
-            __base__=_secret_base(secret_names),
-            **fields,
+        model = _project_read_model(
+            f"{type(self).__name__}Read",
+            self.model_fields,
+            self,
         )
-        cls._read_model = model
+        type(self)._read_model = model
         return model
 
-    @classmethod
-    def get_update_model(cls) -> type[BaseModel]:
+    def get_update_model(self) -> type[BaseModel]:
         """Build (and cache) the PATCH-style update model: only ``updatable`` fields.
 
         Every field is optional: each gets
@@ -391,32 +415,31 @@ class BaseResource:
         ``load_secret_str`` validator so encryption / redaction happens at the
         storage boundary driven by the serialization context.
         """
-        cached = cls.__dict__.get("_update_model")
+        cached = type(self).__dict__.get("_update_model")
         if cached is not None:
             return cast(type[BaseModel], cached)
         fields: dict[str, Any] = {}
         secret_names: set[str] = set()
-        for name, field in cls.model_fields.items():
-            config = cls.get_config_for_field(name, field)
+        for name, field in self.model_fields.items():
+            config = self.get_config_for_field(name, field)
             if not config.updatable:
                 continue
             fields[name] = (_strip_config(field.annotation), _missing_field())
             if _resolve_scalar_type(field.annotation) is SecretStr:
                 secret_names.add(name)
         model = create_model(
-            f"{cls.__name__}Update",
+            f"{type(self).__name__}Update",
             __base__=_secret_base(secret_names),
             **fields,
         )
-        cls._update_model = model
+        type(self)._update_model = model
         return model
 
     # ------------------------------------------------------------------
     # REST path
     # ------------------------------------------------------------------
 
-    @classmethod
-    def get_resource_path(cls) -> str:
+    def get_resource_path(self) -> str:
         """Derive the plural, lower-case, kebab-case REST path segment.
 
         Independent of the SQL table name (see
@@ -426,12 +449,39 @@ class BaseResource:
         Defaults to the plural kebab-case class name (``UserRole`` ->
         ``user-roles``). Overridable.
         """
-        return pluralize(camel_to_kebab(cls.__name__)).lower()
+        return pluralize(camel_to_kebab(type(self).__name__)).lower()
 
 
 def _missing_field() -> Any:
     """A field defaulting to ``MISSING`` without validating the sentinel."""
     return Field(default=MISSING, validate_default=False)
+
+
+def _project_read_model(
+    name: str,
+    model_fields: dict[str, FieldInfo],
+    resource: BaseResource,
+    *,
+    exclude: frozenset[str] = frozenset(),
+) -> type[BaseModel]:
+    """Build a read model from ``model_fields``, omitting ``exclude`` names.
+
+    Used by :meth:`BaseResource.get_read_model` (with ``exclude=()``) and by
+    :class:`~resourcey.resource.wrapper.WrapperResourceBase` to produce a
+    read model that subtracts attributes from the inner resource's read model.
+    """
+    fields: dict[str, Any] = {}
+    secret_names: set[str] = set()
+    for field_name, field in model_fields.items():
+        if field_name in exclude:
+            continue
+        config = resource.get_config_for_field(field_name, field)
+        if not config.readable:
+            continue
+        fields[field_name] = (_strip_config(field.annotation), _clean_field(field))
+        if _resolve_scalar_type(field.annotation) is SecretStr:
+            secret_names.add(field_name)
+    return create_model(name, __base__=_secret_base(secret_names), **fields)
 
 
 def _collect_field_infos(cls: type[BaseResource]) -> dict[str, FieldInfo]:

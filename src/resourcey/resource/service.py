@@ -72,7 +72,7 @@ class SqlService(BaseService):
 
     def __init__(
         self,
-        resource: type[SqlResource],
+        resource: SqlResource,
         *,
         session: AsyncSession,
         repository_cls: type[ResourceRepository] | None = None,
@@ -118,21 +118,21 @@ class SqlService(BaseService):
         """Fetch; raise :class:`NotFoundError` (-> 404) if absent."""
         result = await self.repository.get_by_id(self._session, id, context=self._ctx())
         if result is None:
-            raise NotFoundError(self.resource.__name__, id)
+            raise NotFoundError(type(self.resource).__name__, id)
         return result
 
     async def update(self, id: Any, payload: BaseModel) -> Any:  # noqa: A002
         """Validate via the PATCH update model, apply; raise ``NotFoundError`` if absent."""
         result = await self.repository.update_by_id(self._session, id, payload, context=self._ctx())
         if result is None:
-            raise NotFoundError(self.resource.__name__, id)
+            raise NotFoundError(type(self.resource).__name__, id)
         return result
 
     async def delete(self, id: Any) -> None:  # noqa: A002
         """Delete; raise ``NotFoundError`` if absent. Returns no body (HTTP 204)."""
         deleted = await self.repository.delete_by_id(self._session, id)
         if not deleted:
-            raise NotFoundError(self.resource.__name__, id)
+            raise NotFoundError(type(self.resource).__name__, id)
 
     async def search(
         self,

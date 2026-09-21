@@ -75,9 +75,15 @@ def register_routes(
     route is only added if no route already exists at that path + method on
     the target router - a developer who registers a custom route first keeps
     it (escape hatch). Returns the built :class:`APIRouter`.
+
+    When ``resource.is_exposed()`` is ``False`` no routes are registered at
+    all — the resource is internal-only (usable by the service / repository
+    layer but absent from the REST API).
     """
     resource_name = type(resource).__name__
     router = APIRouter(tags=list(tags) if tags else [resource_name])
+    if not resource.is_exposed():
+        return router
     path = "/" + resource.get_resource_path().lstrip("/")
     id_type = _id_python_type(resource)
     service_dep = _service_dependency(resource)

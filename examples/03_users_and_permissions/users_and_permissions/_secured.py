@@ -128,7 +128,7 @@ def _build_secured(
     token: AuthToken | None,
 ) -> SecuredService:
     """Wrap a ``SqlService`` in a ``SecuredService`` for the principal."""
-    inner = SqlService(type(resource), session=session)
+    inner = SqlService(resource, session=session)
     resolver = PermissionResolver(session, defaults=_DEFAULT_PERMISSIONS)
     user_id = _token_user_id(token)
     return SecuredService(
