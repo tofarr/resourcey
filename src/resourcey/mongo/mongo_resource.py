@@ -161,6 +161,7 @@ class MongoResource(BaseResource):
         return _open_mongo_service(self)
 
         # ------------------------------------------------------------------
+
     # Collection naming
     # ------------------------------------------------------------------
 

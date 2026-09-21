@@ -131,4 +131,6 @@ class FrameworkConfig(BaseConfig):
     # migrations CLI uses it to import the manifest (and materialise its tables)
     # before Alembic diffs. This is config-as-discovery, not config-as-definition:
     # the manifest instance owns the resource set, not config.
-    manifest: str = Field(default="", description="Dotted/colon path to the app's ResourceManifest.")
+    manifest: str = Field(
+        default="", description="Dotted/colon path to the app's ResourceManifest."
+    )

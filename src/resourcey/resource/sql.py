@@ -50,7 +50,6 @@ from resourcey.util.naming import camel_to_snake, pluralize
 _SESSION_FACTORY_KEY = object()
 
 
-
 class ResourceyBase(DeclarativeBase):
     """resourcey-specific async SQLAlchemy declarative base.
 

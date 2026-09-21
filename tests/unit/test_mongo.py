@@ -137,9 +137,7 @@ def _create_widget(label: str, *, size: int = 0, id: UUID | None = None) -> Any:
 
 class TestMongoCreate:
     @pytest.mark.asyncio
-    async def test_create_returns_read_model_with_id(
-        self, widget_resource
-    ) -> None:
+    async def test_create_returns_read_model_with_id(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         new_id = uuid4()
         result = await svc.create(_create_widget("gadget", id=new_id))
@@ -149,17 +147,13 @@ class TestMongoCreate:
         assert result.created_at is not None
 
     @pytest.mark.asyncio
-    async def test_create_populates_default_factory_timestamp(
-        self, widget_resource
-    ) -> None:
+    async def test_create_populates_default_factory_timestamp(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         result = await svc.create(_create_widget("x"))
         assert result.created_at is not None
 
     @pytest.mark.asyncio
-    async def test_create_drops_missing_optional_fields(
-        self, widget_resource
-    ) -> None:
+    async def test_create_drops_missing_optional_fields(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         result = await svc.create(_create_widget("x"))
         assert result.size == 0
@@ -174,9 +168,7 @@ class TestMongoRead:
         assert result.label == "g"
 
     @pytest.mark.asyncio
-    async def test_read_missing_raises_not_found(
-        self, widget_resource
-    ) -> None:
+    async def test_read_missing_raises_not_found(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(NotFoundError):
             await svc.read(uuid4())
@@ -192,17 +184,13 @@ class TestMongoUpdate:
         assert result.label == "g"
 
     @pytest.mark.asyncio
-    async def test_update_missing_raises_not_found(
-        self, widget_resource
-    ) -> None:
+    async def test_update_missing_raises_not_found(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(NotFoundError):
             await svc.update(uuid4(), MongoWidget.get_update_model()(size=1))
 
     @pytest.mark.asyncio
-    async def test_update_empty_payload_returns_current(
-        self, widget_resource
-    ) -> None:
+    async def test_update_empty_payload_returns_current(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g"))
         result = await svc.update(created.id, MongoWidget.get_update_model()())
@@ -219,9 +207,7 @@ class TestMongoDelete:
             await svc.read(created.id)
 
     @pytest.mark.asyncio
-    async def test_delete_missing_raises_not_found(
-        self, widget_resource
-    ) -> None:
+    async def test_delete_missing_raises_not_found(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(NotFoundError):
             await svc.delete(uuid4())
@@ -234,9 +220,7 @@ class TestMongoDelete:
 
 class TestMongoSearch:
     @pytest.mark.asyncio
-    async def test_search_returns_page_with_metadata(
-        self, widget_resource
-    ) -> None:
+    async def test_search_returns_page_with_metadata(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for i in range(3):
             await svc.create(_create_widget(f"g{i}", size=i))
@@ -247,9 +231,7 @@ class TestMongoSearch:
         assert page.next_cursor is None
 
     @pytest.mark.asyncio
-    async def test_search_paginates_with_cursor(
-        self, widget_resource
-    ) -> None:
+    async def test_search_paginates_with_cursor(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for i in range(5):
             await svc.create(_create_widget(f"g{i}"))
@@ -264,9 +246,7 @@ class TestMongoSearch:
         assert page3.next_cursor is None
 
     @pytest.mark.asyncio
-    async def test_search_rejects_cursor_from_different_sort(
-        self, widget_resource
-    ) -> None:
+    async def test_search_rejects_cursor_from_different_sort(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for _ in range(3):
             await svc.create(_create_widget("g"))
@@ -276,9 +256,7 @@ class TestMongoSearch:
             await svc.search(limit=1, cursor=page.next_cursor)  # no sort
 
     @pytest.mark.asyncio
-    async def test_search_rejects_invalid_cursor(
-        self, widget_resource
-    ) -> None:
+    async def test_search_rejects_invalid_cursor(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(InvalidInputError):
             await svc.search(limit=1, cursor="not-a-real-cursor")
@@ -306,9 +284,7 @@ class TestMongoSearch:
         assert [item.ts.day for item in page.items] == [3, 2, 1]
 
     @pytest.mark.asyncio
-    async def test_search_rejects_unknown_sort_field(
-        self, widget_resource
-    ) -> None:
+    async def test_search_rejects_unknown_sort_field(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(InvalidInputError):
             await svc.search(sort="nonexistent")
@@ -350,9 +326,7 @@ class TestMongoCount:
 
 class TestMongoBatchRead:
     @pytest.mark.asyncio
-    async def test_batch_read_returns_aligned_list(
-        self, widget_resource
-    ) -> None:
+    async def test_batch_read_returns_aligned_list(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         a = await svc.create(_create_widget("a"))
         b = await svc.create(_create_widget("b"))
@@ -371,9 +345,7 @@ class TestMongoBatchRead:
 
 class TestMongoBatchEdit:
     @pytest.mark.asyncio
-    async def test_batch_edit_applies_and_aligns(
-        self, widget_resource
-    ) -> None:
+    async def test_batch_edit_applies_and_aligns(self, widget_resource) -> None:
         svc = MongoService(widget_resource, collection=_collection(widget_resource))
         a = await svc.create(_create_widget("a", size=1))
         missing_id = uuid4()
@@ -480,9 +452,7 @@ class TestMongoFilterTranslation:
 
 class TestMongoMigrateOnRead:
     @pytest.mark.asyncio
-    async def test_migrate_document_invoked_on_read(
-        self, versioned_resource
-    ) -> None:
+    async def test_migrate_document_invoked_on_read(self, versioned_resource) -> None:
         svc = MongoService(versioned_resource, collection=_collection(versioned_resource))
         new_id = uuid4()
         await svc.create(MongoVersioned.get_create_model()(name="foo", id=new_id))
@@ -493,9 +463,7 @@ class TestMongoMigrateOnRead:
         # (the doc was upgraded in the projection).
 
     @pytest.mark.asyncio
-    async def test_migrate_document_invoked_on_search(
-        self, versioned_resource
-    ) -> None:
+    async def test_migrate_document_invoked_on_search(self, versioned_resource) -> None:
         svc = MongoService(versioned_resource, collection=_collection(versioned_resource))
         for i in range(3):
             await svc.create(MongoVersioned.get_create_model()(name=f"n{i}", id=uuid4()))

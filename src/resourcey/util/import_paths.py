@@ -26,7 +26,9 @@ def resolve_import_path(fqn: str) -> Any:
     else:
         module_name, _, attr_name = fqn.rpartition(".")
     if not module_name:
-        raise ValueError(f"Import path {fqn!r} must be fully-qualified (module.attr or module:attr)")
+        raise ValueError(
+            f"Import path {fqn!r} must be fully-qualified (module.attr or module:attr)"
+        )
     module = importlib.import_module(module_name)
     return getattr(module, attr_name)
 

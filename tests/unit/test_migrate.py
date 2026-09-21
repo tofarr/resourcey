@@ -160,7 +160,10 @@ class TestSyncDatabaseUrl:
         )
 
     def test_unknown_driver_passthrough(self):
-        assert migrate_runner._sync_database_url("mysql+pymysql://u:p@h/d") == "mysql+pymysql://u:p@h/d"
+        assert (
+            migrate_runner._sync_database_url("mysql+pymysql://u:p@h/d")
+            == "mysql+pymysql://u:p@h/d"
+        )
 
     def test_already_sync_passthrough(self):
         assert migrate_runner._sync_database_url("sqlite:///:memory:") == "sqlite:///:memory:"
