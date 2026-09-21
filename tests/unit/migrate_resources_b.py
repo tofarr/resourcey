@@ -2,9 +2,7 @@
 
 ``Gadget`` is a distinct resource (different class/table name) so it can be
 imported alongside ``migrate_resources_a.Widget`` without colliding in
-SQLAlchemy's class registry — used to verify the sequential-index
-``RESOURCEY_RESOURCES_*`` env parsing path imports multiple classes and
-materialises both tables.
+SQLAlchemy's class registry.
 """
 
 from __future__ import annotations

@@ -29,11 +29,10 @@ is the integration test that API must keep satisfying).
 01_message_board/
 ├── README.md            # this file
 ├── pyproject.toml       # standalone project — depends on resourcey from git
-├── .env                 # SQLite config + resources (committed, ready to run)
+├── .env                 # SQLite config + manifest path (committed, ready to run)
 ├── .gitignore
 ├── message_board/       # the importable app package
-│   ├── app.py           # create_app() entry point (uvicorn factory)
-│   ├── resources.py     # registers Thread + Message with the framework
+│   ├── app.py           # manifest + app entry point (uvicorn target)
 │   ├── thread.py        # Thread resource declaration
 │   └── message.py       # Message resource declaration + MessageSearchFilter
 ├── migrations/
@@ -56,14 +55,9 @@ uv sync
 resourcey migrate upgrade
 
 # 3. Start the server
-resourcey run
+uvicorn message_board.app:app --reload
 # → Uvicorn running on http://0.0.0.0:8081
 ```
-
-Or with uvicorn directly (reload mode):
-
-```bash
-uvicorn message_board.app:create_app --factory --reload
 ```
 
 Interactive API docs are at `http://127.0.0.1:8081/docs`.

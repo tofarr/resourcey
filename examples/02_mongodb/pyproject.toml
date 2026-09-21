@@ -20,7 +20,7 @@ test = [
 ]
 
 [project.scripts]
-mongodb-message-board = "message_board.app:create_app"
+# Run with `uvicorn message_board.app:app` (the manifest-built FastAPI app).
 
 [build-system]
 requires = ["hatchling"]

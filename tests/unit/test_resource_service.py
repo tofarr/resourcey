@@ -149,10 +149,13 @@ async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
     """Factory building an httpx AsyncClient against a FastAPI app with the
     given resource's routes registered + error handlers installed.
 
-    Configures the resource's session factory (so ``open_service`` can open a
-    per-request session) and mounts routes via ``register_routes``."""
+    Instantiates the resource type, pre-seeds its session factory (so
+    ``open_service`` can open a per-request session), and mounts routes via
+    ``register_routes`` (which takes an instance)."""
 
-    def _build(resource: type[SqlResource]) -> AsyncClient:
+    def _build(resource_type: type[SqlResource]) -> AsyncClient:
+        resource = resource_type()
+        resource.on_register()
         resource._session_factory = session_factory
         app = FastAPI()
         register_routes(app, resource)
@@ -584,9 +587,11 @@ class TestServiceRepositoryOverride:
 class TestRegisterRoutes:
     @pytest.mark.asyncio
     async def test_all_seven_routes_registered(self, session_factory) -> None:
-        SvcWidget._session_factory = session_factory
+        resource = SvcWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
         app = FastAPI()
-        router = register_routes(app, SvcWidget)
+        router = register_routes(app, resource)
         paths = {(r.path, next(iter(r.methods))) for r in router.routes}
         assert ("/svc-widgets", "POST") in paths
         assert ("/svc-widgets/{id}", "GET") in paths
@@ -598,16 +603,20 @@ class TestRegisterRoutes:
 
     @pytest.mark.asyncio
     async def test_register_returns_router(self, session_factory) -> None:
-        SvcWidget._session_factory = session_factory
+        resource = SvcWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
         app = FastAPI()
-        router = register_routes(app, SvcWidget)
+        router = register_routes(app, resource)
         assert len(router.routes) == 8
 
     @pytest.mark.asyncio
     async def test_register_with_prefix(self, session_factory) -> None:
-        SvcWidget._session_factory = session_factory
+        resource = SvcWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
         app = FastAPI()
-        register_routes(app, SvcWidget, prefix="/api/v1")
+        register_routes(app, resource, prefix="/api/v1")
         register_error_handlers(app)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://t") as c:
@@ -616,19 +625,27 @@ class TestRegisterRoutes:
 
     @pytest.mark.asyncio
     async def test_open_service_without_session_factory_raises(self) -> None:
-        # An unconfigured SQL resource cannot open a service.
+        # An unconfigured SQL resource cannot open a service: open_service
+        # raises ResourceyConfigError because _session_factory is None (no
+        # lifespan entered).
         from resourcey.resource.errors import ResourceyConfigError
 
         class _Unconfigured(SqlResource):
             id: int
             label: str
 
+        resource = _Unconfigured()
+        resource.on_register()
+        request = type("R", (), {"state": {}})()
         with pytest.raises(ResourceyConfigError):
-            _Unconfigured.get_session_factory()
+            async with resource.open_service(request):
+                pass
 
     @pytest.mark.asyncio
     async def test_escape_hatch_custom_route_preserved(self, session_factory) -> None:
-        SvcWidget._session_factory = session_factory
+        resource = SvcWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
         app = FastAPI()
         # Register a custom GET /svc-widgets route BEFORE register_routes - it
         # should be kept (not overwritten) by the escape hatch.
@@ -641,7 +658,7 @@ class TestRegisterRoutes:
             return {"custom": True}
 
         app.include_router(custom)
-        register_routes(app, SvcWidget)
+        register_routes(app, resource)
         register_error_handlers(app)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             r = await c.get("/svc-widgets")
@@ -912,12 +929,13 @@ class TestHttpFiltering:
 # ---------------------------------------------------------------------------
 
 
-def _build_app(resource: type[BaseResource]) -> FastAPI:
+def _build_app(resource_type: type[BaseResource]) -> FastAPI:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from sqlalchemy.pool import StaticPool
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    resource = resource_type()
     resource._session_factory = factory  # type: ignore[attr-defined]
     app = FastAPI()
     register_routes(app, resource)

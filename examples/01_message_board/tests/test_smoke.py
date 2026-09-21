@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from resourcey.app import create_app
+from resourcey.manifest import ResourceManifest
 from resourcey.resource.sql import ResourceyBase
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -22,15 +22,26 @@ from message_board.thread import Thread
 @pytest_asyncio.fixture
 async def app() -> FastAPI:
     """Assemble the message-board app with an in-memory SQLite database."""
-    # Force model generation so tables exist in metadata before create_all.
-    Thread.get_sql_alchemy_model()
-    Message.get_sql_alchemy_model()
+    from resourcey.app_context import AppContext
+    from resourcey.config.config_framework import FrameworkConfig
+    from resourcey.resource.sql import _SESSION_FACTORY_KEY
+
+    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest.materialize()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     async with engine.begin() as conn:
         await conn.run_sync(ResourceyBase.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield create_app(resources=[Thread, Message], session_factory=factory)
+
+    ctx = AppContext(FrameworkConfig())
+    ctx.set(_SESSION_FACTORY_KEY, factory)
+    app = manifest.create_app(app_context=ctx)
+    # ASGITransport does not run the lifespan; enter the manifest manually
+    # so each instance's __aenter__ copies the pre-seeded factory.
+    await manifest.__aenter__()
+    yield app
+    await manifest.__aexit__(None, None, None)
     await engine.dispose()
 
 
@@ -75,7 +86,7 @@ async def test_search_filter_thread_id(client: AsyncClient):
     resp = await client.get(f"/messages?thread_id__eq={t1['id']}")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["total"] == 1
+    assert len(body["items"]) == 1
     assert body["items"][0]["text"] == "in T1"
 
 
@@ -88,5 +99,5 @@ async def test_search_filter_text_contains(client: AsyncClient):
     resp = await client.get("/messages?text__contains=hello")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["total"] == 1
+    assert len(body["items"]) == 1
     assert body["items"][0]["text"] == "hello world"

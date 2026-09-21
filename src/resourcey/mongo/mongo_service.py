@@ -64,7 +64,7 @@ class MongoService(BaseService):
 
     def __init__(
         self,
-        resource: type[MongoResource],
+        resource: MongoResource,
         *,
         collection: Any,
         serialization_context: dict[str, Any] | None = None,
@@ -101,7 +101,7 @@ class MongoService(BaseService):
         """Fetch; raise :class:`NotFoundError` (-> 404) if absent."""
         doc = await self._collection.find_one({"_id": _encode_value(id)})
         if doc is None:
-            raise NotFoundError(self.resource.__name__, id)
+            raise NotFoundError(type(self.resource).__name__, id)
         return self._doc_to_read_model(doc)
 
     async def update(self, id: Any, payload: BaseModel) -> Any:  # noqa: A002
@@ -117,14 +117,14 @@ class MongoService(BaseService):
         else:
             result = await self._collection.find_one({"_id": encoded_id})
         if result is None:
-            raise NotFoundError(self.resource.__name__, id)
+            raise NotFoundError(type(self.resource).__name__, id)
         return self._doc_to_read_model(result)
 
     async def delete(self, id: Any) -> None:  # noqa: A002
         """Delete; raise ``NotFoundError`` if absent. Returns no body (HTTP 204)."""
         result = await self._collection.delete_one({"_id": _encode_value(id)})
         if result.deleted_count == 0:
-            raise NotFoundError(self.resource.__name__, id)
+            raise NotFoundError(type(self.resource).__name__, id)
 
     async def search(
         self,

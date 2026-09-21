@@ -1,8 +1,8 @@
-"""Module-level resource classes for ``create_app`` / CLI tests.
+"""Module-level resource classes + manifest for ``ResourceManifest`` tests.
 
-``create_app``'s config-driven ``resources`` resolution imports the named
-classes by fully-qualified dotted path, so the classes must live at module
-scope (not local to a test function) to be importable.
+The manifest's dotted-path resolution (``RESOURCEY_MANIFEST``) imports a
+module-level attribute, so the manifest and its resource types must live at
+module scope (not local to a test function) to be importable.
 """
 
 from __future__ import annotations
@@ -11,11 +11,12 @@ from datetime import UTC, datetime
 
 from pydantic import Field
 
+from resourcey.manifest import ResourceManifest
 from resourcey.resource.sql import SqlResource
 
 
 class AppWidget(SqlResource):
-    """A simple resource for ``create_app`` integration tests — int id + label."""
+    """A simple resource for manifest integration tests — int id + label."""
 
     id: int
     label: str
@@ -30,6 +31,6 @@ class AppGadget(SqlResource):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
-# Resolve ORM models eagerly so metadata is populated before table creation.
-for _r in (AppWidget, AppGadget):
-    _r.get_sql_alchemy_model()
+# Module-level manifest for migrate tests (``RESOURCEY_MANIFEST`` points here).
+# Construction calls ``on_register`` on each resource, materialising tables.
+manifest = ResourceManifest(resources=(AppWidget, AppGadget))

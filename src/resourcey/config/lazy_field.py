@@ -99,7 +99,7 @@ class LazyField:
         ``{PREFIX}_{NAME}_1`` … and imports each path, enforcing the declared
         base via :func:`resolve_import_paths`. The prefix is the config
         class's :meth:`get_prefix` (e.g. ``RESOURCEY``) so the env var is
-        consistent with the config's other fields (``RESOURCEY_RESOURCES``),
+        consistent with the config's other fields (``RESOURCEY_MANIFEST``),
         unlike the single-class variant whose field name is the namespace for
         the imported object's own config. ``{NAME}_CLASS`` is never consulted
         — the list variant has no single class. An empty / unset list resolves

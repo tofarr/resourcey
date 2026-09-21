@@ -13,28 +13,19 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from message_board.app import create_app
-from message_board.message import Message
-from message_board.thread import Thread
+from message_board.app import app, manifest
 
 
 @pytest_asyncio.fixture
 async def client() -> AsyncIterator[AsyncClient]:
-    # Pre-seed an embedded Mongo client on the shared cache so the app's
-    # lifespan reuses it. The framework factory enters each resource's
-    # lifespan, which finds the client cached and skips building.
-    from resourcey.mongo.embedded import AsyncEmbeddedClient
-    from resourcey.mongo.mongo_resource import MongoResource
-
-    client_obj = AsyncEmbeddedClient()
-    MongoResource._client = client_obj
-    MongoResource._database_name = "test"
-    MongoResource._db = client_obj["test"]
-
-    app = create_app()
+    # The example app uses an embedded Mongo client (RESOURCEY_MONGO_URL=embedded),
+    # so no external server is needed. ASGITransport does not run the lifespan,
+    # so enter the manifest manually to build the Mongo client.
+    await manifest.__aenter__()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+    await manifest.__aexit__(None, None, None)
 
 
 class TestThreadLifecycle:

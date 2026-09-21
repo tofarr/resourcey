@@ -17,10 +17,9 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from mongo_mock import AsyncMockCollection, make_mock_client
+from mongo_mock import make_mock_client
 from pydantic import Field
 
-from resourcey.mongo.embedded import _EmbeddedCollection
 from resourcey.mongo.mongo_filter import to_mongo_query
 from resourcey.mongo.mongo_resource import MongoResource
 from resourcey.mongo.mongo_service import MongoService
@@ -90,36 +89,41 @@ class MongoVersioned(MongoResource):
 # ---------------------------------------------------------------------------
 
 
-def _bind_client(resource: type, client: Any, database_name: str = "test") -> None:
-    """Set the Mongo client/db cache directly (replaces the old ``configure``).
+def _bind_client(resource: Any, client: Any, database_name: str = "test") -> Any:
+    """Set the Mongo client/db cache directly on a resource instance.
 
-    Cached on :class:`MongoResource` (the base) to match the lifespan's
-    caching strategy — all Mongo resources share one client.
+    Unit tests that build a collection directly (bypassing the manifest
+    lifecycle) use this to seed the client state so ``get_collection`` works.
+    Returns the (possibly freshly-instantiated) resource instance.
     """
-    MongoResource._client = client
-    MongoResource._database_name = database_name
-    MongoResource._db = client[database_name]
+    if isinstance(resource, type):
+        resource = resource()
+    resource._client = client
+    resource._database_name = database_name
+    resource._db = client[database_name]
+    return resource
 
 
 @pytest_asyncio.fixture
-async def widget_collection() -> _EmbeddedCollection:
+async def widget_resource() -> MongoWidget:
     client = make_mock_client()
-    _bind_client(MongoWidget, client)
-    return client["test"][MongoWidget.get_collection_name()]
+    return _bind_client(MongoWidget, client)
 
 
 @pytest_asyncio.fixture
-async def doc_collection() -> _EmbeddedCollection:
+async def doc_resource() -> MongoDoc:
     client = make_mock_client()
-    _bind_client(MongoDoc, client)
-    return client["test"][MongoDoc.get_collection_name()]
+    return _bind_client(MongoDoc, client)
 
 
 @pytest_asyncio.fixture
-async def versioned_collection() -> _EmbeddedCollection:
+async def versioned_resource() -> MongoVersioned:
     client = make_mock_client()
-    _bind_client(MongoVersioned, client)
-    return client["test"][MongoVersioned.get_collection_name()]
+    return _bind_client(MongoVersioned, client)
+
+
+def _collection(resource: Any) -> Any:
+    return resource.get_collection()
 
 
 def _create_widget(label: str, *, size: int = 0, id: UUID | None = None) -> Any:  # noqa: A002
@@ -134,9 +138,9 @@ def _create_widget(label: str, *, size: int = 0, id: UUID | None = None) -> Any:
 class TestMongoCreate:
     @pytest.mark.asyncio
     async def test_create_returns_read_model_with_id(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         new_id = uuid4()
         result = await svc.create(_create_widget("gadget", id=new_id))
         assert result.id == new_id
@@ -146,42 +150,42 @@ class TestMongoCreate:
 
     @pytest.mark.asyncio
     async def test_create_populates_default_factory_timestamp(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         result = await svc.create(_create_widget("x"))
         assert result.created_at is not None
 
     @pytest.mark.asyncio
     async def test_create_drops_missing_optional_fields(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         result = await svc.create(_create_widget("x"))
         assert result.size == 0
 
 
 class TestMongoRead:
     @pytest.mark.asyncio
-    async def test_read_returns_entity(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_read_returns_entity(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g"))
         result = await svc.read(created.id)
         assert result.label == "g"
 
     @pytest.mark.asyncio
     async def test_read_missing_raises_not_found(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(NotFoundError):
             await svc.read(uuid4())
 
 
 class TestMongoUpdate:
     @pytest.mark.asyncio
-    async def test_update_applies_patch(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_update_applies_patch(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g", size=1))
         result = await svc.update(created.id, MongoWidget.get_update_model()(size=99))
         assert result.size == 99
@@ -189,17 +193,17 @@ class TestMongoUpdate:
 
     @pytest.mark.asyncio
     async def test_update_missing_raises_not_found(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(NotFoundError):
             await svc.update(uuid4(), MongoWidget.get_update_model()(size=1))
 
     @pytest.mark.asyncio
     async def test_update_empty_payload_returns_current(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g"))
         result = await svc.update(created.id, MongoWidget.get_update_model()())
         assert result.id == created.id
@@ -207,8 +211,8 @@ class TestMongoUpdate:
 
 class TestMongoDelete:
     @pytest.mark.asyncio
-    async def test_delete_removes_entity(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_delete_removes_entity(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g"))
         await svc.delete(created.id)
         with pytest.raises(NotFoundError):
@@ -216,9 +220,9 @@ class TestMongoDelete:
 
     @pytest.mark.asyncio
     async def test_delete_missing_raises_not_found(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(NotFoundError):
             await svc.delete(uuid4())
 
@@ -231,9 +235,9 @@ class TestMongoDelete:
 class TestMongoSearch:
     @pytest.mark.asyncio
     async def test_search_returns_page_with_metadata(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for i in range(3):
             await svc.create(_create_widget(f"g{i}", size=i))
         page = await svc.search(limit=10)
@@ -244,9 +248,9 @@ class TestMongoSearch:
 
     @pytest.mark.asyncio
     async def test_search_paginates_with_cursor(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for i in range(5):
             await svc.create(_create_widget(f"g{i}"))
         page1 = await svc.search(limit=2)
@@ -261,9 +265,9 @@ class TestMongoSearch:
 
     @pytest.mark.asyncio
     async def test_search_rejects_cursor_from_different_sort(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for _ in range(3):
             await svc.create(_create_widget("g"))
         page = await svc.search(limit=1, sort="label")
@@ -273,15 +277,15 @@ class TestMongoSearch:
 
     @pytest.mark.asyncio
     async def test_search_rejects_invalid_cursor(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(InvalidInputError):
             await svc.search(limit=1, cursor="not-a-real-cursor")
 
     @pytest.mark.asyncio
-    async def test_search_sort_asc(self, doc_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoDoc, collection=doc_collection)
+    async def test_search_sort_asc(self, doc_resource) -> None:
+        svc = MongoService(doc_resource, collection=_collection(doc_resource))
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
@@ -291,8 +295,8 @@ class TestMongoSearch:
         assert [item.ts.day for item in page.items] == [1, 2, 3]
 
     @pytest.mark.asyncio
-    async def test_search_sort_desc(self, doc_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoDoc, collection=doc_collection)
+    async def test_search_sort_desc(self, doc_resource) -> None:
+        svc = MongoService(doc_resource, collection=_collection(doc_resource))
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
@@ -303,38 +307,38 @@ class TestMongoSearch:
 
     @pytest.mark.asyncio
     async def test_search_rejects_unknown_sort_field(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(InvalidInputError):
             await svc.search(sort="nonexistent")
 
     @pytest.mark.asyncio
-    async def test_search_limit_capped(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_search_limit_capped(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for _ in range(3):
             await svc.create(_create_widget("g"))
         page = await svc.search(limit=999)
         assert page.limit <= 100
 
     @pytest.mark.asyncio
-    async def test_search_rejects_zero_limit(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_search_rejects_zero_limit(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         with pytest.raises(InvalidInputError):
             await svc.search(limit=0)
 
 
 class TestMongoCount:
     @pytest.mark.asyncio
-    async def test_count_returns_total(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_count_returns_total(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         for _ in range(3):
             await svc.create(_create_widget("g"))
         assert await svc.count() == 3
 
     @pytest.mark.asyncio
-    async def test_count_with_filters(self, doc_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoDoc, collection=doc_collection)
+    async def test_count_with_filters(self, doc_resource) -> None:
+        svc = MongoService(doc_resource, collection=_collection(doc_resource))
         base = datetime(2026, 1, 1, tzinfo=UTC)
         for i in range(3):
             await svc.create(
@@ -347,9 +351,9 @@ class TestMongoCount:
 class TestMongoBatchRead:
     @pytest.mark.asyncio
     async def test_batch_read_returns_aligned_list(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         a = await svc.create(_create_widget("a"))
         b = await svc.create(_create_widget("b"))
         missing_id = uuid4()
@@ -360,17 +364,17 @@ class TestMongoBatchRead:
         assert results[2].label == "b"
 
     @pytest.mark.asyncio
-    async def test_batch_read_empty(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_batch_read_empty(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         assert await svc.batch_read([]) == []
 
 
 class TestMongoBatchEdit:
     @pytest.mark.asyncio
     async def test_batch_edit_applies_and_aligns(
-        self, widget_collection: AsyncMockCollection
+        self, widget_resource
     ) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         a = await svc.create(_create_widget("a", size=1))
         missing_id = uuid4()
         results = await svc.batch_edit(
@@ -477,9 +481,9 @@ class TestMongoFilterTranslation:
 class TestMongoMigrateOnRead:
     @pytest.mark.asyncio
     async def test_migrate_document_invoked_on_read(
-        self, versioned_collection: AsyncMockCollection
+        self, versioned_resource
     ) -> None:
-        svc = MongoService(MongoVersioned, collection=versioned_collection)
+        svc = MongoService(versioned_resource, collection=_collection(versioned_resource))
         new_id = uuid4()
         await svc.create(MongoVersioned.get_create_model()(name="foo", id=new_id))
         # The stored doc has no schema_version; read migrates it.
@@ -490,17 +494,17 @@ class TestMongoMigrateOnRead:
 
     @pytest.mark.asyncio
     async def test_migrate_document_invoked_on_search(
-        self, versioned_collection: AsyncMockCollection
+        self, versioned_resource
     ) -> None:
-        svc = MongoService(MongoVersioned, collection=versioned_collection)
+        svc = MongoService(versioned_resource, collection=_collection(versioned_resource))
         for i in range(3):
             await svc.create(MongoVersioned.get_create_model()(name=f"n{i}", id=uuid4()))
         page = await svc.search(limit=10)
         assert len(page.items) == 3
 
     @pytest.mark.asyncio
-    async def test_default_migrate_is_noop(self, widget_collection: AsyncMockCollection) -> None:
-        svc = MongoService(MongoWidget, collection=widget_collection)
+    async def test_default_migrate_is_noop(self, widget_resource) -> None:
+        svc = MongoService(widget_resource, collection=_collection(widget_resource))
         created = await svc.create(_create_widget("g"))
         result = await svc.read(created.id)
         assert result.label == "g"
@@ -526,15 +530,21 @@ class TestMongoResourceMeta:
             id: UUID
             name: str
 
+        instance = Unconfigured()
+        instance.on_register()
         with pytest.raises(ResourceyConfigError):
-            Unconfigured.get_collection()
+            instance.get_collection()
 
-    def test_open_service_yields_service(self, widget_collection: AsyncMockCollection) -> None:
+    def test_open_service_yields_service(self, widget_resource) -> None:
         # configure already done by fixture; just check open_service yields
         import asyncio
 
         async def _run() -> Any:
-            async with MongoWidget.open_service(request=None) as svc:  # type: ignore[arg-type]
+            instance = MongoWidget()
+            # open_service calls get_collection which reads _db; seed it
+            # with a dict-like holding the widget collection.
+            instance._db = {MongoWidget.get_collection_name(): _collection(widget_resource)}
+            async with instance.open_service(request=None) as svc:  # type: ignore[arg-type]
                 return svc
 
         svc = asyncio.run(_run())
@@ -566,7 +576,7 @@ class TestImportGuard:
 
 
 class TestMongoLifecycle:
-    """Tests for the app-level lifespan / build_client protocol (issue #49)."""
+    """Tests for the instance-level lifecycle / build_client protocol (issue #51)."""
 
     @pytest.mark.asyncio
     async def test_lifespan_builds_embedded_client_by_default(self) -> None:
@@ -574,16 +584,17 @@ class TestMongoLifecycle:
         from resourcey.config.config_framework import FrameworkConfig
 
         ctx = AppContext(FrameworkConfig())
-        async with MongoWidget.lifespan(ctx):
-            # Cached on the base so all Mongo resources share one client.
-            assert MongoResource._client is not None
-            assert MongoResource._db is not None
-            coll = MongoWidget.get_collection()
-            assert coll is not None
-        # The lifespan registers a clearer on ctx; create_app calls aclose.
+        instance = MongoWidget()
+        instance.on_register()
+        await instance.__aenter__(ctx)
+        assert instance._client is not None
+        assert instance._db is not None
+        coll = instance.get_collection()
+        assert coll is not None
+        await instance.__aexit__(None, None, None)
         await ctx.aclose()
-        assert MongoResource._client is None
-        assert MongoResource._db is None
+        assert instance._client is None
+        assert instance._db is None
 
     @pytest.mark.asyncio
     async def test_lifespan_reuses_pre_seeded_client(self) -> None:
@@ -594,15 +605,14 @@ class TestMongoLifecycle:
 
         ctx = AppContext(FrameworkConfig())
         pre = AsyncEmbeddedClient()
-        # Seed ONLY the context (the documented escape hatch) — the lifespan
-        # must adopt it onto the class cache so the request path finds it.
         ctx.set(_MONGO_CLIENT_KEY, pre)
-        async with MongoWidget.lifespan(ctx):
-            # Should reuse the pre-seeded client, not build a new one.
-            assert MongoResource._client is pre
-            assert MongoWidget.get_collection() is not None
+        instance = MongoWidget()
+        instance.on_register()
+        await instance.__aenter__(ctx)
+        assert instance._client is pre
+        assert instance.get_collection() is not None
+        await instance.__aexit__(None, None, None)
         await ctx.aclose()
-        assert MongoResource._client is None
 
     @pytest.mark.asyncio
     async def test_build_client_reads_mongo_config(self) -> None:
@@ -612,13 +622,16 @@ class TestMongoLifecycle:
         cfg = FrameworkConfig()
         cfg.mongo = MongoConfig(url="embedded", database="custom_db")
         ctx = AppContext(cfg)
-        client, db_name, dispose = MongoWidget.build_client(ctx)
+        instance = MongoWidget()
+        instance.on_register()
+        client, db_name, dispose = instance.build_client(ctx)
         assert client is not None
         assert db_name == "custom_db"
         await dispose()
 
     @pytest.mark.asyncio
     async def test_get_collection_raises_when_unconfigured(self) -> None:
-        # After reset (autouse fixture clears the cache), get_collection raises.
+        instance = MongoWidget()
+        instance.on_register()
         with pytest.raises(ResourceyConfigError, match="no Mongo client configured"):
-            MongoWidget.get_collection()
+            instance.get_collection()

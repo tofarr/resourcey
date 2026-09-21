@@ -12,15 +12,21 @@ from typing import Any
 
 
 def resolve_import_path(fqn: str) -> Any:
-    """Import and return the object named by a fully-qualified dotted path.
+    """Import and return the object named by a fully-qualified path.
 
-    ``module.sub.Class`` -> the ``Class`` attribute of ``module.sub``.
+    Supports two forms:
+        ``module.sub.Class``  (dot-separated, attribute is the last segment)
+        ``module.sub:attr``   (colon-separated, uvicorn/gunicorn convention)
+
     Raises :class:`ValueError` for a bare name with no module part, and
     propagates :class:`ImportError` / :class:`AttributeError` from a bad path.
     """
-    module_name, _, attr_name = fqn.rpartition(".")
+    if ":" in fqn:
+        module_name, _, attr_name = fqn.rpartition(":")
+    else:
+        module_name, _, attr_name = fqn.rpartition(".")
     if not module_name:
-        raise ValueError(f"Import path {fqn!r} must be fully-qualified (module.attr)")
+        raise ValueError(f"Import path {fqn!r} must be fully-qualified (module.attr or module:attr)")
     module = importlib.import_module(module_name)
     return getattr(module, attr_name)
 

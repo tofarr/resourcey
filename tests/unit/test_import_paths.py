@@ -1,9 +1,9 @@
-"""Tests for ``resourcey.util.import_paths`` and the LazyField list-of-types
-variant (issue #21).
+"""Tests for ``resourcey.util.import_paths`` and the single-class LazyField
+variant.
 
 Covers dotted-path resolution (valid, bare-name, unimportable, missing attr,
-non-subclass) and the ``ClassVar[list[type[Base]]]`` lazy field reading both
-the JSON-array and sequential env forms, plus caching and base enforcement.
+non-subclass), the colon-form (``module:attr``), and the single-class
+``ClassVar[Base]`` lazy field.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from config_lazy_helpers import Animal, Cat
 from resourcey.config.config_base import BaseConfig
 from resourcey.config.lazy_field import LazyField
 from resourcey.resource.base import BaseResource
-from resourcey.resource.errors import ResourceyConfigError
 from resourcey.util.import_paths import resolve_import_path, resolve_import_paths
 
 # ---------------------------------------------------------------------------
@@ -29,10 +28,18 @@ class TestResolveImportPath:
     def test_resolves_class(self):
         assert resolve_import_path(f"{AppWidget.__module__}.AppWidget") is AppWidget
 
+    def test_resolves_class_colon_form(self):
+        assert resolve_import_path(f"{AppWidget.__module__}:AppWidget") is AppWidget
+
     def test_resolves_function(self):
         import json
 
         assert resolve_import_path("json.loads") is json.loads
+
+    def test_resolves_function_colon_form(self):
+        import json
+
+        assert resolve_import_path("json:loads") is json.loads
 
     def test_bare_name_raises_value_error(self):
         with pytest.raises(ValueError, match="fully-qualified"):
@@ -66,83 +73,6 @@ class TestResolveImportPaths:
         import json
 
         assert resolve_import_paths(["json.loads"]) == [json.loads]
-
-
-# ---------------------------------------------------------------------------
-# LazyField list-of-types variant
-# ---------------------------------------------------------------------------
-
-
-class _ResourcesConfig(BaseConfig):
-    """Config with a lazy list-of-resources field (prefix ``RESOURCES``)."""
-
-    @classmethod
-    def get_prefix(cls) -> str:
-        return "TESTCFG"
-
-    resources: ClassVar[list[type[BaseResource]]] = LazyField()
-
-
-class TestLazyFieldResources:
-    def test_not_resolved_at_construction(self, monkeypatch):
-        monkeypatch.delenv("TESTCFG_RESOURCES", raising=False)
-        for i in range(5):
-            monkeypatch.delenv(f"TESTCFG_RESOURCES_{i}", raising=False)
-        instance = _ResourcesConfig()
-        assert "_lazy_resources" not in instance.__dict__
-
-    def test_resolves_json_array(self, monkeypatch):
-        monkeypatch.setenv(
-            "TESTCFG_RESOURCES",
-            f'["{AppWidget.__module__}.AppWidget","{AppGadget.__module__}.AppGadget"]',
-        )
-        instance = _ResourcesConfig()
-        assert instance.resources == [AppWidget, AppGadget]
-
-    def test_resolves_sequential(self, monkeypatch):
-        monkeypatch.delenv("TESTCFG_RESOURCES", raising=False)
-        monkeypatch.setenv("TESTCFG_RESOURCES_0", f"{AppWidget.__module__}.AppWidget")
-        monkeypatch.setenv("TESTCFG_RESOURCES_1", f"{AppGadget.__module__}.AppGadget")
-        instance = _ResourcesConfig()
-        assert instance.resources == [AppWidget, AppGadget]
-
-    def test_empty_when_unset(self, monkeypatch):
-        monkeypatch.delenv("TESTCFG_RESOURCES", raising=False)
-        for i in range(5):
-            monkeypatch.delenv(f"TESTCFG_RESOURCES_{i}", raising=False)
-        instance = _ResourcesConfig()
-        assert instance.resources == []
-
-    def test_cached_on_instance(self, monkeypatch):
-        monkeypatch.setenv("TESTCFG_RESOURCES", f'["{AppWidget.__module__}.AppWidget"]')
-        instance = _ResourcesConfig()
-        first = instance.resources
-        second = instance.resources
-        assert first is second
-        assert "_lazy_resources" in instance.__dict__
-
-    def test_invalid_path_raises_config_error(self, monkeypatch):
-        monkeypatch.setenv("TESTCFG_RESOURCES", '["nonexistent.module.Nope"]')
-        instance = _ResourcesConfig()
-        with pytest.raises(ResourceyConfigError, match="resources"):
-            _ = instance.resources
-
-    def test_non_subclass_raises_config_error(self, monkeypatch):
-        monkeypatch.setenv("TESTCFG_RESOURCES", '["datetime.datetime"]')
-        instance = _ResourcesConfig()
-        with pytest.raises(ResourceyConfigError):
-            _ = instance.resources
-
-    def test_non_list_json_raises_config_error(self, monkeypatch):
-        # A JSON string (not an array) used to surface as a bare AssertionError
-        # from ListEnvParser's internal assert; it must map to ResourceyConfigError.
-        monkeypatch.setenv("TESTCFG_RESOURCES", '"not-a-list"')
-        instance = _ResourcesConfig()
-        with pytest.raises(ResourceyConfigError, match="resources"):
-            _ = instance.resources
-
-    def test_access_from_class_returns_descriptor(self):
-        assert isinstance(_ResourcesConfig.resources, LazyField)
 
 
 # ---------------------------------------------------------------------------

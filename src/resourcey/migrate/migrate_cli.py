@@ -11,9 +11,9 @@ subcommand. Wraps Alembic via :mod:`resourcey.migrate.migrate_runner`:
 
 It resolves the active config
 (:func:`resourcey.config.config_runtime.get_config`) for the database URL and
-migration settings. Resource classes are read from
-:attr:`FrameworkConfig.resources` (env ``RESOURCEY_RESOURCES``); ``env.py``
-resolves and registers them itself, so no resource list is passed to the
+migration settings. The resource manifest is read from
+:attr:`FrameworkConfig.manifest` (env ``RESOURCEY_MANIFEST``); ``env.py``
+imports and materialises it itself, so no resource list is passed to the
 runner. Generated revisions are drafts — review them before applying (see the
 ``migrations`` skill and the README for the rename-as-drop-create caveat).
 Run ``alembic`` directly to escape the wrapper.
