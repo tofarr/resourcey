@@ -600,6 +600,66 @@ class TestHttpCacheHeaders:
             assert r.headers["cache-control"].startswith("max-age=")
 
     @pytest.mark.asyncio
+    async def test_validator_only_etag_emits_no_cache(
+        self, client_factory, session_factory
+    ) -> None:
+        # Default ETag strategy (expire_in=0): a validator with no freshness
+        # window must force revalidation, otherwise browsers fall back to
+        # heuristic freshness and never echo the validator back.
+        async with client_factory(NoUpdated) as client:
+            created = await client.post("/no-updateds", json={"label": "x"})
+            rid = created.json()["id"]
+            r = await client.get(f"/no-updateds/{rid}")
+            assert r.status_code == 200
+            assert "etag" in r.headers
+            assert "expires" not in r.headers
+            assert r.headers["cache-control"] == "no-cache"
+
+    @pytest.mark.asyncio
+    async def test_validator_only_last_modified_emits_no_cache(
+        self, client_factory, session_factory
+    ) -> None:
+        # Default Last-Modified strategy (expire_in=0): same revalidation rule.
+        async with client_factory(HasUpdated) as client:
+            created = await client.post("/has-updateds", json={"label": "x"})
+            rid = created.json()["id"]
+            r = await client.get(f"/has-updateds/{rid}")
+            assert r.status_code == 200
+            assert "last-modified" in r.headers
+            assert "expires" not in r.headers
+            assert r.headers["cache-control"] == "no-cache"
+
+    @pytest.mark.asyncio
+    async def test_304_validator_only_includes_no_cache(
+        self, client_factory, session_factory
+    ) -> None:
+        # A 304 reuses the same header builder, so it must also advertise
+        # no-cache for a validator-only response.
+        async with client_factory(NoUpdated) as client:
+            created = await client.post("/no-updateds", json={"label": "x"})
+            etag = created.headers["etag"]
+            rid = created.json()["id"]
+            r = await client.get(f"/no-updateds/{rid}", headers={"If-None-Match": etag})
+            assert r.status_code == 304
+            assert r.headers["etag"] == etag
+            assert r.headers["cache-control"] == "no-cache"
+
+    @pytest.mark.asyncio
+    async def test_expiring_validator_does_not_emit_no_cache(
+        self, client_factory, session_factory
+    ) -> None:
+        # A freshness window takes precedence over the no-cache fallback:
+        # the client is optimistic within the window and revalidates after.
+        async with client_factory(EtagExpiring) as client:
+            created = await client.post("/etag-expirings", json={"label": "x"})
+            rid = created.json()["id"]
+            r = await client.get(f"/etag-expirings/{rid}")
+            assert r.status_code == 200
+            assert "etag" in r.headers
+            assert r.headers["cache-control"].startswith("max-age=")
+            assert "no-cache" not in r.headers["cache-control"]
+
+    @pytest.mark.asyncio
     async def test_304_response_includes_cache_control(
         self, client_factory, session_factory
     ) -> None:
