@@ -24,7 +24,7 @@ import base64
 import json
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Response, status
@@ -46,6 +46,7 @@ from resourcey.auth.session import SessionDep
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import get_config_as
 from resourcey.encryption.encryption_service import EncryptionService, get_encryption_service
+from resourcey.util import utc_now
 
 _SUB_CLAIM = "sub"
 _TYP_CLAIM = "ttyp"
@@ -82,12 +83,8 @@ class InvalidRedirectUriError(DevIdpError):
     """The redirect_uri does not match the project's OAuth callback URL."""
 
 
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
 def _seconds_until(expires_at: datetime) -> int:
-    return max(0, int((expires_at - _now()).total_seconds()))
+    return max(0, int((expires_at - utc_now()).total_seconds()))
 
 
 def _b64url(raw: bytes) -> str:
@@ -242,8 +239,8 @@ class DevIdpService:
     def _token_response(self, user_id: uuid.UUID, email: str) -> dict[str, Any]:
         access_ttl = timedelta(seconds=max(1, self._idp.access_token_expires_in))
         refresh_ttl = timedelta(seconds=max(1, self._idp.refresh_token_expires_in))
-        access_exp = _now() + access_ttl
-        refresh_exp = _now() + refresh_ttl
+        access_exp = utc_now() + access_ttl
+        refresh_exp = utc_now() + refresh_ttl
         access = self._mint(_DEV_ACCESS_TYP, user_id, access_ttl)
         refresh = self._mint(_DEV_REFRESH_TYP, user_id, refresh_ttl, email=email)
         return {
@@ -356,7 +353,7 @@ def _set_dev_session_cookie(
     response.set_cookie(
         key=cfg.auth.cookie_name,
         value=cookie_token,
-        max_age=max(1, int((access_expires_at - datetime.now(UTC)).total_seconds())),
+        max_age=max(1, int((access_expires_at - utc_now()).total_seconds())),
         httponly=True,
         samesite=cfg.auth.cookie_samesite,
         secure=cfg.auth.cookie_secure,

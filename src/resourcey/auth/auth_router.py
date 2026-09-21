@@ -16,7 +16,7 @@ Endpoints:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
@@ -42,6 +42,7 @@ from resourcey.auth.session import SessionDep
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import get_config_as
 from resourcey.encryption.encryption_service import get_encryption_service
+from resourcey.util import utc_now
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -69,7 +70,7 @@ def _set_session_cookie(
     response.set_cookie(
         key=cfg.auth.cookie_name,
         value=cookie_token,
-        max_age=max(1, int((access_expires_at - datetime.now(UTC)).total_seconds())),
+        max_age=max(1, int((access_expires_at - utc_now()).total_seconds())),
         httponly=True,
         samesite=cfg.auth.cookie_samesite,
         secure=cfg.auth.cookie_secure,

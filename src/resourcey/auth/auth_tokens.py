@@ -40,6 +40,7 @@ from resourcey.auth.auth_models import (
 from resourcey.config.config_framework import FrameworkConfig
 from resourcey.config.config_runtime import get_config_as
 from resourcey.encryption.encryption_service import EncryptionService, get_encryption_service
+from resourcey.util import utc_now
 
 _SUB_CLAIM = "sub"
 _TYP_CLAIM = "ttyp"
@@ -67,10 +68,6 @@ _API_KEY_PREFIX_DISPLAY_LEN = 7
 
 class InvalidTokenError(Exception):
     """Raised when a token string cannot be authenticated."""
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _base52_encode(data: bytes) -> str:
@@ -189,7 +186,7 @@ class TokenService:
         if user is None or not user.enabled:
             raise InvalidTokenError("user not found or disabled")
 
-        if exp <= _now():
+        if exp <= utc_now():
             raise InvalidTokenError("token expired")
 
         enabled = True
@@ -211,7 +208,7 @@ class TokenService:
         row = await self._load_api_key_row(hash_api_key_value(raw_key))
         if row is None:
             raise InvalidTokenError("unknown api key")
-        now = _now()
+        now = utc_now()
         exp = row.expires_at if row.expires_at is not None else datetime.max.replace(tzinfo=UTC)
         if exp <= now:
             raise InvalidTokenError("api key expired")
@@ -273,7 +270,7 @@ class TokenService:
 
     @staticmethod
     def _ttl_until(expires_at: datetime) -> timedelta:
-        ttl = _aware(expires_at) - _now()
+        ttl = _aware(expires_at) - utc_now()
         return ttl if ttl > _FLOOR_TTL else _FLOOR_TTL
 
     # ------------------------------------------------------------------ #
@@ -378,4 +375,4 @@ class TokenService:
         row = await self._session.get(IdpRefreshToken, row_id)
         if row is None:
             return False
-        return _aware(row.expires_at) > _now()
+        return _aware(row.expires_at) > utc_now()

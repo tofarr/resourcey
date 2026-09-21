@@ -28,7 +28,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from functools import lru_cache
 from typing import Any
 
@@ -36,6 +36,7 @@ from joserfc import jwe
 from joserfc.jwk import OctKey
 
 from resourcey.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
+from resourcey.util import utc_now
 
 # Only allow dir + A256GCM to prevent cryptographic agility attacks.
 _JWE_REGISTRY = jwe.JWERegistry(algorithms=["dir", "A256GCM"])
@@ -46,10 +47,6 @@ def _derive_symmetric_key(secret: str) -> OctKey:
     """Derive a 256-bit symmetric key from a secret string (SHA-256)."""
     key_256 = hashlib.sha256(secret.encode()).digest()
     return OctKey.import_key(key_256)
-
-
-def _utc_now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _urlsafe_b64decode(data: str) -> bytes:
@@ -116,7 +113,7 @@ class EncryptionService:
         ``id`` is carried in the ``kid`` header so the correct decryption key
         can be selected on read.
         """
-        now = _utc_now()
+        now = utc_now()
         jwt_payload: dict[str, Any] = {
             **payload,
             "iat": int(now.timestamp()),
