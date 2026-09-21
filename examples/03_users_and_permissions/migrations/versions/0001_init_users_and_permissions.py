@@ -7,7 +7,9 @@ Create Date: 2026-09-21 16:00:00.000000
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import sqlalchemy as sa
 from alembic import op
@@ -213,11 +215,11 @@ def _seed() -> None:
     from users_and_permissions.user_permission import UserPermission
 
     bind = op.get_bind()
-    now = bind.func.now()
+    now = datetime.now(UTC)
     admin_hash = hash_password("admin")
     regular_hash = hash_password("regular")
-    admin_id = ADMIN_ID
-    regular_id = REGULAR_ID
+    admin_id = uuid.UUID(ADMIN_ID)
+    regular_id = uuid.UUID(REGULAR_ID)
 
     user_table = User.get_sql_alchemy_model().__table__
     up_table = UserPermission.get_sql_alchemy_model().__table__
@@ -275,7 +277,5 @@ def _seed() -> None:
     bind.execute(up_table.insert(), rows)
 
 
-def _new_id() -> str:
-    import uuid
-
-    return str(uuid.uuid4())
+def _new_id() -> uuid.UUID:
+    return uuid.uuid4()
