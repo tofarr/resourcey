@@ -40,8 +40,9 @@ to the inner service unchanged.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
@@ -61,13 +62,15 @@ if TYPE_CHECKING:
 
 PermissionResolver = Callable[
     [str, Action, uuid.UUID | None, frozenset[uuid.UUID]],
-    "SearchFilter[Any] | None",
+    "Awaitable[SearchFilter[Any] | None] | SearchFilter[Any] | None",
 ]
 """Resolve the effective permission filter for a resource + action + principal.
 
 Returns the combined (OR) filter of every matching policy for
 ``(resource_type, action, user_id, groups)``, or ``None`` when no policy
-applies (deny / fail-closed). The resolver is supplied by the auth package's
+applies (deny / fail-closed). The resolver may be sync or async; async
+resolvers are awaited by :class:`SecuredService` (needed when resolution
+requires a DB round-trip). The resolver is supplied by the auth package's
 dependency layer; the wrapper itself stays storage-agnostic.
 """
 
@@ -112,17 +115,20 @@ class SecuredService(BaseService):
     # Permission filter resolution
     # ------------------------------------------------------------------
 
-    def _permission_filter(self, action: Action) -> SearchFilter[Any]:
+    async def _permission_filter(self, action: Action) -> SearchFilter[Any]:
         """The effective permission filter for *action*, or ``NoneSearchFilter`` (deny).
 
         ``None`` from the resolver (no policy applied) is treated as deny
         (fail-closed), so a resource with no configured permissions is
-        inaccessible rather than open.
+        inaccessible rather than open. The resolver may be sync or async;
+        async resolvers are awaited here (needed for DB-backed resolution).
         """
-        filt = self._resolver(self._resource_type, action, self._user_id, self._groups)
-        if filt is None:
+        raw = self._resolver(self._resource_type, action, self._user_id, self._groups)
+        if inspect.isawaitable(raw):
+            raw = await raw
+        if raw is None:
             return NONE
-        return filt
+        return raw
 
     # ------------------------------------------------------------------
     # Standard actions
@@ -130,7 +136,7 @@ class SecuredService(BaseService):
 
     async def create(self, payload: BaseModel) -> Any:
         action = Action.CREATE
-        filt = self._permission_filter(action)
+        filt = await self._permission_filter(action)
         if isinstance(filt, NoneSearchFilter):
             raise ForbiddenError(self._resource_name, action.value)
         self._authorize_create(payload)
@@ -157,15 +163,13 @@ class SecuredService(BaseService):
         result = await self._inner.read(id)
         if result is None:
             return None
-        filt = self._permission_filter(Action.READ)
+        filt = await self._permission_filter(Action.READ)
         if not filt.matches(result):
             raise NotFoundError(self._resource_name, id)
         return result
 
     async def update(self, id: Any, payload: BaseModel) -> Any:  # noqa: A002
-        filt = self._permission_filter(Action.UPDATE)
-        # Fetch first to check scope; the inner update would otherwise write
-        # before we can refuse. Reuse read so the scope check is uniform.
+        filt = await self._permission_filter(Action.UPDATE)
         existing = await self._inner.read(id)
         if existing is None:
             raise NotFoundError(self._resource_name, id)
@@ -174,7 +178,7 @@ class SecuredService(BaseService):
         return await self._inner.update(id, payload)
 
     async def delete(self, id: Any) -> None:  # noqa: A002
-        filt = self._permission_filter(Action.DELETE)
+        filt = await self._permission_filter(Action.DELETE)
         existing = await self._inner.read(id)
         if existing is None:
             raise NotFoundError(self._resource_name, id)
@@ -191,7 +195,7 @@ class SecuredService(BaseService):
         desc: bool = False,
         filters: SearchFilter[Any] | None = None,
     ) -> Any:
-        perm = self._permission_filter(Action.SEARCH)
+        perm = await self._permission_filter(Action.SEARCH)
         combined = and_filter(perm, filters) if filters is not None else perm
         return await self._inner.search(
             limit=limit, cursor=cursor, sort=sort, desc=desc, filters=combined
@@ -202,13 +206,13 @@ class SecuredService(BaseService):
         *,
         filters: SearchFilter[Any] | None = None,
     ) -> int:
-        perm = self._permission_filter(Action.COUNT)
+        perm = await self._permission_filter(Action.COUNT)
         combined = and_filter(perm, filters) if filters is not None else perm
         return await self._inner.count(filters=combined)
 
     async def batch_read(self, ids: list[Any]) -> list[Any]:
         results = await self._inner.batch_read(ids)
-        filt = self._permission_filter(Action.BATCH_READ)
+        filt = await self._permission_filter(Action.BATCH_READ)
         secured: list[Any] = []
         for item in results:
             if item is None or not filt.matches(item):
@@ -221,7 +225,7 @@ class SecuredService(BaseService):
         self,
         edits: list[tuple[Any, BaseModel]],
     ) -> list[Any]:
-        filt = self._permission_filter(Action.BATCH_EDIT)
+        filt = await self._permission_filter(Action.BATCH_EDIT)
         permitted: list[tuple[Any, BaseModel]] = []
         permitted_flags: list[bool] = []
         for edit_id, payload in edits:

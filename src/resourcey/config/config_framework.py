@@ -15,7 +15,7 @@ source of truth for "what does this app serve".
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
@@ -204,6 +204,30 @@ class AuthConfig(BaseModel):
         default_factory=IdpConfig,
         description="Identity provider (OAuth/OIDC) configuration.",
     )
+    default_permissions_json: str = Field(
+        default="",
+        description=(
+            "App-level default permission policies as a JSON string: "
+            '{"resource_type": [{"kind": "permitted"}, ...]}. '
+            "Applied to every principal (including anonymous). "
+            "Empty string means no defaults."
+        ),
+    )
+
+    @property
+    def default_permissions(self) -> dict[str, list[dict[str, Any]]]:
+        """Parse ``default_permissions_json`` into a dict (empty on error)."""
+        import json
+
+        if not self.default_permissions_json:
+            return {}
+        try:
+            parsed = json.loads(self.default_permissions_json)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return parsed
 
 
 class FrameworkConfig(BaseConfig):

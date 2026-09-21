@@ -27,9 +27,10 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -119,7 +120,8 @@ class User(AuthBase):
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True,
-        default=_gen_uuid, server_default=func.gen_random_uuid(),
+        default=_gen_uuid,
+        server_default=func.gen_random_uuid(),
     )
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
@@ -140,11 +142,13 @@ class User(AuthBase):
     )
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -155,9 +159,9 @@ class IdpRefreshToken(AuthBase):
     __tablename__ = "idp_refresh_tokens"
 
     id: Mapped[uuid.UUID] = mapped_column(
-
         primary_key=True,
-        default=_gen_uuid, server_default=func.gen_random_uuid(),
+        default=_gen_uuid,
+        server_default=func.gen_random_uuid(),
     )
     creator_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -167,13 +171,13 @@ class IdpRefreshToken(AuthBase):
     expires_at: Mapped[datetime] = mapped_column(_TZ)
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -189,9 +193,9 @@ class IdpAccessToken(AuthBase):
     __tablename__ = "idp_access_tokens"
 
     id: Mapped[uuid.UUID] = mapped_column(
-
         primary_key=True,
-        default=_gen_uuid, server_default=func.gen_random_uuid(),
+        default=_gen_uuid,
+        server_default=func.gen_random_uuid(),
     )
     refresh_token_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("idp_refresh_tokens.id", ondelete="CASCADE"),
@@ -201,13 +205,13 @@ class IdpAccessToken(AuthBase):
     expires_at: Mapped[datetime] = mapped_column(_TZ)
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -221,9 +225,9 @@ class OAuthClient(AuthBase):
     __tablename__ = "oauth_clients"
 
     id: Mapped[uuid.UUID] = mapped_column(
-
         primary_key=True,
-        default=_gen_uuid, server_default=func.gen_random_uuid(),
+        default=_gen_uuid,
+        server_default=func.gen_random_uuid(),
     )
     client_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     client_secret: Mapped[str] = mapped_column(String(8192))
@@ -231,13 +235,13 @@ class OAuthClient(AuthBase):
     enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )
 
@@ -248,9 +252,9 @@ class OAuthClientRedirectUri(AuthBase):
     __tablename__ = "oauth_client_redirect_uris"
 
     id: Mapped[uuid.UUID] = mapped_column(
-
         primary_key=True,
-        default=_gen_uuid, server_default=func.gen_random_uuid(),
+        default=_gen_uuid,
+        server_default=func.gen_random_uuid(),
     )
     client_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("oauth_clients.id", ondelete="CASCADE"),
@@ -259,8 +263,8 @@ class OAuthClientRedirectUri(AuthBase):
     uri: Mapped[str] = mapped_column(String(2048))
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
     )
 
 
@@ -275,9 +279,9 @@ class ApiKey(AuthBase):
     __tablename__ = "api_keys"
 
     id: Mapped[uuid.UUID] = mapped_column(
-
         primary_key=True,
-        default=_gen_uuid, server_default=func.gen_random_uuid(),
+        default=_gen_uuid,
+        server_default=func.gen_random_uuid(),
     )
     key_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     prefix: Mapped[str] = mapped_column(String(32))
@@ -295,12 +299,60 @@ class ApiKey(AuthBase):
     )
     created_at: Mapped[datetime] = mapped_column(
         _TZ,
-
-        default=_utcnow, server_default=func.clock_timestamp(),
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
     )
     updated_at: Mapped[datetime] = mapped_column(
         _TZ,
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
+        onupdate=func.now(),
+    )
 
-        default=_utcnow, server_default=func.clock_timestamp(),
+
+class UserPermission(AuthBase):
+    """A per-user permission policy for a resource type (issue #4).
+
+    One row per (user, resource_type, policy). The ``permission`` column stores
+    a serialized :class:`~resourcey.auth.permission.Permission` discriminated-union
+    object as JSON. At request time the
+    :class:`~resourcey.auth.permission_resolver.PermissionResolver` fetches every
+    row matching ``(user_id, resource_type)``, deserializes each policy, reduces
+    it to a :class:`~resourcey.util.search_filter.SearchFilter` for the requested
+    action, and OR-combines them (union model — no deny-wins override).
+
+    Groups/roles are deferred (issue #4 decision #1): permissions are direct
+    user-to-policy grants. The ``groups`` argument passed to
+    :meth:`~resourcey.auth.permission.Permission.to_search_filter` is always
+    empty until group storage is added; :class:`GroupPermission` is shipped now
+    for forward-compatibility.
+
+    The ``resource_type`` is the resource's type string (class name or
+    configured name), matching the key used by
+    :class:`~resourcey.auth.secured_service.SecuredService`.
+    """
+
+    __tablename__ = "user_permissions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True,
+        default=_gen_uuid,
+        server_default=func.gen_random_uuid(),
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+    )
+    resource_type: Mapped[str] = mapped_column(String(128), index=True)
+    permission: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZ,
+        default=_utcnow,
+        server_default=func.clock_timestamp(),
         onupdate=func.now(),
     )

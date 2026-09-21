@@ -92,12 +92,16 @@ async def session(framework_config: FrameworkConfig) -> AsyncSession:
 
 
 @pytest.fixture
-def token_service(session: AsyncSession, enc: EncryptionService, framework_config: FrameworkConfig) -> TokenService:
+def token_service(
+    session: AsyncSession, enc: EncryptionService, framework_config: FrameworkConfig
+) -> TokenService:
     return TokenService(session, encryption_service=enc, config=framework_config)
 
 
 @pytest.fixture
-def auth_service(session: AsyncSession, enc: EncryptionService, framework_config: FrameworkConfig) -> AuthService:
+def auth_service(
+    session: AsyncSession, enc: EncryptionService, framework_config: FrameworkConfig
+) -> AuthService:
     return AuthService(session, encryption_service=enc, config=framework_config)
 
 
@@ -128,7 +132,9 @@ class TestPassword:
 
 class TestEncryptionToken:
     def test_round_trip(self, enc: EncryptionService) -> None:
-        token = enc.create_jwe_token({"sub": "user-1", "ttyp": "cookie"}, expires_in=timedelta(hours=1))
+        token = enc.create_jwe_token(
+            {"sub": "user-1", "ttyp": "cookie"}, expires_in=timedelta(hours=1)
+        )
         payload = enc.decrypt_jwe_token(token)
         assert payload["sub"] == "user-1"
         assert payload["ttyp"] == "cookie"
@@ -161,7 +167,9 @@ class TestEncryptionToken:
 
 
 class TestTokenServiceApiKeys:
-    async def test_create_and_authenticate_api_key(self, token_service: TokenService, session: AsyncSession) -> None:
+    async def test_create_and_authenticate_api_key(
+        self, token_service: TokenService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=True)
         session.add(user)
         await session.flush()
@@ -176,7 +184,9 @@ class TestTokenServiceApiKeys:
         assert auth_token.token_type is TokenType.API_KEY
         assert auth_token.enabled is True
 
-    async def test_disabled_api_key(self, token_service: TokenService, session: AsyncSession) -> None:
+    async def test_disabled_api_key(
+        self, token_service: TokenService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=True)
         session.add(user)
         await session.flush()
@@ -192,7 +202,9 @@ class TestTokenServiceApiKeys:
         with pytest.raises(InvalidTokenError, match="unknown api key"):
             await token_service.authenticate("oh_nonexistent")
 
-    async def test_disabled_user_api_key(self, token_service: TokenService, session: AsyncSession) -> None:
+    async def test_disabled_user_api_key(
+        self, token_service: TokenService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=False)
         session.add(user)
         await session.flush()
@@ -208,7 +220,9 @@ class TestTokenServiceApiKeys:
 
 
 class TestTokenServiceJwe:
-    async def test_authenticate_cookie_token(self, token_service: TokenService, session: AsyncSession) -> None:
+    async def test_authenticate_cookie_token(
+        self, token_service: TokenService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=True)
         session.add(user)
         await session.flush()
@@ -216,7 +230,9 @@ class TestTokenServiceJwe:
         # Persist IdP tokens so the cookie can be minted.
         from resourcey.auth.auth_service import AuthService
 
-        auth_svc = AuthService(session, encryption_service=token_service._enc, config=token_service._cfg)
+        auth_svc = AuthService(
+            session, encryption_service=token_service._enc, config=token_service._cfg
+        )
         idp_tokens = {
             "access_token": "idp-access",
             "refresh_token": "idp-refresh",
@@ -233,7 +249,9 @@ class TestTokenServiceJwe:
         assert auth_token.token_type is TokenType.COOKIE
         assert auth_token.enabled is True
 
-    async def test_expired_token_rejected(self, token_service: TokenService, session: AsyncSession) -> None:
+    async def test_expired_token_rejected(
+        self, token_service: TokenService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=True)
         session.add(user)
         await session.flush()
@@ -249,14 +267,18 @@ class TestTokenServiceJwe:
         with pytest.raises(InvalidTokenError, match="token expired"):
             await token_service.authenticate(token)
 
-    async def test_refresh_token_not_accepted_as_bearer(self, token_service: TokenService, session: AsyncSession) -> None:
+    async def test_refresh_token_not_accepted_as_bearer(
+        self, token_service: TokenService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=True)
         session.add(user)
         await session.flush()
 
         from resourcey.auth.auth_service import AuthService
 
-        auth_svc = AuthService(session, encryption_service=token_service._enc, config=token_service._cfg)
+        auth_svc = AuthService(
+            session, encryption_service=token_service._enc, config=token_service._cfg
+        )
         idp_tokens = {
             "access_token": "idp-access",
             "refresh_token": "idp-refresh",
@@ -281,7 +303,9 @@ class TestTokenServiceJwe:
 
 
 class TestAuthServicePersistence:
-    async def test_persist_idp_tokens(self, auth_service: AuthService, session: AsyncSession) -> None:
+    async def test_persist_idp_tokens(
+        self, auth_service: AuthService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=True)
         session.add(user)
         await session.flush()
@@ -302,7 +326,9 @@ class TestAuthServicePersistence:
         assert auth_service._enc.decrypt_value(access_row.access_token) == "idp-access-value"
         assert auth_service._enc.decrypt_value(refresh_row.refresh_token) == "idp-refresh-value"
 
-    async def test_persist_idp_tokens_fallback_expiry(self, auth_service: AuthService, session: AsyncSession) -> None:
+    async def test_persist_idp_tokens_fallback_expiry(
+        self, auth_service: AuthService, session: AsyncSession
+    ) -> None:
         user = User(email="test@example.com", username="test", enabled=True)
         session.add(user)
         await session.flush()
@@ -329,7 +355,9 @@ class TestExpiryHelpers:
         assert abs((expiry - expected).total_seconds()) < 5
 
     def test_idp_refresh_expiry_from_refresh_expires_in(self, idp_config: IdpConfig) -> None:
-        expiry = _idp_refresh_expiry({"refresh_expires_in": 86400}, drift_seconds=60, idp=idp_config)
+        expiry = _idp_refresh_expiry(
+            {"refresh_expires_in": 86400}, drift_seconds=60, idp=idp_config
+        )
         expected = datetime.now(UTC) + timedelta(seconds=86340)
         assert abs((expiry - expected).total_seconds()) < 5
 
@@ -411,7 +439,12 @@ def _make_id_token(sub: str, email: str) -> str:
 
 class TestDevIdpFlow:
     @pytest.fixture
-    def app(self, framework_config: FrameworkConfig, enc: EncryptionService, monkeypatch: pytest.MonkeyPatch) -> object:
+    def app(
+        self,
+        framework_config: FrameworkConfig,
+        enc: EncryptionService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> object:
 
         from fastapi import FastAPI
 

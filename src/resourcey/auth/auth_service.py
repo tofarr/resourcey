@@ -293,7 +293,9 @@ class AuthService:
         scopes = _scopes_from_payload(payload)
         return await self._refresh_under_lock(user_id, row_id, scopes)
 
-    async def refresh_access_token(self, access_id: uuid.UUID) -> tuple[IdpAccessToken, IdpRefreshToken]:
+    async def refresh_access_token(
+        self, access_id: uuid.UUID
+    ) -> tuple[IdpAccessToken, IdpRefreshToken]:
         """Refresh the federated access token for *access_id* under a row lock.
 
         Called by the auth dependency's cookie auto-refresh path. Loads the
@@ -339,9 +341,7 @@ class AuthService:
             return  # A concurrent refresh already refreshed it.
 
         idp_tokens = await self._refresh_with_idp(locked_row)
-        await self._replace_idp_tokens(
-            locked_row.creator_id, idp_tokens, locked_row
-        )
+        await self._replace_idp_tokens(locked_row.creator_id, idp_tokens, locked_row)
 
     async def _refresh_under_lock(
         self,
@@ -353,9 +353,7 @@ class AuthService:
         await self._set_lock_timeout()
         try:
             result = await self._session.execute(
-                select(IdpRefreshToken)
-                .where(IdpRefreshToken.id == row_id)
-                .with_for_update()
+                select(IdpRefreshToken).where(IdpRefreshToken.id == row_id).with_for_update()
             )
             refresh_row = result.scalar_one_or_none()
         except OperationalError as exc:
@@ -429,9 +427,7 @@ class AuthService:
             await self._revoke_refresh_token(refresh_row.id)
 
     async def _revoke_refresh_token(self, row_id: uuid.UUID) -> None:
-        await self._session.execute(
-            delete(IdpRefreshToken).where(IdpRefreshToken.id == row_id)
-        )
+        await self._session.execute(delete(IdpRefreshToken).where(IdpRefreshToken.id == row_id))
 
     # ------------------------------------------------------------------ #
     # Persist / replace IdP tokens.
@@ -517,9 +513,7 @@ class AuthService:
 
     async def list_redirect_uris(self, client: OAuthClient) -> list[str]:
         result = await self._session.execute(
-            select(OAuthClientRedirectUri.uri).where(
-                OAuthClientRedirectUri.client_id == client.id
-            )
+            select(OAuthClientRedirectUri.uri).where(OAuthClientRedirectUri.client_id == client.id)
         )
         return list(result.scalars().all())
 
@@ -638,9 +632,7 @@ class AuthService:
     ) -> TokenPair:
         from resourcey.auth.auth_tokens import TokenService
 
-        token_service = TokenService(
-            self._session, encryption_service=self._enc, config=self._cfg
-        )
+        token_service = TokenService(self._session, encryption_service=self._enc, config=self._cfg)
         access_token = token_service._mint_access_token(user_id, access_row)
         refresh_token = token_service._mint_refresh_token(user_id, refresh_row)
         return TokenPair(
@@ -758,9 +750,7 @@ class AuthService:
         redirect_uri: str,
     ) -> bool:
         result = await self._session.execute(
-            select(OAuthClientRedirectUri.uri).where(
-                OAuthClientRedirectUri.client_id == client.id
-            )
+            select(OAuthClientRedirectUri.uri).where(OAuthClientRedirectUri.client_id == client.id)
         )
         patterns = list(result.scalars().all())
         return any(_wildcard_match(p, redirect_uri) for p in patterns)
