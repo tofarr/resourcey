@@ -56,56 +56,56 @@ class TestGetPrefix:
 
 class TestGetInstance:
     def test_caches_on_class(self, monkeypatch):
-        monkeypatch.delenv("RESOURCEY_DEBUG", raising=False)
+        monkeypatch.delenv("RESOURCEY_BASE_URL", raising=False)
         FrameworkConfig.clear_instance_cache()
         first = FrameworkConfig.get_instance()
         second = FrameworkConfig.get_instance()
         assert first is second
 
     def test_rebuilds_after_clear(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_DEBUG", "true")
+        monkeypatch.setenv("RESOURCEY_BASE_URL", "https://example.com")
         FrameworkConfig.clear_instance_cache()
         first = FrameworkConfig.get_instance()
-        assert first.debug is True
+        assert first.base_url == "https://example.com"
 
-        monkeypatch.setenv("RESOURCEY_DEBUG", "false")
+        monkeypatch.setenv("RESOURCEY_BASE_URL", "https://other.com")
         # Without clearing, the stale cached instance is returned.
-        assert FrameworkConfig.get_instance().debug is True
+        assert FrameworkConfig.get_instance().base_url == "https://example.com"
 
         FrameworkConfig.clear_instance_cache()
         second = FrameworkConfig.get_instance()
-        assert second.debug is False
+        assert second.base_url == "https://other.com"
         assert first is not second
 
     def test_folds_dotenv_into_environ(self, monkeypatch, tmp_path):
         env_file = tmp_path / ".env"
-        env_file.write_text("RESOURCEY_DEBUG=true\n")
+        env_file.write_text("RESOURCEY_BASE_URL=https://from-dotenv.com\n")
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("RESOURCEY_ENV_FILE", raising=False)
-        monkeypatch.delenv("RESOURCEY_DEBUG", raising=False)
+        monkeypatch.delenv("RESOURCEY_BASE_URL", raising=False)
         FrameworkConfig.clear_instance_cache()
         instance = FrameworkConfig.get_instance()
-        assert instance.debug is True
+        assert instance.base_url == "https://from-dotenv.com"
 
     def test_dotenv_path_override_via_env_file(self, monkeypatch, tmp_path):
         env_file = tmp_path / "custom.env"
-        env_file.write_text("RESOURCEY_HOST=10.0.0.1\n")
+        env_file.write_text("RESOURCEY_BASE_URL=https://custom.com\n")
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("RESOURCEY_ENV_FILE", str(env_file))
-        monkeypatch.delenv("RESOURCEY_HOST", raising=False)
+        monkeypatch.delenv("RESOURCEY_BASE_URL", raising=False)
         FrameworkConfig.clear_instance_cache()
         instance = FrameworkConfig.get_instance()
-        assert instance.host == "10.0.0.1"
+        assert instance.base_url == "https://custom.com"
 
     def test_env_overrides_dotenv(self, monkeypatch, tmp_path):
         env_file = tmp_path / ".env"
-        env_file.write_text("RESOURCEY_DEBUG=true\n")
+        env_file.write_text("RESOURCEY_BASE_URL=https://from-dotenv.com\n")
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("RESOURCEY_ENV_FILE", raising=False)
-        monkeypatch.setenv("RESOURCEY_DEBUG", "false")
+        monkeypatch.setenv("RESOURCEY_BASE_URL", "https://from-env.com")
         FrameworkConfig.clear_instance_cache()
         instance = FrameworkConfig.get_instance()
-        assert instance.debug is False
+        assert instance.base_url == "https://from-env.com"
 
     def test_missing_required_var_raises_config_error(self, monkeypatch):
         class RequiredCfg(BaseConfig):
@@ -128,7 +128,7 @@ class TestGetInstance:
 
 class TestClearInstanceCache:
     def test_clear_drops_cache(self, monkeypatch):
-        monkeypatch.delenv("RESOURCEY_DEBUG", raising=False)
+        monkeypatch.delenv("RESOURCEY_BASE_URL", raising=False)
         FrameworkConfig.clear_instance_cache()
         _ = FrameworkConfig.get_instance()
         assert "_cached_instance" in FrameworkConfig.__dict__
@@ -136,7 +136,7 @@ class TestClearInstanceCache:
         assert "_cached_instance" not in FrameworkConfig.__dict__
 
     def test_clear_on_base_clears_subclasses(self, monkeypatch):
-        monkeypatch.delenv("RESOURCEY_DEBUG", raising=False)
+        monkeypatch.delenv("RESOURCEY_BASE_URL", raising=False)
         FrameworkConfig.clear_instance_cache()
         _ = FrameworkConfig.get_instance()
         assert "_cached_instance" in FrameworkConfig.__dict__
@@ -152,22 +152,21 @@ class TestClearInstanceCache:
 class TestGenerateEnvTemplate:
     def test_defaults_instance(self):
         template = FrameworkConfig().generate_env_template()
-        assert "RESOURCEY_HOST=127.0.0.1" in template
-        assert "RESOURCEY_PORT=8000" in template
+        assert "RESOURCEY_BASE_URL=http://localhost:8000" in template
         assert "RESOURCEY_DATABASE_HOST=localhost" in template
         # Descriptions appear as comments.
-        assert "App server (uvicorn) host" in template
+        assert "Public base URL" in template
 
     def test_resolved_instance(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_HOST", "0.0.0.0")
+        monkeypatch.setenv("RESOURCEY_BASE_URL", "https://changed.com")
         FrameworkConfig.clear_instance_cache()
         instance = FrameworkConfig.get_instance()
         template = instance.generate_env_template()
-        assert "RESOURCEY_HOST=0.0.0.0" in template
+        assert "RESOURCEY_BASE_URL=https://changed.com" in template
 
     def test_explicit_prefix(self):
         template = FrameworkConfig().generate_env_template(prefix="OTHER")
-        assert "OTHER_HOST=127.0.0.1" in template
+        assert "OTHER_BASE_URL=http://localhost:8000" in template
 
 
 # ---------------------------------------------------------------------------
@@ -178,9 +177,7 @@ class TestGenerateEnvTemplate:
 class TestFrameworkConfig:
     def test_defaults_only(self):
         cfg = FrameworkConfig()
-        assert cfg.debug is False
-        assert cfg.host == "127.0.0.1"
-        assert cfg.port == 8000
+        assert cfg.base_url == "http://localhost:8000"
         assert cfg.cors_origins == []
         assert isinstance(cfg.database, DbConfig)
 

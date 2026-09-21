@@ -194,7 +194,7 @@ class TestManifestInstances:
 
 class TestConfigEscapeHatches:
     def test_config_arg_installed_as_active(self, sqlite_factory):
-        cfg = FrameworkConfig(host="1.2.3.4", port=9999)
+        cfg = FrameworkConfig(base_url="https://custom.example.com")
         ctx = AppContext(cfg)
         ctx.set(_SESSION_FACTORY_KEY, sqlite_factory)
         manifest = ResourceManifest(resources=())
@@ -322,7 +322,7 @@ class TestResourceLifecycle:
 
 class TestImportTimeSafety:
     def test_importing_manifest_does_not_read_config(self, monkeypatch):
-        for key in ("RESOURCEY_MANIFEST", "RESOURCEY_HOST", _CONFIG_CLASS_ENV):
+        for key in ("RESOURCEY_MANIFEST", "RESOURCEY_BASE_URL", _CONFIG_CLASS_ENV):
             monkeypatch.delenv(key, raising=False)
         import importlib
 

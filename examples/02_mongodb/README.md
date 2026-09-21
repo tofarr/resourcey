@@ -23,15 +23,16 @@ zero external dependencies:
 
 ```bash
 uv sync
-uv run resourcey
+uv run resourcey migrate upgrade
+uv run uvicorn message_board.app:app --reload --port 8082
 ```
 
-The app listens on **port 8082** by default.
+The app listens on **port 8082**.
 
 To use a real MongoDB server instead, set `RESOURCEY_MONGO_URL`:
 
 ```bash
-RESOURCEY_MONGO_URL=mongodb://localhost:27017 uv run resourcey
+RESOURCEY_MONGO_URL=mongodb://localhost:27017 uv run uvicorn message_board.app:app --reload --port 8082
 ```
 
 ## Resources

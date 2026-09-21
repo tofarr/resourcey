@@ -55,9 +55,8 @@ uv sync
 resourcey migrate upgrade
 
 # 3. Start the server
-uvicorn message_board.app:app --reload
-# → Uvicorn running on http://0.0.0.0:8081
-```
+uvicorn message_board.app:app --reload --port 8081
+# → Uvicorn running on http://127.0.0.1:8081
 ```
 
 Interactive API docs are at `http://127.0.0.1:8081/docs`.
@@ -77,12 +76,11 @@ The example uses the stock `FrameworkConfig` with a committed `.env` that
 points it at a local SQLite file (`message_board.db`). SQLite URLs don't fit
 the structured `protocol://user:pass@host:port/db` pattern, so the
 `RESOURCEY_DATABASE_FULL_DB_URL` escape hatch is used to pass the complete
-URL verbatim. Edit `.env` to change the database or server bind:
+URL verbatim. Edit `.env` to change the database:
 
 | Env var                            | Default                           | Purpose                          |
 | ---------------------------------- | --------------------------------- | -------------------------------- |
 | `RESOURCEY_DATABASE_FULL_DB_URL`   | `sqlite+aiosqlite:///message_board.db` | Complete SQLAlchemy URL (SQLite escape hatch). |
-| `RESOURCEY_HOST` / `RESOURCEY_PORT` | `0.0.0.0` / `8081`               | App server bind.                |
 | `RESOURCEY_RESOURCES`              | _(set in .env)_                   | Dotted import paths to resources. |
 
 To target Postgres instead, unset `RESOURCEY_DATABASE_FULL_DB_URL` and set the
