@@ -51,6 +51,16 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
 * `config` — env parser usage and `DiscriminatedUnionMixin`.
 * `pr-review-checklist` — checklist for agents reviewing PRs.
 
+### `auth2` replaces `auth`
+
+`src/resourcey/auth2/` is the successor to `src/resourcey/auth/` (issue #63)
+and **must never import it**. New authentication work goes in `auth2`; the old
+package is deleted once the replacement is complete. The first piece is
+`auth2_api_key.py`: `ApiKeyDependencyBuilder` (a `DependencyBuilder`) accepts
+any of a list of env-configured API keys and composes the check with each
+resource's service dependency, with `api_key_dependency` reusable in any
+router.
+
 ## Code structure — reusable & testable
 
 * Methods are short and single-purpose. If a method exceeds ~40 lines or does
