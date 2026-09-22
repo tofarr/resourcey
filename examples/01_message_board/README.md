@@ -54,10 +54,10 @@ directory:
 uv sync
 
 # 2. Apply the database migration (creates message_board.db)
-resourcey migrate upgrade
+uv run resourcey migrate upgrade
 
 # 3. Start the server
-uvicorn message_board.app:app --reload --port 8081
+uv run uvicorn message_board.app:app --reload --port 8081
 # → Uvicorn running on http://127.0.0.1:8081
 ```
 
