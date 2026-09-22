@@ -28,7 +28,7 @@ is the integration test that API must keep satisfying).
 ```
 01_message_board/
 ├── README.md            # this file
-├── pyproject.toml       # standalone project — depends on resourcey from git
+├── pyproject.toml       # standalone — resourcey from git (parent checkout in-repo)
 ├── .env                 # SQLite config + manifest path (committed, ready to run)
 ├── .gitignore
 ├── message_board/       # the importable app package
@@ -48,7 +48,9 @@ This example is a **standalone project**. From within the `01_message_board`
 directory:
 
 ```bash
-# 1. Install dependencies (pulls resourcey from its main branch on GitHub)
+# 1. Install dependencies. Inside the resourcey repo this resolves resourcey
+#    from the parent checkout (your branch); a copied-out example falls back to
+#    main — see "Running inside the resourcey repository" below.
 uv sync
 
 # 2. Apply the database migration (creates message_board.db)
@@ -60,6 +62,22 @@ uvicorn message_board.app:app --reload --port 8081
 ```
 
 Interactive API docs are at `http://127.0.0.1:8081/docs`.
+
+### Running inside the resourcey repository
+
+The `pyproject.toml` depends on `resourcey` from GitHub `main`, but adds a
+`[tool.uv.sources]` override to the parent checkout (`../..`). So when this
+example lives inside a resourcey checkout, `uv sync` builds the working tree —
+your branch or PR — not published `main`. This is the mode the CI e2e job uses,
+so the example is a real integration test for the code under review.
+
+A copy of this directory placed outside the repo can no longer resolve that
+relative path. Run it with the override disabled to fall back to the git
+dependency:
+
+```bash
+uv sync --no-sources        # and `uv run --no-sources ...` thereafter
+```
 
 ### Testing
 
