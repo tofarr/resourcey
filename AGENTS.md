@@ -26,6 +26,18 @@ pagination) do not need to be rejected or aliased — they may simply be
 ignored. Optimize for a clean, minimal API surface over migration ergonomics
 until the first release.
 
+## Repo layout
+
+* `src/resourcey/` — the framework.
+* `examples/01_message_board`, `02_mongodb`, `03_api_key_auth` — standalone
+  `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
+  `.env`. They are excluded from the root ruff/mypy config and linted as
+  standalone projects.
+* `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
+  launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
+  `.env` applies) and `python` pointing at that example's `.venv`. Ports:
+  8081 (01), 8082 (02), 8083 (03).
+
 ## Core design principles
 
 * **Resource-oriented.** A resource is the central unit. One declaration

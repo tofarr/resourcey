@@ -25,6 +25,7 @@ build/
 .vscode/*
 !.vscode/settings.json
 !.vscode/launch.json
+!.vscode/tasks.json
 
 # OS
 .DS_Store

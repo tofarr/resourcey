@@ -1,0 +1,67 @@
+{
+    // Debug configurations for the example apps under examples/.
+    //
+    // Each example is a standalone uv project with its own virtualenv
+    // (examples/<name>/.venv) and a committed .env. Because the framework's
+    // config loader reads .env relative to the process working directory, each
+    // config sets "cwd" to the example directory — that is what makes the
+    // example's database, manifest path, and auth posture apply.
+    //
+    // The preLaunchTask (see tasks.json) syncs the example's virtualenv and
+    // applies the Alembic migration, so a fresh clone can be debugged without
+    // any manual setup. Uvicorn's --reload is intentionally omitted: the
+    // reloader restarts the process and detaches the debugger.
+    //
+    // The "python" paths are the Linux/macOS venv layout; on Windows use
+    // ".venv\\Scripts\\python.exe". See examples/*/README.md for details.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug 01 — Message Board (SQLite)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["message_board.app:app", "--port", "8081"],
+            "cwd": "${workspaceFolder}/examples/01_message_board",
+            "python": "${workspaceFolder}/examples/01_message_board/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 01_message_board"
+        },
+        {
+            "name": "Debug 02 — Message Board (MongoDB, embedded)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["message_board.app:app", "--port", "8082"],
+            "cwd": "${workspaceFolder}/examples/02_mongodb",
+            "python": "${workspaceFolder}/examples/02_mongodb/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: sync 02_mongodb"
+        },
+        {
+            "name": "Debug 03 — API Key Auth (SQLite)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["api_key_auth.app:app", "--port", "8083"],
+            "cwd": "${workspaceFolder}/examples/03_api_key_auth",
+            "python": "${workspaceFolder}/examples/03_api_key_auth/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 03_api_key_auth"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Debug all examples",
+            "configurations": [
+                "Debug 01 — Message Board (SQLite)",
+                "Debug 02 — Message Board (MongoDB, embedded)",
+                "Debug 03 — API Key Auth (SQLite)"
+            ],
+            "stopAll": true
+        }
+    ]
+}
