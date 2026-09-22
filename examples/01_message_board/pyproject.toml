@@ -5,8 +5,10 @@ description = "Example 01 — a message board app built on resourcey (SQLite by 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # Pull resourcey from its main branch on GitHub. This mirrors the real
-    # consumer situation: copy this directory anywhere, `uv sync`, and run.
+    # resourcey from GitHub main. A standalone copy of this example installs
+    # this git dependency directly; inside the resourcey repository the
+    # [tool.uv.sources] override below redirects it to the parent checkout
+    # (your branch or PR) instead.
     "resourcey @ git+https://github.com/tofarr/resourcey.git@main",
     # SQLite async driver — the example defaults to a local SQLite file.
     "aiosqlite>=0.22",
@@ -31,6 +33,13 @@ packages = ["message_board"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[tool.uv.sources]
+# Resolve resourcey from the parent checkout when running inside the resourcey
+# repository — this is what makes the example test your branch/PR, not main.
+# A standalone copy no longer finds that path; run `uv sync --no-sources` there
+# to fall back to the git dependency declared above (see README).
+resourcey = { path = "../..", editable = true }
 
 [tool.ruff]
 target-version = "py311"

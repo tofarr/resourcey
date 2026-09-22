@@ -57,12 +57,10 @@ jobs:
       - uses: astral-sh/setup-uv@v3
       - name: Install example dependencies
         working-directory: ${{ matrix.example }}
+        # The example's [tool.uv.sources] override resolves resourcey from the
+        # parent checkout, so this sync installs the code under review — no
+        # separate overlay of the PR source is needed.
         run: uv sync --extra test
-      # Overlay the local (PR) resourcey source over the git@main dependency
-      # so the E2E suites verify the code under review, not the published main.
-      - name: Install local resourcey (editable)
-        working-directory: ${{ matrix.example }}
-        run: uv pip install -e ${GITHUB_WORKSPACE}
       - name: Run E2E suite
         working-directory: ${{ matrix.example }}
         run: uv run pytest -q

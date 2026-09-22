@@ -22,6 +22,8 @@ implementation of the MongoDB API. This means you can run the example with
 zero external dependencies:
 
 ```bash
+# Inside the resourcey repo, `uv sync` builds the parent checkout (your branch);
+# a copied-out example falls back to main — run `uv sync --no-sources` there.
 uv sync
 uv run resourcey migrate upgrade
 uv run uvicorn message_board.app:app --reload --port 8082
@@ -71,4 +73,16 @@ declaration; the default `migrate_document` is a no-op.
 ```bash
 uv sync --extra test
 uv run pytest
+```
+
+### Running inside the resourcey repository
+
+`pyproject.toml` depends on `resourcey` from GitHub `main`, but adds a
+`[tool.uv.sources]` override to the parent checkout (`../..`). Inside a
+resourcey checkout `uv sync` therefore builds the working tree — your branch or
+PR — instead of published `main`. A copy of this directory placed outside the
+repo cannot resolve that path; run it with the override disabled:
+
+```bash
+uv sync --no-sources        # and `uv run --no-sources ...` thereafter
 ```
