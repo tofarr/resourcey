@@ -25,7 +25,13 @@ list form is what supports key rotation (add the new key, then remove the old
 one once no client presents it).
 
 An empty key list is a deliberate fail-closed posture: every request is denied
-with ``403``.
+with ``401``.
+
+A request that presents no key and one that presents a mismatched key are
+answered identically (``401``, with a ``WWW-Authenticate: Bearer`` challenge),
+so the endpoint does not reveal whether the presented credential was merely
+absent or actually wrong, and the response complies with the HTTP requirement
+that a ``401`` carry a challenge.
 """
 
 from __future__ import annotations
@@ -48,8 +54,13 @@ if TYPE_CHECKING:
 
 API_KEY_HEADER_NAME = "X-API-Key"
 
+# The challenge sent with a 401. ``Bearer`` is the canonical scheme for the
+# ``Authorization`` fallback; the dedicated ``X-API-Key`` header has no
+# registered scheme, so it is described in the realm instead.
+API_KEY_CHALLENGE = 'Bearer realm="api-key"'
+
 # Both schemes are declared ``auto_error=False`` so the dependency, not the
-# scheme, decides the response (a single 403 for absent and mismatched alike).
+# scheme, decides the response (a single 401 for absent and mismatched alike).
 # Declaring them via ``Security`` keeps the schemes visible in the OpenAPI
 # schema (issue #62: authentication stays a FastAPI ``Depends``).
 _api_key_header = APIKeyHeader(
@@ -75,7 +86,7 @@ class ApiKeyDependencyBuilder(DependencyBuilder):
     grants access to every resource).
 
     Instantiating with no keys is valid and fails closed — every request is
-    denied with ``403`` — so a missing configuration never silently opens the
+    denied with ``401`` — so a missing configuration never silently opens the
     API.
     """
 
@@ -117,16 +128,17 @@ class ApiKeyDependencyBuilder(DependencyBuilder):
         The key is read from the ``X-API-Key`` header or, failing that, from the
         ``Authorization: Bearer`` header. A request that presents no key and one
         that presents a key matching none of :attr:`api_keys` are answered
-        identically (``403``) so the endpoint does not reveal whether a
-        credential was expected.
+        identically (``401``, with a ``WWW-Authenticate`` challenge) so the
+        endpoint does not reveal whether a credential was expected.
         """
         presented = x_api_key
         if presented is None and bearer is not None:
             presented = bearer.credentials
         if not self.is_valid_api_key(presented):
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing API key.",
+                headers={"WWW-Authenticate": API_KEY_CHALLENGE},
             )
 
     def is_valid_api_key(self, presented: str | None) -> bool:

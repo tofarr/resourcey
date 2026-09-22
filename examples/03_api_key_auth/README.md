@@ -3,7 +3,7 @@
 A message board (like example 01) secured by a single **API key read from the
 environment**. There are no users, no sessions, no auth tables, and no
 `/auth/*` routes: a request that presents a valid key gets the full REST API, and
-anything else gets `403`.
+anything else gets `401`.
 
 This is the simplest end-to-end demonstration of issue #63's authentication
 seam — the `resourcey.auth2` package (the successor to `resourcey.auth`) — and
@@ -17,7 +17,7 @@ from one config value.
 | API-key auth | `resourcey.auth2.auth2_api_key.ApiKeyDependencyBuilder` | Reads accepted keys from config; no users, no DB, no sessions. |
 | One-value posture | `.env` | `DEPENDENCY_BUILDER_CLASS` selects the builder; `DEPENDENCY_BUILDER_API_KEYS_0` supplies the key. |
 | Key rotation | `DEPENDENCY_BUILDER_API_KEYS_*` | A list: add the new key alongside the old, deploy, then remove the old. |
-| Fail-closed | builder default | An empty key list denies every request with `403`. |
+| Fail-closed | builder default | An empty key list denies every request with `401`. |
 
 ## Resources
 
@@ -97,13 +97,13 @@ curl -X POST http://localhost:8083/threads \
 # The same key as a Bearer token also works.
 curl -H 'Authorization: Bearer example-api-key' http://localhost:8083/threads
 
-# With a wrong key → 403.
+# With a wrong key → 401.
 curl -i -X POST http://localhost:8083/threads \
   -H 'X-API-Key: nope' \
   -H 'Content-Type: application/json' \
   -d '{"title":"Nope"}'
 
-# With no key → 403.
+# With no key → 401.
 curl -i http://localhost:8083/threads
 ```
 
@@ -136,10 +136,11 @@ DEPENDENCY_BUILDER_API_KEYS_0=example-api-key
   (or a JSON array in `DEPENDENCY_BUILDER_API_KEYS`) become the accepted keys.
   Keep the list to more than one during a rotation so old and new clients both
   work while you roll the change out.
-- **`403`, consistently.** A missing key and a wrong key both return `403`, so
-  the endpoint does not reveal whether a credential was expected. The schemes
-  are declared with FastAPI `Security`, so both `X-API-Key` and `Bearer` appear
-  in the OpenAPI schema.
+- **`401`, consistently.** A missing key and a wrong key both return `401`
+  with a `WWW-Authenticate: Bearer` challenge, so the endpoint does not reveal
+  whether a credential was expected and the response complies with HTTP. The
+  schemes are declared with FastAPI `Security`, so both `X-API-Key` and
+  `Bearer` appear in the OpenAPI schema.
 - **The key stays out of the database.** There is nothing to migrate for auth —
   the example's schema is just `threads` and `messages`. The key lives only in
   the environment; in production supply it from your secret manager rather than
@@ -174,8 +175,9 @@ uv run pytest -q
 
 The smoke suite (`tests/test_smoke.py`) builds the app against an in-memory
 SQLite database with the builder selected exactly as `.env` selects it, then
-pins the three client outcomes: correct key (CRUD succeeds), incorrect key
-(`403`), and missing key (`403`) — including the `Bearer` fallback.
+pins the client outcomes: correct key (CRUD succeeds), incorrect key (`401`),
+missing key (`401`), and an empty configured key list (fail-closed) — including
+the `Bearer` fallback and the `WWW-Authenticate` challenge.
 
 ## Notes
 

@@ -384,6 +384,16 @@ class _LazyConfig(BaseConfig):
     pet: ClassVar[Animal] = LazyField()
 
 
+class _LazyConfigWithDefault(BaseConfig):
+    """Lazy field with a default, so an unset var resolves instead of raising."""
+
+    @classmethod
+    def get_prefix(cls) -> str:
+        return "LAZYCFG"
+
+    pet: ClassVar[Animal] = LazyField(default=Cat)
+
+
 class TestLazyField:
     def test_not_resolved_at_construction(self, monkeypatch):
         # No env vars set — constructing the config must not import the subclass.
@@ -413,6 +423,31 @@ class TestLazyField:
         instance = _LazyConfig()
         with pytest.raises(ResourceyConfigError, match="PET_CLASS"):
             _ = instance.pet
+
+    def test_empty_class_var_raises_instead_of_falling_back(self, monkeypatch):
+        """A set-but-empty var is a misconfiguration, not "use the default".
+
+        Regression: an empty ``{NAME}_CLASS`` used to be treated as unset and
+        silently resolve to the default (here, no default -> raise; for
+        ``dependency_builder`` -> a no-auth builder).
+        """
+        monkeypatch.setenv("PET_CLASS", "")
+        instance = _LazyConfig()
+        with pytest.raises(ResourceyConfigError, match="set but empty"):
+            _ = instance.pet
+
+    def test_empty_class_var_does_not_use_default(self, monkeypatch):
+        """Even with a default configured, an empty var raises rather than defaulting."""
+        monkeypatch.setenv("PET_CLASS", "   ")
+        instance = _LazyConfigWithDefault()
+        with pytest.raises(ResourceyConfigError, match="set but empty"):
+            _ = instance.pet
+
+    def test_unset_class_var_uses_default(self, monkeypatch):
+        """An unset var (no key at all) still falls back to the default."""
+        monkeypatch.delenv("PET_CLASS", raising=False)
+        instance = _LazyConfigWithDefault()
+        assert isinstance(instance.pet, Cat)
 
     def test_non_subclass_class_var_raises_config_error(self, monkeypatch):
         monkeypatch.setenv("PET_CLASS", f"{NotAnAnimal.__module__}.NotAnAnimal")
