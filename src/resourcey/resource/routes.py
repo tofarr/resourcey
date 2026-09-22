@@ -1,13 +1,15 @@
 """FastAPI route mounting for a resource's standard actions.
 
-The route builder asks the resource for a service via
-:meth:`~resourcey.resource.sql.SqlResource.open_service` (an async context
-manager that opens/reuses a session and yields a
-:class:`~resourcey.resource.service.SqlService`), reads
-:meth:`~resourcey.resource.base.BaseResource.get_supported_actions`, and
-wires only those routes. Each handler receives the service as a FastAPI
-dependency and calls its action methods directly (no session parameter - the
-session is instance state on the service).
+The route builder resolves the resource the outside world sees once
+(``resource.get_exposed_resource()``, issue #62), then registers routes for
+that exposed resource's supported actions. Each handler receives the service
+via a FastAPI dependency produced by the configured
+:class:`~resourcey.config.config_dependency.DependencyBuilder` (default:
+:class:`~resourcey.config.config_dependency.DefaultDependencyBuilder`, which
+uses the resource's own
+:meth:`~resourcey.resource.base.BaseResource.get_service_dependency`). The
+service's read model is the exposed resource's, so a wrapper's field hiding
+applies to the response body and not merely the OpenAPI schema.
 
 This module is the HTTP concern: response serialisation, cache headers,
 conditional ``304`` short-circuiting, error-envelope handlers, and filter /
@@ -32,6 +34,8 @@ from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request as StarletteRequest
 
 from resourcey.cache.cache_header import CacheHeader
+from resourcey.config.config_framework import FrameworkConfig
+from resourcey.config.config_runtime import get_config_as
 from resourcey.resource.base import BaseResource
 from resourcey.resource.errors import (
     ForbiddenError,
@@ -40,8 +44,8 @@ from resourcey.resource.errors import (
     ResourceyConfigError,
 )
 from resourcey.resource.missing import MISSING
-from resourcey.resource.service import Page, SqlService
-from resourcey.resource.service_base import ServiceError
+from resourcey.resource.service import Page
+from resourcey.resource.service_base import BaseService, ServiceError
 from resourcey.util import utc_now
 
 if TYPE_CHECKING:
@@ -60,44 +64,52 @@ def register_routes(
     prefix: str = "",
     tags: Sequence[str] | None = None,
 ) -> APIRouter:
-    """Build an :class:`APIRouter` with the resource's supported-action routes and include it.
+    """Build an :class:`APIRouter` with the exposed resource's action routes and include it.
 
     Accepts a ``FastAPI`` app, an ``APIRouter``, or any object with
-    ``include_router`` (duck-typed). The ``{resource}`` path segment is the
-    plural, lower-case, kebab-case name from ``resource.get_resource_path()``;
-    action sub-paths use dashes (``batch-read``, ``batch-edit``, ``count``).
-    ``tags`` defaults to ``[<RESOURCE_NAME>]`` (the resource class name).
+    ``include_router`` (duck-typed). Resolution order (issue #62):
 
-    Routes are wired only for ``resource.get_supported_actions()``. Each
-    handler resolves the service via ``resource.open_service`` (a FastAPI
-    dependency that opens a session, yields the service, and commits/closes
-    on exit) and calls the matching action method (no session parameter). A
-    route is only added if no route already exists at that path + method on
-    the target router - a developer who registers a custom route first keeps
-    it (escape hatch). Returns the built :class:`APIRouter`.
+    1. ``exposed = resource.get_exposed_resource()``. When it is ``None`` the
+       resource is internal-only and **no** routes are registered — this is the
+       sole gate on exposure, and no
+       :class:`~resourcey.config.config_dependency.DependencyBuilder` can
+       re-expose a hidden resource.
+    2. ``exposed`` drives the path, the generated models, the supported
+       actions, and the service dependency — so a wrapper's projection applies
+       to the response body, not just the schema.
 
-    When ``resource.is_exposed()`` is ``False`` no routes are registered at
-    all — the resource is internal-only (usable by the service / repository
-    layer but absent from the REST API).
+    The ``{resource}`` path segment is the plural, lower-case, kebab-case name
+    from ``exposed.get_resource_path()``; action sub-paths use dashes
+    (``batch-read``, ``batch-edit``, ``count``). ``tags`` defaults to
+    ``[<RESOURCE_NAME>]`` (the exposed resource's class name). A route is only
+    added if none already exists at that path + method on the target router — a
+    developer who registers a custom route first keeps it (escape hatch).
+    Returns the built :class:`APIRouter`.
     """
-    resource_name = type(resource).__name__
-    router = APIRouter(tags=list(tags) if tags else [resource_name])
-    if not resource.is_exposed():
-        return router
-    path = "/" + resource.get_resource_path().lstrip("/")
-    id_type = _id_python_type(resource)
-    service_dep = _service_dependency(resource)
-    supported = resource.get_supported_actions()
+    exposed = resource.get_exposed_resource()
+    if exposed is None:
+        # Hidden resource: no routes. The (empty) router's tag is irrelevant.
+        return APIRouter(tags=list(tags) if tags else [type(resource).__name__])
 
-    # A resource may narrow the service's actions (hide a route) but must not
-    # widen beyond them — otherwise a route would be wired for an action the
-    # service cannot fulfill. Assert at registration time so the mismatch
-    # surfaces immediately, not as a NotImplementedError on the first request.
-    service_actions = resource.get_service_cls().actions
-    if not supported <= service_actions:
+    # Routes are tagged with the *exposed* resource's class name (they are the
+    # exposed resource's routes: its path, models, and service dependency), not
+    # the declaring resource's — otherwise a projection's routes would be
+    # grouped in OpenAPI under the hidden internal name.
+    router = APIRouter(tags=list(tags) if tags else [type(exposed).__name__])
+
+    path = "/" + exposed.get_resource_path().lstrip("/")
+    id_type = _id_python_type(exposed)
+    service_dep = _service_dependency(exposed)
+    supported = exposed.get_supported_actions()
+
+    # A resource may narrow its own actions (hide a route) but must not widen
+    # beyond them — otherwise a route would be wired for an action the service
+    # cannot fulfil. Assert at registration time so the mismatch surfaces
+    # immediately, not as a NotImplementedError on the first request.
+    if not supported <= exposed.actions:
         raise ResourceyConfigError(
-            f"{resource_name}.get_supported_actions()={sorted(supported)} is not a "
-            f"subset of {resource.get_service_cls().__name__}.actions={sorted(service_actions)}; "
+            f"{type(exposed).__name__}.get_supported_actions()={sorted(supported)} is not a "
+            f"subset of its actions={sorted(exposed.actions)}; "
             f"narrowing is allowed, widening is not."
         )
 
@@ -108,46 +120,46 @@ def register_routes(
     from resourcey.resource.service_base import Action
 
     if Action.SEARCH in supported:
-        _add_search_route(router, path, resource, service_dep)
+        _add_search_route(router, path, exposed, service_dep)
     if Action.COUNT in supported:
-        _add_count_route(router, path, resource, service_dep)
+        _add_count_route(router, path, exposed, service_dep)
     if Action.BATCH_READ in supported:
-        _add_batch_read_route(router, path, id_type, resource, service_dep)
+        _add_batch_read_route(router, path, id_type, exposed, service_dep)
     if Action.BATCH_EDIT in supported:
-        _add_batch_edit_route(router, path, resource, service_dep)
+        _add_batch_edit_route(router, path, exposed, service_dep)
     if Action.CREATE in supported:
-        _add_create_route(router, path, resource, service_dep)
+        _add_create_route(router, path, exposed, service_dep)
     if Action.READ in supported:
-        _add_read_route(router, path, id_type, resource, service_dep)
+        _add_read_route(router, path, id_type, exposed, service_dep)
     if Action.UPDATE in supported:
-        _add_update_route(router, path, id_type, resource, service_dep)
+        _add_update_route(router, path, id_type, exposed, service_dep)
     if Action.DELETE in supported:
-        _add_delete_route(router, path, id_type, resource, service_dep)
+        _add_delete_route(router, path, id_type, exposed, service_dep)
 
     app_or_router.include_router(router, prefix=prefix)
     return router
 
 
 # ---------------------------------------------------------------------------
-# Service dependency (open_service -> FastAPI dependency)
+# Service dependency (get_service_dependency -> FastAPI dependency)
 # ---------------------------------------------------------------------------
 
 
 def _service_dependency(resource: BaseResource) -> Callable[..., Any]:
-    """Build a FastAPI dependency that yields a service via ``open_service``.
+    """Resolve the service dependency for ``resource`` from the active config.
 
-    ``open_service`` is an async context manager that opens (or reuses) a
-    session on ``request.state`` and yields the service. FastAPI's dependency
-    machinery drives the ``async with``; the session is committed/closed on
-    exit. Multiple resources in one request share the same session via
-    ``request.state``.
+    The :class:`~resourcey.config.config_dependency.DependencyBuilder` is read
+    from :class:`~resourcey.config.config_framework.FrameworkConfig` (a
+    ``LazyField`` defaulting to
+    :class:`~resourcey.config.config_dependency.DefaultDependencyBuilder`), so
+    one setting swaps the per-request dependency for every resource at once.
+    The builder's return is non-optional: it never suppresses routes (only
+    ``get_exposed_resource() is None`` does), so a misconfigured posture fails
+    loudly at registration time rather than making a resource vanish.
     """
-
-    async def dependency(request: Request) -> Any:
-        async with resource.open_service(request) as service:
-            yield service
-
-    return dependency
+    config = get_config_as(FrameworkConfig)
+    builder = config.dependency_builder
+    return builder.get_service_dependency(resource)
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +179,7 @@ def _add_create_route(
             request, result, service._ctx(), header, status.HTTP_201_CREATED
         )
 
-    handler.__annotations__ = {"request": Request, "payload": create_model, "service": SqlService}
+    handler.__annotations__ = {"request": Request, "payload": create_model, "service": BaseService}
     _route(router, path, ["POST"], handler, response_model=None)
 
 
@@ -179,7 +191,7 @@ def _add_read_route(
         header = service.compute_cache_header([result])
         return _cached_json_response(request, result, service._ctx(), header)
 
-    handler.__annotations__ = {"request": Request, "id": id_type, "service": SqlService}
+    handler.__annotations__ = {"request": Request, "id": id_type, "service": BaseService}
     _route(router, f"{path}/{{id}}", ["GET"], handler, response_model=None)
 
 
@@ -197,7 +209,7 @@ def _add_update_route(
         "request": Request,
         "id": id_type,
         "payload": update_model,
-        "service": SqlService,
+        "service": BaseService,
     }
     _route(router, f"{path}/{{id}}", ["PATCH"], handler, response_model=None)
 
@@ -209,7 +221,7 @@ def _add_delete_route(
         await service.delete(id)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    handler.__annotations__ = {"id": id_type, "service": SqlService}
+    handler.__annotations__ = {"id": id_type, "service": BaseService}
     _route(router, f"{path}/{{id}}", ["DELETE"], handler, response_model=None)
 
 
@@ -278,7 +290,7 @@ def _sortable_search_handler(
         "cursor": str | None,
         "sort": sort_enum | None,
         "desc": bool,
-        "service": SqlService,
+        "service": BaseService,
     }
     return handler
 
@@ -319,7 +331,7 @@ def _sortless_search_handler(
         "request": Request,
         "limit": int,
         "cursor": str | None,
-        "service": SqlService,
+        "service": BaseService,
     }
     return handler
 
@@ -352,7 +364,7 @@ def _add_count_route(
         header = service.compute_count_cache_header(total, resolved)
         return _cached_json_response(request, total, None, header)
 
-    handler.__annotations__ = {"request": Request, "service": SqlService}
+    handler.__annotations__ = {"request": Request, "service": BaseService}
     _route(router, count_path, ["GET"], handler, response_model=None)
 
 
@@ -366,7 +378,7 @@ def _add_batch_read_route(
         header = service.compute_cache_header(result)
         return _cached_json_response(request, result, service._ctx(), header)
 
-    handler.__annotations__ = {"request": Request, "id": list[id_type], "service": SqlService}
+    handler.__annotations__ = {"request": Request, "id": list[id_type], "service": BaseService}
     _route(router, batch_path, ["GET"], handler, response_model=None)
 
 
@@ -388,7 +400,7 @@ def _add_batch_edit_route(
     handler.__annotations__ = {
         "request": Request,
         "edits": list[item_model],  # type: ignore[valid-type]
-        "service": SqlService,
+        "service": BaseService,
     }
     _route(router, batch_path, ["POST"], handler, response_model=None)
 
@@ -474,6 +486,11 @@ def _resolve_filters(
     dropped, any ``field__op`` query key not in the declared filter class is
     rejected here. When the resource declares no filter class, any
     ``field__op`` param is rejected outright.
+
+    A param naming a field outside :meth:`BaseResource.get_queryable_fields`
+    is rejected too: a wrapper that projects a field away must not leave it
+    filterable (``?secret__eq=value`` discloses the value of a field the
+    outside world never sees).
     """
     filter_params = {k for k in request.query_params if "__" in k}
     if not filter_params:
@@ -486,6 +503,10 @@ def _resolve_filters(
     unknown = filter_params - set(filter_cls.model_fields)
     if unknown:
         raise InvalidInputError(f"Unknown filter parameters {sorted(unknown)}.")
+    queryable = resource.get_queryable_fields()
+    non_queryable = {k for k in filter_params if k.rpartition("__")[0] not in queryable}
+    if non_queryable:
+        raise InvalidInputError(f"Unknown filter parameters {sorted(non_queryable)}.")
     return filters
 
 

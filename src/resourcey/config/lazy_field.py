@@ -27,6 +27,9 @@ from resourcey.util.import_paths import resolve_import_paths
 if TYPE_CHECKING:
     from resourcey.config.config_base import BaseConfig
 
+# Sentinel for "no default supplied" — distinct from ``None`` (a valid default).
+_NO_DEFAULT: Any = object()
+
 
 class LazyField:
     """Descriptor that lazily resolves a polymorphic config field on first access.
@@ -40,6 +43,16 @@ class LazyField:
         class AppConfig(BaseConfig):
             my_field: ClassVar[MyPolymorphicObj] = LazyField()
 
+    An optional ``default`` supplies the value used when the ``{NAME}_CLASS``
+    env var is unset, instead of raising. ``default`` may be an instance or a
+    zero-arg callable returning one; each config instance gets its own call
+    result (so a mutable default is not shared). The default is **not** parsed
+    from the environment — it is expected to already be fully built::
+
+        dependency_builder: ClassVar[DependencyBuilder] = LazyField(
+            default=DefaultDependencyBuilder
+        )
+
     A ``ClassVar[list[type[SomeBase]]]`` field is supported too — it resolves
     a ``{NAME}`` / ``{NAME}_0`` / ``{NAME}_1`` list of dotted import paths to
     the named classes (lazily, on first access). See :meth:`_resolve_list`.
@@ -47,6 +60,10 @@ class LazyField:
 
     _owner: type[BaseConfig]
     _name: str
+    _default: Any = _NO_DEFAULT
+
+    def __init__(self, *, default: Any = _NO_DEFAULT) -> None:
+        self._default = default
 
     def __set_name__(self, owner: type[BaseConfig], name: str) -> None:
         self._owner = owner
@@ -69,6 +86,8 @@ class LazyField:
         class_var = f"{prefix}_CLASS"
         fqn = os.environ.get(class_var)
         if not fqn:
+            if self._default is not _NO_DEFAULT:
+                return self._default() if callable(self._default) else self._default
             raise ResourceyConfigError(
                 f"Missing env var '{class_var}' for lazy field '{self._name}' "
                 f"on {self._owner.__name__}"

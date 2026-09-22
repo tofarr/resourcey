@@ -12,7 +12,7 @@ is replaced by ``AsyncMockCollection`` (see ``mongo_mock.py``).
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, get_type_hints
 from uuid import UUID, uuid4
 
 import pytest
@@ -487,8 +487,12 @@ class TestMongoResourceMeta:
     def test_get_collection_name(self) -> None:
         assert MongoWidget.get_collection_name() == "mongo_widgets"
 
-    def test_get_service_cls(self) -> None:
-        assert MongoResource().get_service_cls() is MongoService
+    @pytest.mark.asyncio
+    async def test_build_service_yields_mongo_service(self, widget_resource) -> None:
+        instance = MongoWidget()
+        instance.on_register()
+        service = instance.build_service(instance, _collection(widget_resource))
+        assert isinstance(service, MongoService)
 
     def test_supported_actions_all(self) -> None:
         assert MongoResource().get_supported_actions() == frozenset(Action)
@@ -503,20 +507,27 @@ class TestMongoResourceMeta:
         with pytest.raises(ResourceyConfigError):
             instance.get_collection()
 
-    def test_open_service_yields_service(self, widget_resource) -> None:
-        # configure already done by fixture; just check open_service yields
-        import asyncio
+    @pytest.mark.asyncio
+    async def test_get_service_dependency_yields_service(self, widget_resource) -> None:
+        # configure already done by fixture; just check the dependency yields
+        import contextlib
 
-        async def _run() -> Any:
-            instance = MongoWidget()
-            # open_service calls get_collection which reads _db; seed it
-            # with a dict-like holding the widget collection.
-            instance._db = {MongoWidget.get_collection_name(): _collection(widget_resource)}
-            async with instance.open_service(request=None) as svc:  # type: ignore[arg-type]
-                return svc
-
-        svc = asyncio.run(_run())
+        instance = MongoWidget()
+        # open_storage calls get_collection which reads _db; seed it
+        # with a dict-like holding the widget collection.
+        instance._db = {MongoWidget.get_collection_name(): _collection(widget_resource)}
+        async with contextlib.aclosing(instance.get_service_dependency(None)) as dep:  # type: ignore[arg-type]
+            svc = await dep.__anext__()
         assert isinstance(svc, MongoService)
+
+    def test_service_dependency_is_a_request_dependency(self) -> None:
+        """The mongo path inherits the base dependency, whose ``request`` is
+        annotated ``Request`` — so FastAPI injects it instead of parsing it as
+        a query parameter (an unannotated override broke every mongo route)."""
+        from fastapi import Request
+
+        hints = get_type_hints(MongoWidget().get_service_dependency)
+        assert hints["request"] is Request
 
 
 class TestImportGuard:

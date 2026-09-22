@@ -14,12 +14,11 @@ from uuid import UUID, uuid4
 
 from pydantic import Field
 from resourcey.resource.field import ResourceyField
+from resourcey.resource.sql import SqlResource
 from sqlalchemy import Column, ForeignKey, Uuid
 
-from users_and_permissions._secured import SecuredSqlResource
 
-
-class Thread(SecuredSqlResource):
+class Thread(SqlResource):
     """A message-board thread.
 
     Fields:

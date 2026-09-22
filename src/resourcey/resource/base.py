@@ -1,7 +1,8 @@
 """``BaseResource`` and the storage-agnostic resource declaration layer.
 
-A resource is the central unit of resourcey. ``BaseResource`` is an ABC (not a
-Pydantic model): a subclass declares fields with the ordinary annotation +
+A resource is the central unit of resourcey. ``BaseResource`` is a plain
+extension point (not a Pydantic model): a subclass declares fields with the
+ordinary annotation +
 ``Field()`` / default syntax, and the framework introspects that declaration
 to drive the generated Pydantic create / read / update models. Every
 generation step is a single-purpose, overridable *instance* method so a
@@ -26,6 +27,10 @@ Generated models and resolved values are cached on the class so repeated calls
 are cheap. The caches are non-annotated class attributes (so they are not
 treated as declared fields) and are stored per-subclass.
 
+Exposure is decided by :meth:`BaseResource.get_exposed_resource` — it returns
+the resource the outside world sees (default ``self``; ``None`` means
+internal-only) and is the single gate on REST presence (issue #62).
+
 All generation hooks are **instance methods** (not classmethods). This lets a
 wrapper hold a reference to an inner resource and selectively override
 individual hooks while delegating the rest (the composition pattern of choice
@@ -37,7 +42,9 @@ behave exactly as before; a wrapper overrides caching to be per-instance.
 from __future__ import annotations
 
 import types
-from abc import ABC, abstractmethod
+from abc import ABC
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from functools import reduce
 from typing import (
     TYPE_CHECKING,
@@ -50,6 +57,7 @@ from typing import (
     get_type_hints,
 )
 
+from fastapi import Request
 from pydantic import BaseModel, Field, SecretStr, create_model, field_serializer, field_validator
 from pydantic.fields import FieldInfo
 
@@ -57,6 +65,7 @@ from resourcey.app_context import AppContext
 from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.field import ResourceyField
 from resourcey.resource.missing import MISSING
+from resourcey.resource.service_base import Action, BaseService
 from resourcey.util.naming import camel_to_kebab, pluralize
 from resourcey.util.secret_serialization import dump_secret_str, load_secret_str
 
@@ -70,12 +79,17 @@ if TYPE_CHECKING:
 
 
 class BaseResource(ABC):
-    """Abstract base class for resource declarations.
+    """Base class for resource declarations.
 
     A *declaration* class, not a data model: subclass it and declare fields
     with the ordinary annotation + ``Field()`` / default syntax, and the
     framework derives the create / read / update Pydantic models from that
     single declaration. Each public generation method is an overridable hook.
+
+    Subclasses :class:`~abc.ABC`, but no method is left abstract: the
+    storage-specific hooks (:meth:`build_service`, ``get_orm_model``) raise at
+    call time instead, so a subclass that implements only the parts it needs
+    still instantiates and fails with a clear error if a missing hook is used.
 
     ``BaseResource`` is storage-agnostic - it does not know about SQLAlchemy,
     sessions, or persistence. SQL-backed resources subclass
@@ -155,62 +169,136 @@ class BaseResource(ABC):
     # Exposure control
     # ------------------------------------------------------------------
 
-    def is_exposed(self) -> bool:
-        """Whether this resource appears in the REST API (default: ``True``).
+    def get_exposed_resource(self) -> BaseResource | None:
+        """Which resource the outside world sees (default: ``self``).
 
-        When ``False`` the route builder skips this resource entirely — no
-        endpoints are registered. This separates *exposure* (REST presence)
-        from *support* (what the service can do): an internal-only resource
-        returns ``False`` here while still being usable by the service /
-        repository layer for background work. A
-        :class:`~resourcey.resource.wrapper.WrapperResourceBase` that wraps
-        an internal resource returns ``True`` to expose a (possibly narrowed)
-        public variant.
+        This is the **single** gate on REST presence (issue #62):
+
+        * ``self`` (the default) — the resource is served as declared.
+        * a *different* resource (typically a
+          :class:`~resourcey.resource.wrapper.WrapperResourceBase`) — that
+          resource is served instead: it drives the schemas, the service, and
+          the route set. This is how "the outside world sees this projection"
+          is expressed on the resource itself, so an internal resource with a
+          write-only secret no longer needs a second external declaration.
+        * ``None`` — the resource is internal-only: the route builder registers
+          nothing (the old ``is_exposed() is False`` case).
+
+        Only ``None`` suppresses routes; a
+        :class:`~resourcey.config.config_dependency.DependencyBuilder` can never
+        re-expose a resource that hid itself. A wrapper does **not** override
+        this (it returns ``self`` — see
+        :class:`~resourcey.resource.wrapper.WrapperResourceBase`).
         """
-        return True
+        return self
 
     # ------------------------------------------------------------------
     # Service + action surface
     # ------------------------------------------------------------------
 
-    @abstractmethod
-    def get_service_cls(self) -> type[Any]:
-        """The service class this resource yields from :meth:`open_service`.
-
-        Storage-specific subclasses override this (e.g.
-        :class:`~resourcey.resource.sql.SqlResource` returns
-        :class:`~resourcey.resource.service.SqlService`).
-        """
-
-    def get_supported_actions(self) -> frozenset[Any]:
+    @property
+    def actions(self) -> frozenset[Action]:
         """The actions this resource supports (exposed over HTTP by default).
 
-        Defaults to the service class's declared :attr:`actions`
-        (``self.get_service_cls().actions``) — the service is the single
-        source of truth. A resource (or a wrapper) may override this to
-        *narrow* (hide an action the service supports but should not be
-        exposed), but must never widen beyond the service's ``actions``: the
-        route builder asserts the subset relation at registration time.
+        The capability declaration: every action the underlying service can
+        fulfill. A resource (or a wrapper) *narrows* by overriding
+        :meth:`get_supported_actions`; it must never widen beyond ``actions``,
+        which the route builder asserts at registration time.
+        """
+        return frozenset(Action)
 
-        Combined with :meth:`is_exposed`, this gives two levels of
-        exposure control: resource-level (``is_exposed`` — does this resource
-        appear in REST at all?) and action-level (this method — which actions
-        does it expose?).
+    def get_supported_actions(self) -> frozenset[Any]:
+        """The subset of :attr:`actions` this resource exposes over HTTP.
+
+        Defaults to :attr:`actions` (expose everything the service can do).
+        Override to *narrow* (hide an action) — never to widen: the route
+        builder asserts ``supported ⊆ actions`` at registration time. Combined
+        with :meth:`get_exposed_resource`, this gives two levels of exposure
+        control: resource-level (in REST at all?) and action-level (which
+        actions?).
 
         Returns a ``frozenset[Action]``.
         """
-        return cast("frozenset[Any]", self.get_service_cls().actions)
+        return self.actions
 
-    @abstractmethod
-    def open_service(self, request: Any) -> Any:
-        """Async context manager yielding a service instance for ``request``.
+    def get_orm_model(self) -> Any:
+        """The ORM model backing this resource (instance seam, issue #62).
 
-        Storage-specific subclasses override this (e.g.
-        :class:`~resourcey.resource.sql.SqlResource` opens / reuses a session
-        on ``request.state`` and yields an
-        :class:`~resourcey.resource.service.SqlService`). Suitable for use as
-        an injected FastAPI dependency.
+        Defaults to ``type(self).get_sql_alchemy_model()`` for storage-backed
+        resources that expose that classmethod. Kept as an instance method (not
+        a classmethod) so a wrapper can delegate it to its *inner* instance —
+        the ORM model of a wrapper is the inner resource's table, which is what
+        lets a wrapper back a service and have field hiding take effect on the
+        response body, not merely the OpenAPI schema.
         """
+        getter = getattr(type(self), "get_sql_alchemy_model", None)
+        if getter is None:
+            raise ResourceyConfigError(
+                f"{type(self).__name__} has no SQLAlchemy model; get_orm_model() is only "
+                "available on storage-backed resources (or a wrapper delegating to one)."
+            )
+        return getter()
+
+    def migrate_document(self, doc: dict[str, Any]) -> dict[str, Any]:
+        """Lazily upgrade a stored document to the current shape on read (default no-op).
+
+        Only Mongo-backed resources have documents; declared on the base (rather
+        than only on :class:`~resourcey.mongo.mongo_resource.MongoResource`) so
+        a wrapper delegating to a Mongo resource can back a ``MongoService``
+        without the service knowing whether it holds a resource or a wrapper.
+
+        Invoked by :meth:`MongoService._doc_to_read_model` before projecting
+        a document into the read model. The default returns the document
+        unchanged. An application overrides this to coordinate schema upgrades
+        - most implementations carry a schema-version number on each document
+        and upgrade in place, but the framework does not prescribe the
+        versioning scheme, the upgrade function signatures, or the storage of
+        the version field. Returning a new dict (rather than mutating) is
+        safe and keeps the stored document untouched unless the override
+        writes back.
+        """
+        return doc
+
+    @asynccontextmanager
+    async def open_storage(self, request: Request) -> AsyncIterator[Any]:
+        """Yield this resource's per-request storage handle (default: ``None``).
+
+        The storage half of the service seam: a SQL resource yields an
+        ``AsyncSession``, a Mongo resource a collection. The base resource is
+        storage-agnostic, so it yields ``None``. A
+        :class:`~resourcey.resource.wrapper.WrapperResourceBase` delegates this
+        to its inner resource so it reuses (and commits) the same storage.
+        """
+        yield None
+
+    def build_service(self, resource: BaseResource, storage: Any) -> BaseService:
+        """Build the service for ``resource`` over ``storage``.
+
+        The service half of the seam. ``resource`` is passed explicitly (rather
+        than read from ``self``) so a wrapper can ask its inner resource for a
+        service *bound to the wrapper*, whose read model is the wrapper's
+        projection — see
+        :class:`~resourcey.resource.wrapper.WrapperResourceBase`. Storage
+        subclasses override this (e.g.
+        :class:`~resourcey.resource.sql.SqlResource` returns
+        :class:`~resourcey.resource.service.SqlService`).
+        """
+        raise ResourceyConfigError(
+            f"{type(self).__name__} does not implement build_service(); "
+            "only storage-backed resources can open a service."
+        )
+
+    async def get_service_dependency(self, request: Request) -> AsyncIterator[Any]:
+        """Yield the per-request service instance bound to this resource.
+
+        The single per-request seam the route builder consumes, via the
+        configured
+        :class:`~resourcey.config.config_dependency.DependencyBuilder`. A bound
+        async-generator method works directly as a FastAPI dependency, so this
+        may be passed straight to ``Depends(...)``.
+        """
+        async with self.open_storage(request) as storage:
+            yield self.build_service(self, storage)
 
     # ------------------------------------------------------------------
     # Field config resolution
@@ -312,21 +400,43 @@ class BaseResource(ABC):
         type(self)._cache_strategy = strategy
         return strategy
 
+    def get_queryable_fields(self) -> frozenset[str]:
+        """Field names the outside world may filter / sort on (default: all).
+
+        The single gate on the *query* surface (issue #62): ``sort=`` and
+        ``field__op=`` query params naming a field outside this set are
+        rejected. Defaults to the read model's fields, so a resource that does
+        not project (and hides nothing) keeps its existing surface.
+
+        Exists because hiding a field from the read model must also remove it
+        from the query surface: a filterable or sortable hidden field leaks
+        its value (``?secret__eq=x``) or its relative order (``?sort=secret``)
+        even though it never appears in a response body. A wrapper that
+        projects the read model narrows this to the surviving fields by
+        default (see :class:`~resourcey.resource.wrapper.WrapperResourceBase`).
+
+        Derived from the read model, so a field the resource marks
+        ``readable=False`` is non-queryable here too, not only under a wrapper.
+        """
+        return frozenset(self.get_read_model().model_fields)
+
     def get_sortable_fields(self) -> list[str]:
         """Names of fields whose ``ResourceyField.sortable`` is ``True``.
 
         The single source of truth for what the search endpoint's ``sort``
         enum may contain. Cached on the class. A field is sortable unless it
         is explicitly opted out (e.g. ``SecretStr`` fields default to
-        ``sortable=False`` -- see :meth:`get_config_for_field`).
+        ``sortable=False`` -- see :meth:`get_config_for_field`) or is outside
+        :meth:`get_queryable_fields` (a projected-away field).
         """
         cached = type(self).__dict__.get("_sortable_fields")
         if cached is not None:
             return cast(list[str], cached)
+        queryable = self.get_queryable_fields()
         sortable = [
             name
             for name, field in self.model_fields.items()
-            if self.get_config_for_field(name, field).sortable
+            if name in queryable and self.get_config_for_field(name, field).sortable
         ]
         type(self)._sortable_fields = sortable
         return sortable

@@ -233,7 +233,7 @@ async def depends_permission_resolver(
 
     Reads default permissions from the active :class:`FrameworkConfig` and
     uses the request's session (opened by :mod:`resourcey.auth.session` or
-    a resource's ``open_service``). Falls back to ``None`` session
+    a resource's ``get_service_dependency``). Falls back to ``None`` session
     (defaults-only mode) when no session is available.
     """
     from resourcey.config.config_framework import FrameworkConfig

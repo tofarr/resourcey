@@ -21,12 +21,11 @@ from uuid import UUID, uuid4
 
 from pydantic import Field
 from resourcey.resource.field import ResourceyField
+from resourcey.resource.sql import SqlResource
 from sqlalchemy import Column, ForeignKey, String, Uuid
 
-from users_and_permissions._secured import SecuredSqlResource
 
-
-class User(SecuredSqlResource):
+class User(SqlResource):
     """A local user.
 
     Fields:
