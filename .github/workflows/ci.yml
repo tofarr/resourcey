@@ -51,8 +51,8 @@ jobs:
             name: message-board (SQLite)
           - example: examples/02_mongodb
             name: message-board (MongoDB)
-          - example: examples/03_users_and_permissions
-            name: users-and-permissions (auth + security filtering)
+          - example: examples/03_api_key_auth
+            name: api-key-auth (env API key)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
