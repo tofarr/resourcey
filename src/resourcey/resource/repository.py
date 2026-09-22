@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from pydantic import BaseModel
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from resourcey.resource.sql import SqlResource
+    from resourcey.resource.base import BaseResource
     from resourcey.util.search_filter import SearchFilter
 
 
@@ -46,9 +46,9 @@ class ResourceRepository:
     construction. Each async method takes an ``AsyncSession``.
     """
 
-    def __init__(self, resource: SqlResource) -> None:
+    def __init__(self, resource: BaseResource) -> None:
         self.resource = resource
-        self.model = type(resource).get_sql_alchemy_model()
+        self.model = resource.get_orm_model()
         self.id_field = resource.get_id_field()
         self.read_model = resource.get_read_model()
 

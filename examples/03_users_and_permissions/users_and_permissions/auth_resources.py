@@ -3,12 +3,12 @@
 The auth feature ships hand-written ORM models on ``AuthBase``
 (:mod:`resourcey.auth.auth_models`) for its backing tables — IdP tokens, OAuth
 clients, and API keys. This module declares those same entities as
-``SecuredSqlResource`` subclasses so they are first-class resources: their
+``SqlResource`` subclasses so they are first-class resources: their
 tables land in ``ResourceyBase.metadata`` and drive migration autogeneration
 alongside ``Thread`` / ``Message`` / ``User`` / ``UserPermission``.
 
-They are **not exposed externally**. Each overrides :meth:`is_exposed` to
-return ``False``, so :func:`~resourcey.resource.routes.register_routes`
+They are **not exposed externally**. Each overrides :meth:`get_exposed_resource`
+to return ``None``, so :func:`~resourcey.resource.routes.register_routes`
 registers no endpoints and they never appear in the OpenAPI surface. The auth
 service continues to read/write these tables through the ``AuthBase`` ORM
 models directly; the resource declarations exist so that *every* entity is part
@@ -29,24 +29,24 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 from pydantic import Field
+from resourcey.resource.base import BaseResource
 from resourcey.resource.field import ResourceyField
+from resourcey.resource.sql import SqlResource
 from sqlalchemy import Column, ForeignKey, String, Uuid
 
-from users_and_permissions._secured import SecuredSqlResource
 
-
-class _InternalAuthResource(SecuredSqlResource):
+class _InternalAuthResource(SqlResource):
     """Base for auth backing resources: secured but never REST-exposed.
 
     The auth service owns these tables via the ``AuthBase`` ORM models; they
     are declared as resources only so their schema is generated from the same
-    ``ResourceyBase.metadata`` as everything else. ``is_exposed`` returns
-    ``False`` so the route builder skips them entirely — no endpoints, no
-    OpenAPI entries — while ``on_register`` still materialises their tables.
+    ``ResourceyBase.metadata`` as everything else. ``get_exposed_resource``
+    returns ``None`` so the route builder skips them entirely — no endpoints,
+    no OpenAPI entries — while ``on_register`` still materialises their tables.
     """
 
-    def is_exposed(self) -> bool:
-        return False
+    def get_exposed_resource(self) -> BaseResource | None:
+        return None
 
 
 class IdpRefreshToken(_InternalAuthResource):

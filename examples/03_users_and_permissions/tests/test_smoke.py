@@ -125,6 +125,11 @@ async def app() -> AsyncIterator[FastAPI]:
     cfg.auth.cookie_secure = False
     cfg.auth.cookie_samesite = "lax"
     cfg.base_url = "http://localhost:8083"
+    # Select the example's security posture explicitly (the LazyField would
+    # otherwise resolve ``DEPENDENCY_BUILDER_CLASS`` from the .env file).
+    from users_and_permissions._secured import SecuredDependencyBuilder
+
+    cfg.__dict__["_lazy_dependency_builder"] = SecuredDependencyBuilder()
     set_config(cfg)
 
     manifest.materialize()

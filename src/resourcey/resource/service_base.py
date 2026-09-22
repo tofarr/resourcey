@@ -10,14 +10,14 @@ signature changes (issue #40).
 
 Capability model
 ----------------
-The contract a service honors is its declared :attr:`actions` set - **not**
-method presence. The action methods are concrete raisers of
-``NotImplementedError`` (not ``@abstractmethod``), so a subclass is free to
-implement a subset. A partial service narrows :attr:`actions` and inherits the
-raisers for the rest; it is honoring its contract (the ``actions`` set), not
-violating it. The raisers exist only as a safety net so a misconfigured route
-surfaces clearly. Wrappers delegate :attr:`actions` to their inner service by
-default; a restricting wrapper (the future ``SecuredService``) narrows the set.
+The contract a service honors is its declared action set — held on the
+**resource** as :attr:`~resourcey.resource.base.BaseResource.actions` (issue
+#62), not on the service and not by method presence. The action methods are
+concrete raisers of ``NotImplementedError`` (not ``@abstractmethod``), so a
+subclass is free to implement a subset; the raisers exist only as a safety net
+so a misconfigured route surfaces clearly. The route builder narrows to the
+resource's ``get_supported_actions()`` and asserts it never widens beyond the
+resource's ``actions``.
 
 ``Action`` member names match the service method names exactly so the route
 builder can derive a method name from an :class:`Action` directly.
@@ -26,7 +26,7 @@ builder can derive a method name from an :class:`Action` directly.
 from __future__ import annotations
 
 import enum
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -56,9 +56,10 @@ class Action(enum.StrEnum):
 class BaseService:
     """The storage-agnostic service contract.
 
-    Subclasses implement the actions they support and narrow :attr:`actions`
-    accordingly. Methods not in :attr:`actions` are never called (the route
-    builder only wires routes for declared actions), so the raising defaults
+    Subclasses implement the actions they support; which actions a *resource*
+    exposes over HTTP is declared on the resource (``actions`` /
+    ``get_supported_actions()``, issue #62), so the service itself carries no
+    action set. Methods not exposed are never called, so the raising defaults
     are a safety net, not the contract.
 
     The methods carry no session / user / authorize parameter: those concerns
@@ -66,13 +67,9 @@ class BaseService:
     storage-agnostic and wrappable.
     """
 
-    #: The actions this service supports. Default: all. A partial service
-    #: narrows this; a wrapper delegates to its inner service's ``actions``
-    #: (or narrows them).
-    actions: ClassVar[frozenset[Action]] = frozenset(Action)
-
     # ------------------------------------------------------------------
-    # Standard actions (raising defaults - override the ones in `actions`)
+    # Standard actions (raising defaults - override the ones the resource
+    # exposes via ``get_supported_actions()``)
     # ------------------------------------------------------------------
 
     async def create(self, payload: BaseModel) -> Any:

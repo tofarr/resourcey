@@ -1,12 +1,18 @@
-"""Tests for ``WrapperResourceBase`` and ``is_exposed`` (issue #55)."""
+"""Tests for ``WrapperResourceBase`` and ``get_exposed_resource`` (issues #55, #62)."""
 
 import pytest
+import pytest_asyncio
 from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
-from resourcey.resource.routes import register_routes
+from resourcey.config.config_dependency import DependencyBuilder
+from resourcey.resource.base import BaseResource
+from resourcey.resource.routes import register_error_handlers, register_routes
 from resourcey.resource.service_base import Action
-from resourcey.resource.sql import SqlResource
+from resourcey.resource.sql import ResourceyBase, SqlResource
 from resourcey.resource.wrapper import WrapperResourceBase
 
 # ---------------------------------------------------------------------------
@@ -20,21 +26,32 @@ class WrapperWidget(SqlResource):
     secret: SecretStr = SecretStr("hidden")
 
 
-class InternalResource(SqlResource):
-    """An internal-only resource (``is_exposed=False``)."""
-
-    id: int
-    name: str
-
-    def is_exposed(self) -> bool:
-        return False
-
-
 class PublicWidget(WrapperResourceBase):
     """A wrapper that hides the ``secret`` field from the read model."""
 
     def get_read_model(self) -> type[BaseModel]:
         return self._project_read_model(exclude=frozenset({"secret"}))
+
+
+class ExposedWidget(SqlResource):
+    """An internal resource whose outside-world view is ``PublicWidget``."""
+
+    id: int
+    name: str
+    secret: SecretStr = SecretStr("hidden")
+
+    def get_exposed_resource(self) -> BaseResource | None:
+        return PublicWidget(inner=self)
+
+
+class InternalResource(SqlResource):
+    """An internal-only resource (``get_exposed_resource() is None``)."""
+
+    id: int
+    name: str
+
+    def get_exposed_resource(self) -> BaseResource | None:
+        return None
 
 
 class NarrowedActions(WrapperResourceBase):
@@ -43,13 +60,6 @@ class NarrowedActions(WrapperResourceBase):
     def get_supported_actions(self) -> frozenset:
         inner = self._inner.get_supported_actions()
         return inner & frozenset({Action.READ, Action.SEARCH})
-
-
-class HiddenWrapper(WrapperResourceBase):
-    """A wrapper that is itself not exposed."""
-
-    def is_exposed(self) -> bool:
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +89,9 @@ class TestWrapperDelegation:
         wrapper = PublicWidget(inner=WrapperWidget())
         assert wrapper.get_sortable_fields() == WrapperWidget().get_sortable_fields()
 
-    def test_get_service_cls_delegates(self):
+    def test_actions_delegates(self):
         wrapper = PublicWidget(inner=WrapperWidget())
-        assert wrapper.get_service_cls() is WrapperWidget().get_service_cls()
+        assert wrapper.actions == WrapperWidget().actions
 
     def test_get_supported_actions_delegates_by_default(self):
         wrapper = PublicWidget(inner=WrapperWidget())
@@ -99,9 +109,26 @@ class TestWrapperDelegation:
         wrapper = PublicWidget(inner=WrapperWidget())
         assert wrapper.get_resource_path() == "public-widgets"
 
-    def test_is_exposed_true_by_default(self):
+    def test_get_exposed_resource_returns_self(self):
         wrapper = PublicWidget(inner=WrapperWidget())
-        assert wrapper.is_exposed() is True
+        assert wrapper.get_exposed_resource() is wrapper
+
+    def test_get_exposed_resource_is_not_delegated_to_inner(self):
+        """A wrapper never delegates exposure to the inner resource.
+
+        Delegating would return the *inner* resource (the default hook returns
+        ``self``), discarding the wrapper's projection and re-exposing hidden
+        fields — a data-leak hazard.
+        """
+        inner = ExposedWidget()
+        wrapper = PublicWidget(inner=inner)
+        assert wrapper.get_exposed_resource() is wrapper
+        assert wrapper.get_exposed_resource() is not inner
+
+    def test_get_orm_model_delegates(self):
+        inner = WrapperWidget()
+        wrapper = PublicWidget(inner=inner)
+        assert wrapper.get_orm_model() is inner.get_orm_model()
 
     def test_on_register_delegates(self):
         inner = WrapperWidget()
@@ -123,14 +150,6 @@ class TestWrapperDelegation:
         """A wrapper that doesn't override get_read_model delegates to inner."""
         wrapper = NarrowedActions(inner=WrapperWidget())
         assert wrapper.get_read_model() is WrapperWidget().get_read_model()
-
-    def test_open_service_delegates(self):
-        wrapper = PublicWidget(inner=WrapperWidget())
-        # open_service returns an async context manager; we verify it's
-        # delegated (returns the same type as the inner resource would)
-        inner_cm = WrapperWidget().open_service(None)
-        wrapper_cm = wrapper.open_service(None)
-        assert type(wrapper_cm) is type(inner_cm)
 
     @pytest.mark.asyncio
     async def test_lifecycle_delegates(self):
@@ -201,53 +220,254 @@ class TestWrapperNarrowedActions:
 
 
 # ---------------------------------------------------------------------------
-# is_exposed
+# get_exposed_resource
 # ---------------------------------------------------------------------------
 
 
-class TestIsExposed:
-    def test_default_is_exposed_true(self):
-        assert WrapperWidget().is_exposed() is True
+class TestGetExposedResource:
+    def test_default_returns_self(self):
+        resource = WrapperWidget()
+        assert resource.get_exposed_resource() is resource
 
-    def test_internal_resource_not_exposed(self):
-        assert InternalResource().is_exposed() is False
+    def test_internal_resource_returns_none(self):
+        assert InternalResource().get_exposed_resource() is None
 
-    def test_wrapper_can_be_hidden(self):
-        wrapper = HiddenWrapper(inner=WrapperWidget())
-        assert wrapper.is_exposed() is False
-
-    def test_wrapper_exposed_by_default(self):
-        wrapper = PublicWidget(inner=WrapperWidget())
-        assert wrapper.is_exposed() is True
+    def test_resource_can_return_a_wrapper(self):
+        resource = ExposedWidget()
+        exposed = resource.get_exposed_resource()
+        assert isinstance(exposed, PublicWidget)
+        assert exposed._inner is resource
 
 
 # ---------------------------------------------------------------------------
-# Route builder skips non-exposed resources
+# Route builder honours exposure
 # ---------------------------------------------------------------------------
 
 
-class TestRouteBuilderSkipsNonExposed:
+class TestRouteBuilderExposure:
     def test_non_exposed_resource_registers_no_routes(self):
-        """A resource with is_exposed=False should register no routes."""
+        """A resource whose get_exposed_resource() is None registers no routes."""
         app = FastAPI()
-        resource = InternalResource()
-        router = register_routes(app, resource)
+        router = register_routes(app, InternalResource())
         assert len(router.routes) == 0
 
     def test_exposed_resource_registers_routes(self):
         app = FastAPI()
-        resource = WrapperWidget()
-        router = register_routes(app, resource)
+        router = register_routes(app, WrapperWidget())
         assert len(router.routes) > 0
-
-    def test_non_exposed_wrapper_registers_no_routes(self):
-        app = FastAPI()
-        wrapper = HiddenWrapper(inner=WrapperWidget())
-        router = register_routes(app, wrapper)
-        assert len(router.routes) == 0
 
     def test_exposed_wrapper_registers_routes(self):
         app = FastAPI()
-        wrapper = PublicWidget(inner=WrapperWidget())
-        router = register_routes(app, wrapper)
+        router = register_routes(app, PublicWidget(inner=WrapperWidget()))
         assert len(router.routes) > 0
+
+    def test_exposing_resource_serves_its_wrapper(self):
+        """The exposed wrapper drives the route path (not the inner resource)."""
+        app = FastAPI()
+        router = register_routes(app, ExposedWidget())
+        paths = {r.path for r in router.routes}
+        assert "/public-widgets" in paths
+        assert "/exposed-widgets" not in paths
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: the exposed wrapper drives the service (issue #62, implication 1)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def session_factory() -> async_sessionmaker[AsyncSession]:
+    """Shared in-memory SQLite engine + session factory for the HTTP tests."""
+    # Resolve ORM models before create_all so the tables exist (mirrors the
+    # eager resolution the service-level tests do at module scope).
+    for resource_type in (ExposedWidget, WrapperWidget, InternalResource):
+        resource_type().get_sql_alchemy_model()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(ResourceyBase.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    yield maker
+    await engine.dispose()
+
+
+class TestExposedResourceBacksService:
+    """Field hiding must apply to the response *body*, not just the schema.
+
+    A raw ``JSONResponse`` bypasses FastAPI's ``response_model``, so if the
+    service were built on the plain resource the hidden field would still be
+    serialised. These tests pin the response body.
+    """
+
+    @pytest.mark.asyncio
+    async def test_response_body_omits_hidden_field(self, session_factory) -> None:
+        resource = ExposedWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
+        app = FastAPI()
+        register_routes(app, resource)
+        register_error_handlers(app)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+            created = await client.post(
+                "/public-widgets",
+                json={"id": 1, "name": "n", "secret": "hunter2"},
+            )
+            assert created.status_code == 201
+            assert created.json() == {"id": 1, "name": "n"}
+            assert "secret" not in created.json()
+
+            read = await client.get("/public-widgets/1")
+            assert read.status_code == 200
+            assert read.json() == {"id": 1, "name": "n"}
+            assert "secret" not in read.json()
+
+            listed = await client.get("/public-widgets")
+            assert listed.status_code == 200
+            assert listed.json()["items"] == [{"id": 1, "name": "n"}]
+
+    @pytest.mark.filterwarnings("ignore::Warning")
+    @pytest.mark.asyncio
+    async def test_openapi_schema_matches_body(self, session_factory) -> None:
+        """The exposed read model is what the OpenAPI schema advertises."""
+        resource = ExposedWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
+        app = FastAPI()
+        register_routes(app, resource)
+        register_error_handlers(app)
+
+        schema = app.openapi()
+        props = schema["components"]["schemas"]["PublicWidgetRead"]["properties"]
+        assert set(props) == {"id", "name"}
+
+    @pytest.mark.asyncio
+    async def test_internal_only_resource_serves_nothing(self) -> None:
+        app = FastAPI()
+        register_routes(app, InternalResource())
+        paths = {r.path for r in app.routes}
+        assert not any(p.startswith("/internal-resources") for p in paths)
+
+
+# ---------------------------------------------------------------------------
+# DependencyBuilder seam (issue #62, decision 4)
+# ---------------------------------------------------------------------------
+
+
+class TestDependencyBuilderSeam:
+    def test_default_builder_returns_resource_dependency(self):
+        from resourcey.config.config_dependency import DefaultDependencyBuilder
+
+        resource = WrapperWidget()
+        builder = DefaultDependencyBuilder()
+        assert builder.get_service_dependency(resource) == resource.get_service_dependency
+
+    def test_framework_config_defaults_to_default_builder(self):
+        from resourcey.config.config_dependency import DefaultDependencyBuilder
+        from resourcey.config.config_framework import FrameworkConfig
+
+        assert isinstance(FrameworkConfig().dependency_builder, DefaultDependencyBuilder)
+
+    def test_configured_builder_swaps_dependency_for_every_resource(self, monkeypatch):
+        """Setting FrameworkConfig.dependency_builder swaps the route dependency.
+
+        Uses the LazyField env-var path: ``DEPENDENCY_BUILDER_CLASS`` points at a
+        builder that composes a custom dependency.
+        """
+        from resourcey.config.config_dependency import DefaultDependencyBuilder
+        from resourcey.config.config_framework import FrameworkConfig
+
+        monkeypatch.setenv(
+            "DEPENDENCY_BUILDER_CLASS",
+            f"{_RecordingDependencyBuilder.__module__}._RecordingDependencyBuilder",
+        )
+        builder = FrameworkConfig().dependency_builder
+        assert isinstance(builder, _RecordingDependencyBuilder)
+        assert builder.get_service_dependency(WrapperWidget()).__name__ == "recording_dependency"
+
+        # The default builder is unchanged and is what an unset var resolves to.
+        assert DefaultDependencyBuilder().get_service_dependency(WrapperWidget()) is not None
+
+    def test_builder_cannot_suppress_routes(self):
+        """Only get_exposed_resource() gates routes; the builder never does.
+
+        A builder that would raise if consulted must not be reached for an
+        internal-only resource: exposure is decided (and the builder skipped)
+        before any dependency is built.
+        """
+        from resourcey.config.config_framework import FrameworkConfig
+        from resourcey.config.config_runtime import clear_config_cache, set_config
+
+        cfg = FrameworkConfig()
+        cfg.__dict__["_lazy_dependency_builder"] = _ExplodingDependencyBuilder()
+        set_config(cfg)
+        try:
+            app = FastAPI()
+            router = register_routes(app, InternalResource())
+            assert len(router.routes) == 0
+
+            # Sanity: the builder *is* consulted for an exposed resource.
+            with pytest.raises(RuntimeError, match="builder consulted"):
+                register_routes(FastAPI(), WrapperWidget())
+        finally:
+            clear_config_cache()
+
+    @pytest.mark.filterwarnings("ignore::Warning")
+    @pytest.mark.asyncio
+    async def test_builder_composed_auth_stays_in_openapi(self, session_factory) -> None:
+        """A builder-composed auth dependency still reports its security scheme.
+
+        The scheme survives because auth stays a FastAPI ``Depends`` inside the
+        callable (not a bare ASGI layer), so clients can still discover it.
+        """
+        from fastapi import Security
+        from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+        from resourcey.config.config_framework import FrameworkConfig
+        from resourcey.config.config_runtime import clear_config_cache, set_config
+
+        scheme = HTTPBearer()
+
+        class _AuthBuilder(DependencyBuilder):
+            def get_service_dependency(self, resource):
+                async def dependency(
+                    request,
+                    _creds: HTTPAuthorizationCredentials = Security(scheme),  # noqa: B008
+                ):
+                    async with resource.open_storage(request) as storage:
+                        yield resource.build_service(resource, storage)
+
+                return dependency
+
+        resource = WrapperWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
+
+        cfg = FrameworkConfig()
+        cfg.__dict__["_lazy_dependency_builder"] = _AuthBuilder()
+        set_config(cfg)
+        try:
+            app = FastAPI()
+            register_routes(app, resource)
+            schema = app.openapi()
+            security = schema["paths"]["/wrapper-widgets"]["get"]["security"]
+            assert security == [{"HTTPBearer": []}]
+        finally:
+            clear_config_cache()
+
+
+class _RecordingDependencyBuilder(DependencyBuilder):
+    """A stand-in builder used by the LazyField-swap test."""
+
+    def get_service_dependency(self, resource):
+        return recording_dependency
+
+
+class _ExplodingDependencyBuilder(DependencyBuilder):
+    """A builder that raises if consulted, to pin the exposure-check ordering."""
+
+    def get_service_dependency(self, resource):
+        raise RuntimeError("builder consulted")
+
+
+async def recording_dependency(request):
+    yield None

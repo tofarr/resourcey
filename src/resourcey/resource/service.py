@@ -14,7 +14,7 @@ merge, pagination assembly, sort validation) and delegates data access to a
 :class:`~resourcey.resource.repository.ResourceRepository`. It is usable
 independently of HTTP - call its methods directly. Route mounting lives in
 :mod:`resourcey.resource.routes` and asks the resource for a service via
-:meth:`~resourcey.resource.sql.SqlResource.open_service`.
+:meth:`~resourcey.resource.sql.SqlResource.build_service`.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from resourcey.resource.service_base import BaseService
 
 if TYPE_CHECKING:
     from resourcey.encryption.encryption_service import EncryptionService
-    from resourcey.resource.sql import SqlResource
+    from resourcey.resource.base import BaseResource
     from resourcey.util.search_filter import SearchFilter
 
 
@@ -63,16 +63,17 @@ _MAX_LIMIT = 100
 class SqlService(BaseService):
     """The SQL-backed service exposing the standard resource actions.
 
-    Constructed from a :class:`~resourcey.resource.sql.SqlResource` subclass
-    and an ``AsyncSession`` (the session is instance state, not a per-call
-    parameter, so the action signatures stay storage-agnostic). Resolves the
-    create / update / read models and id field from the resource and caches
-    the repository instance. Each action is an overridable async method.
+    Constructed from a :class:`~resourcey.resource.base.BaseResource` (a
+    ``SqlResource`` or a wrapper delegating to one) and an ``AsyncSession``
+    (the session is instance state, not a per-call parameter, so the action
+    signatures stay storage-agnostic). Resolves the create / update / read
+    models and id field from the resource and caches the repository instance.
+    Each action is an overridable async method.
     """
 
     def __init__(
         self,
-        resource: SqlResource,
+        resource: BaseResource,
         *,
         session: AsyncSession,
         repository_cls: type[ResourceRepository] | None = None,

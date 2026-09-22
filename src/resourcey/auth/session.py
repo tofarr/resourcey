@@ -1,7 +1,7 @@
 """Request-scoped async session dependency for the auth feature (issue #4).
 
 resourcey does not have a global ``SessionDep`` like ohev2 — sessions are
-managed per-resource via ``SqlResource.open_service``. The auth layer needs
+managed per-resource via ``SqlResource.open_storage``. The auth layer needs
 its own DB access (user lookups, IdP token persistence, OAuth client CRUD),
 so this module provides a FastAPI dependency that:
 

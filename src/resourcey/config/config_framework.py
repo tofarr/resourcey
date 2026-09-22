@@ -15,11 +15,13 @@ source of truth for "what does this app serve".
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field, SecretStr
 
 from resourcey.config.config_base import BaseConfig
+from resourcey.config.config_dependency import DefaultDependencyBuilder, DependencyBuilder
+from resourcey.config.lazy_field import LazyField
 
 MIGRATIONS_DIR_DEFAULT = "migrations"
 
@@ -236,6 +238,17 @@ class FrameworkConfig(BaseConfig):
     @classmethod
     def get_prefix(cls) -> str:
         return "RESOURCEY"
+
+    # The per-request service dependency seam (issue #62). A LazyField so the
+    # concrete builder (which may live in an app / auth package the config must
+    # not import) is loaded only on first access. Defaults to
+    # DefaultDependencyBuilder, preserving pre-#62 behaviour. Follows the
+    # single-class LazyField convention and reads ``DEPENDENCY_BUILDER_CLASS``
+    # (the field name only, not the RESOURCEY_ prefix — see the list variant's
+    # get_prefix() convention).
+    dependency_builder: ClassVar[DependencyBuilder] = LazyField(  # type: ignore[assignment]
+        default=DefaultDependencyBuilder
+    )
 
     database: DbConfig = Field(
         default_factory=DbConfig, description="Database connection configuration."

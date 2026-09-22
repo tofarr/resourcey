@@ -4,7 +4,8 @@
 field collection and the generated Pydantic create / read / update models.
 ``MongoResource`` extends it with the MongoDB concerns: the collection name,
 an async ``motor`` client/factory held as instance state, and the per-request
-:meth:`open_service` that yields a :class:`~resourcey.mongo.mongo_service.MongoService`
+:meth:`open_storage` / :meth:`build_service` that yield a
+:class:`~resourcey.mongo.mongo_service.MongoService`
 bound to a collection.
 
 A non-SQL resource does **not** participate in Alembic migrations. Instead,
@@ -16,6 +17,7 @@ schema-version field, but the framework does not prescribe it.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -39,13 +41,14 @@ class MongoResource(BaseResource):
 
     Adds the Mongo concerns on top of :class:`BaseResource`: the collection
     name, a ``motor`` client / database built by ``__aenter__`` (via
-    :meth:`build_client`), and :meth:`open_service` yielding a
+    :meth:`build_client`), and :meth:`open_storage` yielding the collection
+    that :meth:`build_service` wraps in a
     :class:`~resourcey.mongo.mongo_service.MongoService`. There is no ORM
     model and no Alembic migration -- a Mongo resource stores documents
     directly and upgrades them lazily via :meth:`migrate_document`.
     """
 
-    # Per-instance ``motor`` client / collection used by ``open_service``.
+    # Per-instance ``motor`` client / collection used by ``open_storage``.
     # Set by ``__aenter__`` before the app serves requests. ``None`` means
     # unconfigured.
     _client: Any = None
@@ -71,11 +74,6 @@ class MongoResource(BaseResource):
     # ------------------------------------------------------------------
     # Service + client configuration
     # ------------------------------------------------------------------
-
-    def get_service_cls(self) -> type[Any]:
-        from resourcey.mongo.mongo_service import MongoService
-
-        return MongoService
 
     async def __aenter__(self, ctx: AppContext) -> AppContext:
         """Build (or reuse) the shared Mongo client, run indexes, then enter.
@@ -151,16 +149,28 @@ class MongoResource(BaseResource):
             )
         return self._db[type(self).get_collection_name()]
 
-    def open_service(self, request: Any) -> Any:
-        """Async context manager yielding a :class:`MongoService` for ``request``.
+    def build_service(self, resource: BaseResource, storage: Any) -> Any:
+        """Build a :class:`MongoService` bound to ``resource`` over ``storage``."""
+        from resourcey.mongo.mongo_service import MongoService
 
-        Yields a :class:`~resourcey.mongo.mongo_service.MongoService` bound to
-        this resource's collection.
+        return MongoService(resource, collection=storage)
+
+    @asynccontextmanager
+    async def open_storage(self, request: Any) -> AsyncIterator[Any]:
+        """Yield this resource's collection.
+
+        Motor manages its own connection pool, so unlike the SQL path there is
+        no per-request session to commit/close -- each operation is atomic at
+        the document level.
         """
-        return _open_mongo_service(self)
+        yield self.get_collection()
 
-        # ------------------------------------------------------------------
+    # ``get_service_dependency`` is inherited from BaseResource: it composes
+    # ``open_storage`` (above) with ``build_service``, and its ``request`` is
+    # annotated ``Request`` so FastAPI injects it rather than treating it as a
+    # query parameter.
 
+    # ------------------------------------------------------------------
     # Collection naming
     # ------------------------------------------------------------------
 
@@ -226,34 +236,9 @@ class MongoResource(BaseResource):
     # Manual migration on read (opt-in, application-defined)
     # ------------------------------------------------------------------
 
-    def migrate_document(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Lazily upgrade a document to the current shape on read (default no-op).
-
-        Invoked by :meth:`MongoService._doc_to_read_model` before projecting
-        a document into the read model. The default returns the document
-        unchanged. An application overrides this to coordinate schema upgrades
-        — most implementations carry a schema-version number on each document
-        and upgrade in place, but the framework does not prescribe the
-        versioning scheme, the upgrade function signatures, or the storage of
-        the version field. Returning a new dict (rather than mutating) is
-        safe and keeps the stored document untouched unless the override
-        writes back.
-        """
-        return doc
-
-
-@asynccontextmanager
-async def _open_mongo_service(resource: MongoResource) -> Any:
-    """Yield a :class:`MongoService` bound to the resource's collection.
-
-    Motor manages its own connection pool, so unlike the SQL path there is no
-    per-request session to commit/close — the service reads/writes the
-    collection directly and each operation is atomic at the document level.
-    """
-    from resourcey.mongo.mongo_service import MongoService
-
-    collection = resource.get_collection()
-    yield MongoService(resource, collection=collection)
+    # ``migrate_document`` is inherited from BaseResource (issue #62): it is
+    # declared on the base so a wrapper delegating to a Mongo resource can back
+    # a MongoService. See BaseResource.migrate_document for the contract.
 
 
 def _make_id_optional(cls: type[MongoResource]) -> None:

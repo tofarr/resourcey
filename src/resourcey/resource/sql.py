@@ -15,11 +15,13 @@ to materialise the ORM model whose table lands in
 from __future__ import annotations
 
 import enum
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time
 from typing import Any
 from uuid import UUID
 
+from fastapi import Request
 from pydantic import BaseModel, SecretStr
 from pydantic.fields import FieldInfo
 from sqlalchemy import (
@@ -94,12 +96,13 @@ class SqlResource(BaseResource):
     Adds the SQL concerns on top of :class:`BaseResource`: the table name,
     per-field column generation, the cached ORM model whose table is
     registered in :data:`ResourceyBase.metadata`, and the per-request
-    :meth:`open_service` that yields a
-    :class:`~resourcey.resource.service.SqlService` bound to a session.
+    :meth:`open_storage` that yields an ``AsyncSession`` (which
+    :meth:`build_service` wraps in a
+    :class:`~resourcey.resource.service.SqlService`).
     """
 
     _sqlalchemy_model: Any
-    # Per-instance session factory used by ``open_service``. Set by
+    # Per-instance session factory used by ``open_storage``. Set by
     # ``__aenter__`` (typically via ``build_session_factory``) before the app
     # serves requests. ``None`` means unconfigured.
     _session_factory: Any = None
@@ -116,11 +119,45 @@ class SqlResource(BaseResource):
     # Service + session configuration
     # ------------------------------------------------------------------
 
-    def get_service_cls(self) -> type[Any]:
-        """The service class this resource yields: :class:`SqlService`."""
+    def build_service(self, resource: BaseResource, storage: Any) -> Any:
+        """Build a :class:`SqlService` bound to ``resource`` over ``storage``.
+
+        ``resource`` is the resource the service is *for* — for a plain
+        resource that is ``self``; a wrapper passes itself so the service's
+        read model is the wrapper's projection (issue #62).
+        """
         from resourcey.resource.service import SqlService
 
-        return SqlService
+        return SqlService(resource, session=storage)
+
+    @asynccontextmanager
+    async def open_storage(self, request: Request) -> AsyncIterator[Any]:
+        """Open (or reuse) a session and yield it for ``request``.
+
+        If ``request.state.session`` already holds a session (opened by another
+        resource in the same request), it is reused so all resources share one
+        transaction; the caller that opened it owns the commit/close. Otherwise
+        a new session is opened from the resource's session factory, stored on
+        ``request.state.session``, committed on success, and closed on exit.
+        """
+        session = getattr(request.state, "session", None)
+        if session is not None:
+            yield session
+            return
+        factory = self._session_factory
+        if factory is None:
+            raise ResourceyConfigError(
+                f"{type(self).__name__} has no session factory — its lifespan "
+                "was not entered (no manifest / app_context)."
+            )
+        async with factory() as session:
+            request.state.session = session
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
 
     async def __aenter__(self, ctx: AppContext) -> AppContext:
         """Build (or reuse) the shared session factory, then enter.
@@ -163,17 +200,6 @@ class SqlResource(BaseResource):
         cfg = ctx.config if isinstance(ctx.config, FrameworkConfig) else FrameworkConfig()
         engine = create_async_engine(cfg.database.database_url)
         return async_sessionmaker(engine, expire_on_commit=False), engine.dispose
-
-    def open_service(self, request: Any) -> Any:
-        """Async context manager yielding a :class:`SqlService` for ``request``.
-
-        Opens a session (or reuses one already on ``request.state.session`` so
-        multiple resources in one request share a single transaction), yields
-        a :class:`~resourcey.resource.service.SqlService` bound to it, and
-        commits / closes on exit. Suitable for use as an injected FastAPI
-        dependency.
-        """
-        return _open_sql_service(self, request)
 
     # ------------------------------------------------------------------
     # SQLAlchemy model generation
@@ -286,35 +312,3 @@ def _column_type_for(field_name: str, annotation: Any, py_type: Any) -> Any:
             "Supply an explicit ResourceyField(column=Column(...)) for this field."
         )
     return col_type
-
-
-@asynccontextmanager
-async def _open_sql_service(resource: SqlResource, request: Any) -> Any:
-    """Open (or reuse) a session and yield a :class:`SqlService` for ``request``.
-
-    If ``request.state.session`` already holds a session (opened by another
-    resource in the same request), it is reused so all resources share one
-    transaction; the caller that opened it owns the commit/close. Otherwise a
-    new session is opened from the resource's session factory, stored on
-    ``request.state.session``, committed on success, and closed on exit.
-    """
-    from resourcey.resource.service import SqlService
-
-    session = getattr(request.state, "session", None)
-    if session is not None:
-        yield SqlService(resource, session=session)
-        return
-    factory = resource._session_factory
-    if factory is None:
-        raise ResourceyConfigError(
-            f"{type(resource).__name__} has no session factory — its lifespan "
-            "was not entered (no manifest / app_context)."
-        )
-    async with factory() as session:
-        request.state.session = session
-        try:
-            yield SqlService(resource, session=session)
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise

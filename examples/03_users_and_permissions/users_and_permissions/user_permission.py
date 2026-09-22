@@ -20,13 +20,12 @@ from uuid import UUID, uuid4
 
 from pydantic import Field
 from resourcey.resource.field import ResourceyField
+from resourcey.resource.sql import SqlResource
 from resourcey.util.search_filter import BaseSearchFilter
 from sqlalchemy import JSON, Column, ForeignKey, Uuid
 
-from users_and_permissions._secured import SecuredSqlResource
 
-
-class UserPermission(SecuredSqlResource):
+class UserPermission(SqlResource):
     """A per-user permission policy for a resource type.
 
     Fields:

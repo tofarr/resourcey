@@ -1,7 +1,7 @@
 """``MongoService`` — the MongoDB-backed service for a resource.
 
 A :class:`~resourcey.mongo.mongo_resource.MongoResource` subclass yields a
-``MongoService`` from :meth:`~resourcey.mongo.mongo_resource.MongoResource.open_service`.
+``MongoService`` from :meth:`~resourcey.mongo.mongo_resource.MongoResource.build_service`.
 The service holds a ``motor`` async collection as instance state (mirroring how
 :class:`~resourcey.resource.service.SqlService` holds an ``AsyncSession``) and
 implements the standard :class:`~resourcey.resource.service_base.BaseService`
@@ -37,7 +37,7 @@ from resourcey.resource.service_base import BaseService
 
 if TYPE_CHECKING:
     from resourcey.encryption.encryption_service import EncryptionService
-    from resourcey.mongo.mongo_resource import MongoResource
+    from resourcey.resource.base import BaseResource
     from resourcey.util.search_filter import SearchFilter
 
 
@@ -54,7 +54,8 @@ _UNDEFINED: Any = object()
 class MongoService(BaseService):
     """The MongoDB-backed service exposing the standard resource actions.
 
-    Constructed from a :class:`MongoResource` subclass and an async ``motor``
+    Constructed from a :class:`~resourcey.resource.base.BaseResource` (a
+    ``MongoResource`` or a wrapper delegating to one) and an async ``motor``
     collection (instance state, not a per-call parameter). The collection is
     duck-typed: any object exposing the ``motor`` async collection API
     (``insert_one``, ``find_one``, ``find``, ``update_one``, ``delete_one``,
@@ -64,7 +65,7 @@ class MongoService(BaseService):
 
     def __init__(
         self,
-        resource: MongoResource,
+        resource: BaseResource,
         *,
         collection: Any,
         serialization_context: dict[str, Any] | None = None,

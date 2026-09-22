@@ -524,9 +524,11 @@ class TestServiceWrappable:
     service + user and delegates). These guard the contract."""
 
     @pytest.mark.asyncio
-    async def test_actions_default_to_all(self) -> None:
-
-        assert SqlService.actions == frozenset(Action)
+    async def test_actions_declared_on_resource(self) -> None:
+        # The action set lives on the resource (issue #62); the service no
+        # longer declares one.
+        assert not hasattr(BaseService, "actions")
+        assert SvcWidget().actions == frozenset(Action)
 
     @pytest.mark.asyncio
     async def test_methods_take_no_session(self, session: AsyncSession) -> None:
@@ -542,8 +544,6 @@ class TestServiceWrappable:
         """A wrapper holding an inner service delegates with no signature change."""
 
         class ReadOnlyWrapper(BaseService):
-            actions = frozenset({Action.READ, Action.SEARCH, Action.COUNT})
-
             def __init__(self, inner: SqlService) -> None:
                 self._inner = inner
 
@@ -625,9 +625,9 @@ class TestRegisterRoutes:
 
     @pytest.mark.asyncio
     async def test_open_service_without_session_factory_raises(self) -> None:
-        # An unconfigured SQL resource cannot open a service: open_service
-        # raises ResourceyConfigError because _session_factory is None (no
-        # lifespan entered).
+        # An unconfigured SQL resource cannot open a service: the service
+        # dependency raises ResourceyConfigError because _session_factory is
+        # None (no lifespan entered).
         from resourcey.resource.errors import ResourceyConfigError
 
         class _Unconfigured(SqlResource):
@@ -638,8 +638,7 @@ class TestRegisterRoutes:
         resource.on_register()
         request = type("R", (), {"state": {}})()
         with pytest.raises(ResourceyConfigError):
-            async with resource.open_service(request):
-                pass
+            await anext(resource.get_service_dependency(request))
 
     @pytest.mark.asyncio
     async def test_escape_hatch_custom_route_preserved(self, session_factory) -> None:

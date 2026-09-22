@@ -285,15 +285,11 @@ class TestResourceLifecycle:
     async def test_base_resource_lifecycle_is_noop(self):
         from resourcey.resource.base import BaseResource
 
-        # BaseResource is an ABC; use a minimal concrete subclass to test
-        # that the base lifecycle (on_register, __aenter__, __aexit__) is a
-        # no-op for storage-agnostic resources.
+        # BaseResource is storage-agnostic (no abstract methods); use a minimal
+        # concrete subclass to test that the base lifecycle (on_register,
+        # __aenter__, __aexit__) is a no-op for storage-agnostic resources.
         class _NoopResource(BaseResource):
-            def get_service_cls(self) -> type:
-                raise NotImplementedError
-
-            def open_service(self, request: object) -> object:
-                raise NotImplementedError
+            pass
 
         ctx = AppContext(FrameworkConfig())
         instance = _NoopResource()
