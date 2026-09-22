@@ -55,7 +55,7 @@ has no `gen_random_uuid()` server default, so the column carries
 ```
 03_users_and_permissions/
 ├── README.md            # this file
-├── pyproject.toml       # standalone project — depends on resourcey from git
+├── pyproject.toml       # standalone — resourcey from git (parent checkout in-repo)
 ├── .env                 # SQLite config + cookie flags for local HTTP dev
 ├── .gitignore
 ├── users_and_permissions/   # the importable app package
@@ -82,7 +82,8 @@ This example is a **standalone project**. From within the
 `03_users_and_permissions` directory:
 
 ```bash
-# 1. Install (pulls resourcey from its main branch on GitHub).
+# 1. Install. Inside the resourcey repo this builds the parent checkout (your
+#    branch); a copied-out example falls back to main — see below.
 uv sync
 
 # 2. Apply the migration (creates users_and_permissions.db + seeds two users).
@@ -93,6 +94,18 @@ uv run uvicorn users_and_permissions.app:app --reload --port 8083
 ```
 
 Open http://localhost:8083/docs for the OpenAPI UI.
+
+### Running inside the resourcey repository
+
+`pyproject.toml` depends on `resourcey` from GitHub `main`, but adds a
+`[tool.uv.sources]` override to the parent checkout (`../..`). Inside a
+resourcey checkout `uv sync` therefore builds the working tree — your branch or
+PR — instead of published `main`. A copy of this directory placed outside the
+repo cannot resolve that path; run it with the override disabled:
+
+```bash
+uv sync --no-sources        # and `uv run --no-sources ...` thereafter
+```
 
 ### Seeded users
 
