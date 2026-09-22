@@ -16,13 +16,15 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
+import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from resourcey.app_context import AppContext
 from resourcey.config.config_framework import FrameworkConfig
-from resourcey.config.config_runtime import clear_config_cache
+from resourcey.config.config_runtime import clear_config_cache, get_config_as
 from resourcey.manifest import ResourceManifest
+from resourcey.resource.errors import ResourceyConfigError
 from resourcey.resource.sql import _SESSION_FACTORY_KEY, ResourceyBase
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -103,20 +105,77 @@ async def test_correct_key_via_bearer(client: AsyncClient) -> None:
 
 
 async def test_incorrect_key_is_rejected(client: AsyncClient) -> None:
-    """A wrong key is a 403 on read and on write alike."""
+    """A wrong key is a 401 on read and on write alike."""
     headers = {_KEY_HEADER: "not-the-key"}
 
     read = await client.get("/threads", headers=headers)
-    assert read.status_code == 403
+    assert read.status_code == 401
 
     write = await client.post("/threads", json={"title": "Nope"}, headers=headers)
-    assert write.status_code == 403
+    assert write.status_code == 401
 
 
 async def test_missing_key_is_rejected(client: AsyncClient) -> None:
-    """No key at all is a 403 (fail-closed), for reads and writes."""
+    """No key at all is a 401 (fail-closed), for reads and writes."""
     read = await client.get("/threads")
-    assert read.status_code == 403
+    assert read.status_code == 401
 
     write = await client.post("/threads", json={"title": "Nope"})
-    assert write.status_code == 403
+    assert write.status_code == 401
+
+
+async def test_rejection_carries_authentication_challenge(client: AsyncClient) -> None:
+    """A 401 carries a ``WWW-Authenticate`` challenge, as HTTP requires."""
+    resp = await client.get("/threads")
+    assert resp.status_code == 401
+    assert resp.headers["www-authenticate"].startswith("Bearer")
+
+
+async def test_empty_key_list_denies_everything(monkeypatch) -> None:
+    """An empty configured key list fails closed rather than opening the API."""
+    monkeypatch.setenv(
+        "DEPENDENCY_BUILDER_CLASS",
+        "resourcey.auth2.auth2_api_key.ApiKeyDependencyBuilder",
+    )
+    # A set-but-empty key list: nothing can authenticate.
+    monkeypatch.setenv("DEPENDENCY_BUILDER_API_KEYS", "[]")
+    monkeypatch.delenv("DEPENDENCY_BUILDER_API_KEYS_0", raising=False)
+    clear_config_cache()
+    FrameworkConfig.clear_instance_cache()
+
+    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest.materialize()
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(ResourceyBase.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    ctx = AppContext(FrameworkConfig())
+    ctx.set(_SESSION_FACTORY_KEY, factory)
+    built: FastAPI = manifest.create_app(app_context=ctx)
+    await manifest.__aenter__()
+    try:
+        transport = ASGITransport(app=built)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            # Even the correct key is rejected when the accepted list is empty.
+            resp = await c.get("/threads", headers={_KEY_HEADER: _API_KEY})
+            assert resp.status_code == 401
+    finally:
+        await manifest.__aexit__(None, None, None)
+        await engine.dispose()
+        clear_config_cache()
+        FrameworkConfig.clear_instance_cache()
+
+
+def test_empty_posture_class_var_is_rejected(monkeypatch) -> None:
+    """A set-but-empty DEPENDENCY_BUILDER_CLASS raises instead of disabling auth."""
+    from resourcey.resource.errors import ResourceyConfigError
+
+    monkeypatch.setenv("DEPENDENCY_BUILDER_CLASS", "")
+    clear_config_cache()
+    FrameworkConfig.clear_instance_cache()
+    try:
+        with pytest.raises(ResourceyConfigError, match="DEPENDENCY_BUILDER_CLASS"):
+            _ = get_config_as(FrameworkConfig).dependency_builder
+    finally:
+        clear_config_cache()
+        FrameworkConfig.clear_instance_cache()

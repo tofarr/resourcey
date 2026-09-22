@@ -118,14 +118,14 @@ class TestApiKeyDependency:
         assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_missing_key_is_403(self, client: AsyncClient) -> None:
+    async def test_missing_key_is_401(self, client: AsyncClient) -> None:
         resp = await client.get("/secure")
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_wrong_key_is_403(self, client: AsyncClient) -> None:
+    async def test_wrong_key_is_401(self, client: AsyncClient) -> None:
         resp = await client.get("/secure", headers={API_KEY_HEADER_NAME: "wrong"})
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_present_but_invalid_header_denies_despite_valid_bearer(
@@ -136,7 +136,7 @@ class TestApiKeyDependency:
             "/secure",
             headers={API_KEY_HEADER_NAME: "wrong", "Authorization": "Bearer beta"},
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     @pytest.mark.asyncio
     async def test_empty_key_list_fails_closed(self) -> None:
@@ -144,7 +144,7 @@ class TestApiKeyDependency:
         transport = ASGITransport(app=_app_with(ApiKeyDependencyBuilder()))
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get("/secure", headers={API_KEY_HEADER_NAME: "anything"})
-        assert resp.status_code == 403
+        assert resp.status_code == 401
 
     def test_openapi_declares_both_schemes(self) -> None:
         schemes = _app_with(ApiKeyDependencyBuilder(api_keys=["alpha"])).openapi()["components"][
@@ -169,7 +169,7 @@ class TestServiceDependency:
         transport = ASGITransport(app=_service_app(dep))
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.get("/svc", headers={API_KEY_HEADER_NAME: "wrong"})
-        assert resp.status_code == 403
+        assert resp.status_code == 401
         assert _RecordingResource.opened is False
 
     @pytest.mark.asyncio
@@ -262,7 +262,7 @@ class TestManifestIntegration:
         transport = ASGITransport(app=secured_app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             denied = await c.get("/app-widgets")
-            assert denied.status_code == 403
+            assert denied.status_code == 401
 
             allowed = await c.get("/app-widgets", headers={API_KEY_HEADER_NAME: "secret-key"})
             assert allowed.status_code == 200

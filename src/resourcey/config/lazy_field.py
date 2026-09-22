@@ -44,14 +44,19 @@ class LazyField:
             my_field: ClassVar[MyPolymorphicObj] = LazyField()
 
     An optional ``default`` supplies the value used when the ``{NAME}_CLASS``
-    env var is unset, instead of raising. ``default`` may be an instance or a
-    zero-arg callable returning one; each config instance gets its own call
+    env var is **unset**, instead of raising. ``default`` may be an instance or
+    a zero-arg callable returning one; each config instance gets its own call
     result (so a mutable default is not shared). The default is **not** parsed
     from the environment — it is expected to already be fully built::
 
         dependency_builder: ClassVar[DependencyBuilder] = LazyField(
             default=DefaultDependencyBuilder
         )
+
+    A *set-but-empty* ``{NAME}_CLASS`` raises rather than falling back to the
+    default. The fallback exists for "no posture configured"; an empty value is
+    a misconfiguration, and silently downgrading to the default (which may be a
+    no-authentication posture) is the wrong failure mode for a security setting.
 
     A ``ClassVar[list[type[SomeBase]]]`` field is supported too — it resolves
     a ``{NAME}`` / ``{NAME}_0`` / ``{NAME}_1`` list of dotted import paths to
@@ -85,13 +90,24 @@ class LazyField:
         prefix = self._name.upper()
         class_var = f"{prefix}_CLASS"
         fqn = os.environ.get(class_var)
-        if not fqn:
+        if fqn is None:
             if self._default is not _NO_DEFAULT:
                 return self._default() if callable(self._default) else self._default
             raise ResourceyConfigError(
                 f"Missing env var '{class_var}' for lazy field '{self._name}' "
                 f"on {self._owner.__name__}"
             )
+        # A set-but-empty value is a misconfiguration, not "unconfigured": the
+        # default fallback above only covers an unset var. Falling through here
+        # with "" would otherwise raise the "must be fully-qualified" error,
+        # which is correct — but name the real problem.
+        if not fqn.strip():
+            raise ResourceyConfigError(
+                f"Env var '{class_var}' is set but empty for lazy field '{self._name}' "
+                f"on {self._owner.__name__}; unset it to use the default, or set a "
+                "fully-qualified class name (module.ClassName)"
+            )
+        fqn = fqn.strip()
         module_name, _, class_name = fqn.rpartition(".")
         if not module_name:
             raise ResourceyConfigError(
