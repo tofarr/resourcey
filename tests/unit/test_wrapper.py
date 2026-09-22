@@ -1,15 +1,18 @@
 """Tests for ``WrapperResourceBase`` and ``get_exposed_resource`` (issues #55, #62)."""
 
+from typing import Annotated
+
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
 from resourcey.config.config_dependency import DependencyBuilder
 from resourcey.resource.base import BaseResource
+from resourcey.resource.field import ResourceyField
 from resourcey.resource.routes import register_error_handlers, register_routes
 from resourcey.resource.service_base import Action
 from resourcey.resource.sql import ResourceyBase, SqlResource
@@ -54,6 +57,42 @@ class InternalResource(SqlResource):
         return None
 
 
+class PublicFilterableWidget(WrapperResourceBase):
+    """Hides ``secret`` from a filterable resource's read model + query surface."""
+
+    def get_read_model(self) -> type[BaseModel]:
+        return self._project_read_model(exclude=frozenset({"secret"}))
+
+
+class UnreadableFieldWidget(SqlResource):
+    """A resource with a field marked non-readable (not just wrapper-hidden)."""
+
+    id: int
+    name: str
+    secret: Annotated[str, Field(default="hidden"), ResourceyField(readable=False)]
+
+
+class ExposedFilterableWidget(SqlResource):
+    id: int
+    name: str
+    secret: str = "hidden"
+
+    def get_exposed_resource(self) -> BaseResource | None:
+        return PublicFilterableWidget(inner=self)
+
+    @classmethod
+    def get_search_filter_type(cls):
+        from resourcey.util.search_filter import BaseSearchFilter
+
+        model = cls.get_sql_alchemy_model()
+
+        class _Filter(BaseSearchFilter[model]):  # type: ignore[valid-type]
+            name__eq: str | None = None
+            secret__eq: str | None = None
+
+        return _Filter
+
+
 class NarrowedActions(WrapperResourceBase):
     """A wrapper that only exposes READ + SEARCH."""
 
@@ -85,9 +124,114 @@ class TestWrapperDelegation:
         wrapper = PublicWidget(inner=WrapperWidget())
         assert wrapper.get_id_field() == "id"
 
-    def test_get_sortable_fields_delegates(self):
-        wrapper = PublicWidget(inner=WrapperWidget())
-        assert wrapper.get_sortable_fields() == WrapperWidget().get_sortable_fields()
+    def test_get_sortable_fields_excludes_projected_fields(self):
+        """A wrapper that hides a field must not leave it sortable (issue #62).
+
+        ``?sort=secret`` discloses the relative order of a field absent from
+        the response body, so the query surface narrows with the read model.
+        """
+        wrapper = PublicFilterableWidget(inner=ExposedFilterableWidget())
+        assert wrapper.get_sortable_fields() == ["id", "name"]
+        assert "secret" in ExposedFilterableWidget().get_sortable_fields()
+
+    def test_get_queryable_fields_defaults_to_all(self):
+        wrapper = NarrowedActions(inner=WrapperWidget())
+        assert wrapper.get_queryable_fields() == frozenset({"id", "name", "secret"})
+
+    def test_get_queryable_fields_excludes_projected_fields(self):
+        wrapper = PublicFilterableWidget(inner=ExposedFilterableWidget())
+        assert wrapper.get_queryable_fields() == frozenset({"id", "name"})
+
+    def test_get_queryable_fields_covers_unreadable_fields(self):
+        """A field the *inner* resource marks unreadable is non-queryable too.
+
+        ``get_queryable_fields`` derives from the read model, which already
+        drops unreadable fields, so the wrapper need not repeat the exclusion.
+        """
+        wrapper = WrapperResourceBase(inner=UnreadableFieldWidget())
+        assert wrapper.get_queryable_fields() == frozenset({"id", "name"})
+
+    def test_queryable_fields_answers_before_read_model_requested(self):
+        """Reading sortable fields first still sees the projection (order-free)."""
+        wrapper = PublicFilterableWidget(inner=ExposedFilterableWidget())
+        assert wrapper.get_sortable_fields() == ["id", "name"]
+        assert "secret" not in wrapper.get_read_model().model_fields
+
+    def test_narrowed_filter_cls_is_cached(self):
+        """Repeated calls reuse the same narrowed filter class."""
+        from resourcey.resource.wrapper import _narrow_filter_cls
+        from resourcey.util.search_filter import BaseSearchFilter
+
+        class _Filter(BaseSearchFilter[None]):  # type: ignore[valid-type]
+            name__eq: str | None = None
+            secret__eq: str | None = None
+
+        first = _narrow_filter_cls(_Filter, frozenset({"id", "name"}))
+        second = _narrow_filter_cls(_Filter, frozenset({"id", "name"}))
+        assert first is second
+        assert set(first.model_fields) == {"name__eq"}
+        # A different queryable set is a distinct cache entry.
+        wider = _narrow_filter_cls(_Filter, frozenset({"id", "name", "secret"}))
+        assert wider is _Filter
+
+    def test_narrowed_filter_cls_cache_is_per_class(self):
+        """A subclass does not reuse a base's narrowed class (own fields kept)."""
+        from resourcey.resource.wrapper import _narrow_filter_cls
+        from resourcey.util.search_filter import BaseSearchFilter
+
+        class _Base(BaseSearchFilter[None]):  # type: ignore[valid-type]
+            shared__eq: str | None = None
+            secret__eq: str | None = None
+
+        class _Sub(_Base):
+            own__eq: str | None = None
+
+        queryable = frozenset({"shared", "own"})
+        _narrow_filter_cls(_Base, queryable)
+        narrowed = _narrow_filter_cls(_Sub, queryable)
+        # The subclass's own field survives; the base's cache entry is not reused.
+        assert set(narrowed.model_fields) == {"shared__eq", "own__eq"}
+
+    def test_narrowed_filter_cls_preserves_overrides(self):
+        """Narrowing keeps the concrete filter's methods (not just its fields)."""
+        from resourcey.resource.wrapper import _narrow_filter_cls
+        from resourcey.util.search_filter import BaseSearchFilter
+
+        class _Filter(BaseSearchFilter[None]):  # type: ignore[valid-type]
+            name__eq: str | None = None
+            secret__eq: str | None = None
+
+            def sql_condition(self):
+                return "OVERRIDDEN"
+
+        narrowed = _narrow_filter_cls(_Filter, frozenset({"name"}))
+        assert set(narrowed.model_fields) == {"name__eq"}
+        assert narrowed(name__eq="x").sql_condition() == "OVERRIDDEN"
+
+    def test_narrowed_filter_cls_rejects_projected_fields(self):
+        """The narrowed class does not accept a hidden field's filter param."""
+        from resourcey.resource.wrapper import _narrow_filter_cls
+        from resourcey.util.search_filter import BaseSearchFilter
+
+        class _Filter(BaseSearchFilter[None]):  # type: ignore[valid-type]
+            name__eq: str | None = None
+            secret__eq: str | None = None
+
+        narrowed = _narrow_filter_cls(_Filter, frozenset({"name"}))
+        assert "secret__eq" not in narrowed.model_fields
+        # The dropped field is not part of the model, so the param cannot apply.
+        assert not hasattr(narrowed(name__eq="x"), "secret__eq")
+
+    def test_get_search_filter_type_excludes_projected_fields(self):
+        """A hidden field's filter param is dropped from the exposed filter class."""
+        wrapper = PublicFilterableWidget(inner=ExposedFilterableWidget())
+        fields = set(wrapper.get_search_filter_type().model_fields)
+        assert fields == {"name__eq"}
+
+    def test_get_search_filter_type_delegates_when_not_projected(self):
+        wrapper = NarrowedActions(inner=ExposedFilterableWidget())
+        filter_cls = wrapper.get_search_filter_type()
+        assert set(filter_cls.model_fields) == {"name__eq", "secret__eq"}
 
     def test_actions_delegates(self):
         wrapper = PublicWidget(inner=WrapperWidget())
@@ -280,7 +424,12 @@ async def session_factory() -> async_sessionmaker[AsyncSession]:
     """Shared in-memory SQLite engine + session factory for the HTTP tests."""
     # Resolve ORM models before create_all so the tables exist (mirrors the
     # eager resolution the service-level tests do at module scope).
-    for resource_type in (ExposedWidget, WrapperWidget, InternalResource):
+    for resource_type in (
+        ExposedWidget,
+        WrapperWidget,
+        InternalResource,
+        ExposedFilterableWidget,
+    ):
         resource_type().get_sql_alchemy_model()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     async with engine.begin() as conn:
@@ -346,6 +495,80 @@ class TestExposedResourceBacksService:
         register_routes(app, InternalResource())
         paths = {r.path for r in app.routes}
         assert not any(p.startswith("/internal-resources") for p in paths)
+
+    @pytest.mark.filterwarnings("ignore::Warning")
+    @pytest.mark.asyncio
+    async def test_hidden_field_not_sortable_over_http(self, session_factory) -> None:
+        """``?sort=<hidden field>`` is rejected, not silently honoured (issue #62).
+
+        Sorting by a hidden field discloses its relative order even though the
+        field never appears in the response body.
+        """
+        resource = ExposedFilterableWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
+        app = FastAPI()
+        register_routes(app, resource)
+        register_error_handlers(app)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+            await client.post("/public-filterable-widgets", json={"id": 1, "name": "a"})
+            await client.post("/public-filterable-widgets", json={"id": 2, "name": "b"})
+
+            bad = await client.get("/public-filterable-widgets?sort=secret")
+            assert bad.status_code == 422  # not an allowed enum member
+
+            ok = await client.get("/public-filterable-widgets?sort=name")
+            assert ok.status_code == 200
+
+    @pytest.mark.filterwarnings("ignore::Warning")
+    @pytest.mark.asyncio
+    async def test_hidden_field_not_filterable_over_http(self, session_factory) -> None:
+        """``?<hidden>__op=value`` is rejected, not silently applied (issue #62)."""
+        resource = ExposedFilterableWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
+        app = FastAPI()
+        register_routes(app, resource)
+        register_error_handlers(app)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+            await client.post("/public-filterable-widgets", json={"id": 1, "name": "a"})
+            await client.post("/public-filterable-widgets", json={"id": 2, "name": "b"})
+
+            bad = await client.get("/public-filterable-widgets?secret__eq=x")
+            assert bad.status_code == 400
+            assert bad.json()["error"]["code"] == "invalid_input"
+
+            ok = await client.get("/public-filterable-widgets?name__eq=a")
+            assert ok.status_code == 200
+
+    @pytest.mark.filterwarnings("ignore::Warning")
+    @pytest.mark.asyncio
+    async def test_hidden_field_absent_from_filter_openapi(self, session_factory) -> None:
+        """The hidden field is not advertised as a filter param in OpenAPI either."""
+        resource = ExposedFilterableWidget()
+        resource.on_register()
+        resource._session_factory = session_factory
+        app = FastAPI()
+        register_routes(app, resource)
+        register_error_handlers(app)
+
+        schema = app.openapi()
+        params = {
+            p["name"] for p in schema["paths"]["/public-filterable-widgets"]["get"]["parameters"]
+        }
+        assert "name__eq" in params
+        assert "secret__eq" not in params
+
+    @pytest.mark.asyncio
+    async def test_routes_tagged_with_exposed_name(self) -> None:
+        """Routes are tagged with the exposed resource's name, not the hidden one."""
+        resource = ExposedWidget()
+        resource.on_register()
+        router = register_routes(FastAPI(), resource)
+        tags = {tag for route in router.routes for tag in getattr(route, "tags", [])}
+        assert tags == {"PublicWidget"}
 
 
 # ---------------------------------------------------------------------------

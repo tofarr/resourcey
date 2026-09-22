@@ -120,7 +120,6 @@ def _build_secured(resource: BaseResource, session: Any, token: AuthToken | None
         user_id=_token_user_id(token),
         groups=frozenset(),
         resolver=resolver.resolve,
-        actions=resource.actions,
     )
 
 

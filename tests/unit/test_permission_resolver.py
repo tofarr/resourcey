@@ -42,7 +42,6 @@ class FakeService(BaseService):
 
     def __init__(self, items: dict[Any, Any] | None = None) -> None:
         self._items: dict[Any, Any] = items or {}
-        self.actions = frozenset(Action)  # type: ignore[misc]
         self.created: list[Any] = []
         self.deleted: list[Any] = []
 

@@ -36,7 +36,7 @@ jobs:
       - name: Run Quint tests
         run: quint test specs/resource_actions.qnt --main=resource_actions --match "^(createThenRead|createUpdateDelete|batchReadAndEdit|searchEmptyFilterMatchesAll|searchEqualityPredicate|searchInPredicate|searchEmptyInMatchesNothing|searchAndCombinesPredicates|searchNoFilterDeclaredRejectsNonEmptyFilter)$"
       - name: Run exposure spec tests
-        run: quint test specs/exposure.qnt --main=exposure --match "^(selfIsTheDefault|hiddenRegistersNoRoutesTest|wrapperHidesAnExposedResource|delegatedWrapperWouldLeak|builderDoesNotChangeExposure|narrowingIsAllowedWideningIsRejected|invariantsHold)$"
+        run: quint test specs/exposure.qnt --main=exposure --match "^(selfIsTheDefault|hiddenRegistersNoRoutesTest|wrapperHidesAnExposedResource|wrapperNarrowsTheQuerySurface|delegatedWrapperWouldLeak|builderDoesNotChangeExposure|narrowingIsAllowedWideningIsRejected|invariantsHold)$"
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
@@ -51,6 +51,8 @@ jobs:
             name: message-board (SQLite)
           - example: examples/02_mongodb
             name: message-board (MongoDB)
+          - example: examples/03_users_and_permissions
+            name: users-and-permissions (auth + security filtering)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4

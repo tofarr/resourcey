@@ -85,10 +85,9 @@ class SecuredService(BaseService):
     filter for a given action. The principal (``user_id`` + ``groups``) is
     instance state, set at construction from the request's auth context.
 
-    The wrapper reports the *resource's* action set (``BaseResource.actions``,
-    issue #62) when one is supplied, rather than reading it off the inner
-    service — the resource is the single source of truth for what a resource
-    supports.
+    The service carries no action set of its own: the *resource* is the single
+    source of truth for which actions it supports (``BaseResource.actions``,
+    issue #62), and route registration reads it from there.
     """
 
     def __init__(
@@ -100,7 +99,6 @@ class SecuredService(BaseService):
         user_id: uuid.UUID | None,
         groups: frozenset[uuid.UUID],
         resolver: PermissionResolver,
-        actions: frozenset[Action] | None = None,
     ) -> None:
         self._inner = inner
         self._resource_type = resource_type
@@ -108,11 +106,6 @@ class SecuredService(BaseService):
         self._user_id = user_id
         self._groups = groups
         self._resolver = resolver
-        # The action set lives on the resource (issue #62); accept it here only
-        # so a secured service can report it for runtime introspection. The
-        # wrapper itself never narrows or widens it.
-        if actions is not None:
-            self.actions = actions
 
     # ------------------------------------------------------------------
     # Permission filter resolution

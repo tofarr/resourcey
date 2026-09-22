@@ -19,6 +19,11 @@
 //     whether routes exist -- exposure alone decides.
 //   - hiddenFieldsNeverExposed: a wrapper's hidden fields are absent from the
 //     exposed read model (field hiding is not cosmetic).
+//   - hiddenFieldsNeverQueryable: a wrapper's hidden fields are absent from the
+//     query surface (`sort=` / `field__op=`) too -- otherwise the relative
+//     order (?sort=secret) or the value (?secret__eq=v) of a field the outside
+//     world never sees would leak. The query surface narrows with the read
+//     model.
 //   - wrapperDoesNotDelegate: a wrapper reports itself exposed; delegating the
 //     decision to an inner resource that returns itself would re-expose the
 //     hidden fields (the leak this design avoids).
@@ -78,6 +83,14 @@ module exposure {
     // The hidden set is disjoint from the exposed fields.
     exposedFields(r, Wrapper(hidden)).intersect(hidden) == Set()
 
+  // The fields the outside world may filter / sort on. Derived from the same
+  // exposure decision as the read model, so the two surfaces cannot diverge.
+  pure def queryableFields(r: Resource, e: Exposure): Set[str] =
+    exposedFields(r, e)
+
+  pure def hiddenFieldsNeverQueryable(r: Resource, hidden: Set[str]): bool =
+    queryableFields(r, Wrapper(hidden)).intersect(hidden) == Set()
+
   pure def wrapperDoesNotDelegate(r: Resource, hidden: Set[str]): bool = {
     val e = Wrapper(hidden)
     // Non-delegation: the wrapper's own projection is what is served.
@@ -124,6 +137,19 @@ module exposure {
     }
   }
 
+  run wrapperNarrowsTheQuerySurface = {
+    // The query surface (sort / filter) narrows with the read model: a hidden
+    // field is neither returned nor queryable, so its order and value cannot
+    // leak through ?sort= / ?field__op=.
+    val r = { fields: Set("id", "name", "secret"), actions: Set(Read, Search) }
+    val e = Wrapper(Set("secret"))
+    all {
+      assert(queryableFields(r, e) == Set("id", "name")),
+      assert(queryableFields(r, e).intersect(Set("secret")) == Set()),
+      assert(hiddenFieldsNeverQueryable(r, Set("secret"))),
+    }
+  }
+
   run delegatedWrapperWouldLeak = {
     // The failure mode: delegating to the inner's default (Self) serves all
     // fields, so the hidden "secret" returns.
@@ -153,6 +179,7 @@ module exposure {
       assert(hiddenRegistersNoRoutes),
       assert(builderNeverSuppressesRoutes),
       assert(hiddenFieldsNeverExposed(r, Set("secret"))),
+      assert(hiddenFieldsNeverQueryable(r, Set("secret"))),
       assert(wrapperDoesNotDelegate(r, Set("secret"))),
     }
   }

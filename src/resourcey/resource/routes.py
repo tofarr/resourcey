@@ -86,12 +86,16 @@ def register_routes(
     developer who registers a custom route first keeps it (escape hatch).
     Returns the built :class:`APIRouter`.
     """
-    resource_name = type(resource).__name__
-    router = APIRouter(tags=list(tags) if tags else [resource_name])
-
     exposed = resource.get_exposed_resource()
     if exposed is None:
-        return router
+        # Hidden resource: no routes. The (empty) router's tag is irrelevant.
+        return APIRouter(tags=list(tags) if tags else [type(resource).__name__])
+
+    # Routes are tagged with the *exposed* resource's class name (they are the
+    # exposed resource's routes: its path, models, and service dependency), not
+    # the declaring resource's — otherwise a projection's routes would be
+    # grouped in OpenAPI under the hidden internal name.
+    router = APIRouter(tags=list(tags) if tags else [type(exposed).__name__])
 
     path = "/" + exposed.get_resource_path().lstrip("/")
     id_type = _id_python_type(exposed)
@@ -482,6 +486,11 @@ def _resolve_filters(
     dropped, any ``field__op`` query key not in the declared filter class is
     rejected here. When the resource declares no filter class, any
     ``field__op`` param is rejected outright.
+
+    A param naming a field outside :meth:`BaseResource.get_queryable_fields`
+    is rejected too: a wrapper that projects a field away must not leave it
+    filterable (``?secret__eq=value`` discloses the value of a field the
+    outside world never sees).
     """
     filter_params = {k for k in request.query_params if "__" in k}
     if not filter_params:
@@ -494,6 +503,10 @@ def _resolve_filters(
     unknown = filter_params - set(filter_cls.model_fields)
     if unknown:
         raise InvalidInputError(f"Unknown filter parameters {sorted(unknown)}.")
+    queryable = resource.get_queryable_fields()
+    non_queryable = {k for k in filter_params if k.rpartition("__")[0] not in queryable}
+    if non_queryable:
+        raise InvalidInputError(f"Unknown filter parameters {sorted(non_queryable)}.")
     return filters
 
 

@@ -49,6 +49,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from pydantic import create_model
+
 from resourcey.resource.base import BaseResource
 
 if TYPE_CHECKING:
@@ -57,6 +59,9 @@ if TYPE_CHECKING:
     from resourcey.cache.cache_strategy import CacheStrategy
     from resourcey.resource.field import ResourceyField
     from resourcey.util.search_filter import SearchFilter
+
+# Filter field separator (``<attr>__<op>``) — mirrors ``SearchFilter``'s own.
+_FILTER_SEPARATOR = "__"
 
 
 class WrapperResourceBase(BaseResource):
@@ -177,14 +182,8 @@ class WrapperResourceBase(BaseResource):
     def get_config_for_field(self, field_name: str, field: Any) -> ResourceyField:
         return self._inner.get_config_for_field(field_name, field)
 
-    def get_search_filter_type(self) -> type[SearchFilter] | None:  # type: ignore[type-arg]
-        return self._inner.get_search_filter_type()
-
     def get_cache_strategy(self) -> CacheStrategy[Any]:
         return self._inner.get_cache_strategy()
-
-    def get_sortable_fields(self) -> list[str]:
-        return self._inner.get_sortable_fields()
 
     def get_id_field(self) -> str:
         return self._inner.get_id_field()
@@ -209,6 +208,12 @@ class WrapperResourceBase(BaseResource):
         Convenience for wrappers that subtract attributes from the inner
         resource's read model (the common case). Re-wires secret serializers
         for any ``SecretStr`` fields that remain.
+
+        The projected model is also the wrapper's *query surface* (issue #62):
+        ``get_queryable_fields`` (inherited) reads it, so a field hidden from
+        the read model is removed from ``sort=`` and ``field__op=`` as well — a
+        filterable or sortable hidden field leaks its value or its relative
+        order even though it is absent from the response body.
         """
         from resourcey.resource.base import _project_read_model as _impl
 
@@ -221,6 +226,16 @@ class WrapperResourceBase(BaseResource):
             )
         return self._read_model_cache
 
+    def get_sortable_fields(self) -> list[str]:
+        queryable = self.get_queryable_fields()
+        return [name for name in self._inner.get_sortable_fields() if name in queryable]
+
+    def get_search_filter_type(self) -> type[SearchFilter] | None:  # type: ignore[type-arg]
+        filter_cls = self._inner.get_search_filter_type()
+        if filter_cls is None:
+            return None
+        return _narrow_filter_cls(filter_cls, self.get_queryable_fields())
+
     def get_update_model(self) -> type[BaseModel]:
         return self._inner.get_update_model()
 
@@ -232,3 +247,111 @@ class WrapperResourceBase(BaseResource):
         from resourcey.util.naming import camel_to_kebab, pluralize
 
         return pluralize(camel_to_kebab(type(self).__name__)).lower()
+
+
+def _narrow_filter_cls(
+    filter_cls: type[Any],
+    queryable: frozenset[str],
+) -> type[Any]:
+    """A copy of ``filter_cls`` with fields naming non-queryable attributes dropped.
+
+    Every ``<attr>__<op>`` field whose ``<attr>`` is not in ``queryable`` is
+    removed, so a projected-away field cannot be used as a filter query param.
+    The narrowed class keeps ``filter_cls``'s behavior (its own methods and
+    parameterized bases, so the entity type and any overridden
+    ``sql_condition`` / ``matches`` survive) while declaring only the kept
+    fields, and it is cached per class to avoid rebuilding per call.
+    """
+    # Per-class cache (``__dict__`` only, not ``getattr``): a subclass must not
+    # reuse a base's narrowed class, which would omit the subclass's own fields.
+    cache: dict[frozenset[str], type[Any]] | None = vars(filter_cls).get("_narrow_cache")
+    if cache is None:
+        cache = {}
+        filter_cls._narrow_cache = cache
+    cached = cache.get(queryable)
+    if cached is not None:
+        return cached
+
+    fields = filter_cls.model_fields
+    kept = {
+        name: (field.annotation, field)
+        for name, field in fields.items()
+        if name.rpartition(_FILTER_SEPARATOR)[0] in queryable
+    }
+    if len(kept) == len(fields):
+        cache[queryable] = filter_cls
+        return filter_cls
+
+    narrowed = _rebuild_filter_cls(filter_cls, kept)
+    cache[queryable] = narrowed
+    return narrowed
+
+
+# Pydantic-managed class attributes that must not be copied onto the rebuilt
+# class (copying ``model_fields`` / ``model_config`` would freeze the original
+# field set, defeating the narrowing).
+_PYDANTIC_CLASS_ATTRS = frozenset({"model_fields", "model_config", "model_computed_fields"})
+
+
+def _rebuild_filter_cls(
+    filter_cls: type[Any],
+    fields: dict[str, tuple[Any, Any]],
+) -> type[Any]:
+    """Rebuild ``filter_cls`` with only ``fields``, preserving its behavior.
+
+    ``create_model`` cannot inherit ``filter_cls`` directly without re-inheriting
+    the dropped fields, so it inherits a behavior-only mixin (the methods the
+    class and its field-declaring ancestors add) plus the first *field-free*
+    ancestor — the parameterized ``BaseSearchFilter[Entity]``, which carries the
+    resolved entity type and the filter machinery, so SQL filtering still works.
+    """
+    behavior = type(
+        f"_{filter_cls.__name__}Behavior",
+        (),
+        _behavior_attrs(filter_cls),
+    )
+    # ``create_model`` builds a concrete subclass; mypy cannot track the dynamic
+    # ``__base__`` through its overloads, so the call is deliberately untyped.
+    create: Any = create_model
+    narrowed: type[Any] = create(
+        f"{filter_cls.__name__}Exposed",
+        __base__=(behavior, _field_free_ancestor(filter_cls)),
+        **fields,
+    )
+    return narrowed
+
+
+def _behavior_attrs(filter_cls: type[Any]) -> dict[str, Any]:
+    """Attributes to copy onto the rebuilt class's behavior mixin.
+
+    Gathers the names ``filter_cls`` and its field-declaring ancestors define,
+    stopping at the first field-free ancestor (whose own machinery is inherited
+    via the base instead). Pydantic-managed attributes are skipped so the
+    rebuilt class recomputes its own (narrowed) field set.
+    """
+    attrs: dict[str, Any] = {}
+    for klass in filter_cls.__mro__:
+        if not klass.__dict__.get("__pydantic_fields__"):
+            break  # reached the field-free base; its behavior comes via inheritance
+        for name, value in vars(klass).items():
+            if (
+                name.startswith("__")
+                or name in _PYDANTIC_CLASS_ATTRS
+                or name in filter_cls.model_fields
+            ):
+                continue
+            attrs.setdefault(name, value)
+    return attrs
+
+
+def _field_free_ancestor(filter_cls: type[Any]) -> type[Any]:
+    """The first ancestor that declares no pydantic fields.
+
+    Inheriting an ancestor that declares fields re-introduces them into the
+    rebuilt class, so the base is the nearest field-free ancestor — typically
+    the parameterized ``BaseSearchFilter[Entity]``.
+    """
+    for base in filter_cls.__mro__[1:]:
+        if base is not object and not base.__dict__.get("__pydantic_fields__"):
+            return base
+    raise TypeError(f"{filter_cls.__name__} has no field-free ancestor to rebase on.")

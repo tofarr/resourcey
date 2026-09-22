@@ -150,8 +150,8 @@ async def client_factory(session_factory: async_sessionmaker[AsyncSession]):
     given resource's routes registered + error handlers installed.
 
     Instantiates the resource type, pre-seeds its session factory (so
-    ``open_service`` can open a per-request session), and mounts routes via
-    ``register_routes`` (which takes an instance)."""
+    ``get_service_dependency`` can open a per-request session), and mounts
+    routes via ``register_routes`` (which takes an instance)."""
 
     def _build(resource_type: type[SqlResource]) -> AsyncClient:
         resource = resource_type()
@@ -624,7 +624,7 @@ class TestRegisterRoutes:
             assert r.status_code == 201
 
     @pytest.mark.asyncio
-    async def test_open_service_without_session_factory_raises(self) -> None:
+    async def test_get_service_dependency_without_session_factory_raises(self) -> None:
         # An unconfigured SQL resource cannot open a service: the service
         # dependency raises ResourceyConfigError because _session_factory is
         # None (no lifespan entered).

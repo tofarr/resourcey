@@ -1,7 +1,8 @@
 """``BaseResource`` and the storage-agnostic resource declaration layer.
 
-A resource is the central unit of resourcey. ``BaseResource`` is an ABC (not a
-Pydantic model): a subclass declares fields with the ordinary annotation +
+A resource is the central unit of resourcey. ``BaseResource`` is a plain
+extension point (not a Pydantic model): a subclass declares fields with the
+ordinary annotation +
 ``Field()`` / default syntax, and the framework introspects that declaration
 to drive the generated Pydantic create / read / update models. Every
 generation step is a single-purpose, overridable *instance* method so a
@@ -78,12 +79,17 @@ if TYPE_CHECKING:
 
 
 class BaseResource(ABC):
-    """Abstract base class for resource declarations.
+    """Base class for resource declarations.
 
     A *declaration* class, not a data model: subclass it and declare fields
     with the ordinary annotation + ``Field()`` / default syntax, and the
     framework derives the create / read / update Pydantic models from that
     single declaration. Each public generation method is an overridable hook.
+
+    Subclasses :class:`~abc.ABC`, but no method is left abstract: the
+    storage-specific hooks (:meth:`build_service`, ``get_orm_model``) raise at
+    call time instead, so a subclass that implements only the parts it needs
+    still instantiates and fails with a clear error if a missing hook is used.
 
     ``BaseResource`` is storage-agnostic - it does not know about SQLAlchemy,
     sessions, or persistence. SQL-backed resources subclass
@@ -394,21 +400,43 @@ class BaseResource(ABC):
         type(self)._cache_strategy = strategy
         return strategy
 
+    def get_queryable_fields(self) -> frozenset[str]:
+        """Field names the outside world may filter / sort on (default: all).
+
+        The single gate on the *query* surface (issue #62): ``sort=`` and
+        ``field__op=`` query params naming a field outside this set are
+        rejected. Defaults to the read model's fields, so a resource that does
+        not project (and hides nothing) keeps its existing surface.
+
+        Exists because hiding a field from the read model must also remove it
+        from the query surface: a filterable or sortable hidden field leaks
+        its value (``?secret__eq=x``) or its relative order (``?sort=secret``)
+        even though it never appears in a response body. A wrapper that
+        projects the read model narrows this to the surviving fields by
+        default (see :class:`~resourcey.resource.wrapper.WrapperResourceBase`).
+
+        Derived from the read model, so a field the resource marks
+        ``readable=False`` is non-queryable here too, not only under a wrapper.
+        """
+        return frozenset(self.get_read_model().model_fields)
+
     def get_sortable_fields(self) -> list[str]:
         """Names of fields whose ``ResourceyField.sortable`` is ``True``.
 
         The single source of truth for what the search endpoint's ``sort``
         enum may contain. Cached on the class. A field is sortable unless it
         is explicitly opted out (e.g. ``SecretStr`` fields default to
-        ``sortable=False`` -- see :meth:`get_config_for_field`).
+        ``sortable=False`` -- see :meth:`get_config_for_field`) or is outside
+        :meth:`get_queryable_fields` (a projected-away field).
         """
         cached = type(self).__dict__.get("_sortable_fields")
         if cached is not None:
             return cast(list[str], cached)
+        queryable = self.get_queryable_fields()
         sortable = [
             name
             for name, field in self.model_fields.items()
-            if self.get_config_for_field(name, field).sortable
+            if name in queryable and self.get_config_for_field(name, field).sortable
         ]
         type(self)._sortable_fields = sortable
         return sortable
