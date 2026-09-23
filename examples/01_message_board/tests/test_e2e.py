@@ -34,7 +34,7 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
     db_url = f"sqlite+aiosqlite:///{db_path}"
 
     config = FrameworkConfig(
-        database=DbConfig(full_db_url=db_url),
+        database=DbConfig(url=db_url),
         migrations=MigrationConfig(
             migrations_dir=str(Path(__file__).resolve().parent.parent / "migrations")
         ),

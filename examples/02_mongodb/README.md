@@ -31,10 +31,11 @@ uv run uvicorn message_board.app:app --reload --port 8082
 
 The app listens on **port 8082**.
 
-To use a real MongoDB server instead, set `RESOURCEY_MONGO_URL`:
+To use a real MongoDB server instead, set `RESOURCEY_DATABASE_URL` (the database
+name is the URL path):
 
 ```bash
-RESOURCEY_MONGO_URL=mongodb://localhost:27017 uv run uvicorn message_board.app:app --reload --port 8082
+RESOURCEY_DATABASE_URL=mongodb://localhost:27017/message_board uv run uvicorn message_board.app:app --reload --port 8082
 ```
 
 ## Resources

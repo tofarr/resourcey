@@ -22,7 +22,7 @@ from httpx import ASGITransport, AsyncClient
 from message_board.message import Message
 from message_board.thread import Thread
 
-from resourcey.config.config_framework import FrameworkConfig, MongoConfig
+from resourcey.config.config_framework import DbConfig, FrameworkConfig
 from resourcey.config.config_runtime import clear_config_cache, set_config
 from resourcey.manifest import ResourceManifest
 
@@ -32,7 +32,7 @@ async def client() -> AsyncIterator[AsyncClient]:
     """A fully wired REST client backed by an isolated embedded Mongo database."""
     database = f"e2e_{uuid.uuid4().hex}"
     config = FrameworkConfig(
-        mongo=MongoConfig(url="embedded", database=database),
+        database=DbConfig(url=f"embedded://{database}"),
         manifest="message_board.app:manifest",
     )
     set_config(config)

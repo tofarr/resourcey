@@ -18,9 +18,10 @@ from message_board.app import app, manifest
 
 @pytest_asyncio.fixture
 async def client() -> AsyncIterator[AsyncClient]:
-    # The example app uses an embedded Mongo client (RESOURCEY_MONGO_URL=embedded),
-    # so no external server is needed. ASGITransport does not run the lifespan,
-    # so enter the manifest manually to build the Mongo client.
+    # The example app uses an embedded Mongo client
+    # (RESOURCEY_DATABASE_URL=embedded://message_board), so no external server
+    # is needed. ASGITransport does not run the lifespan, so enter the manifest
+    # manually to build the Mongo client.
     await manifest.__aenter__()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:

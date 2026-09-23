@@ -17,6 +17,7 @@ from typing import ClassVar
 
 import pytest
 from config_lazy_helpers import Animal, Cat, Dog, NotAnAnimal
+from pydantic import SecretStr
 
 from resourcey.config.config_base import BaseConfig
 from resourcey.config.config_framework import DbConfig, FrameworkConfig
@@ -153,7 +154,10 @@ class TestGenerateEnvTemplate:
     def test_defaults_instance(self):
         template = FrameworkConfig().generate_env_template()
         assert "RESOURCEY_BASE_URL=http://localhost:8000" in template
-        assert "RESOURCEY_DATABASE_HOST=localhost" in template
+        assert (
+            "RESOURCEY_DATABASE_URL=postgresql+asyncpg://resourcey@localhost:5432/resourcey"
+            in template
+        )
         # Descriptions appear as comments.
         assert "Public base URL" in template
 
@@ -182,31 +186,47 @@ class TestFrameworkConfig:
         assert isinstance(cfg.database, DbConfig)
 
     def test_nested_db_overrides(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_DATABASE_HOST", "db.example.com")
-        monkeypatch.setenv("RESOURCEY_DATABASE_PORT", "6543")
+        url = "postgresql+asyncpg://resourcey@db.example.com:6543/resourcey"
+        monkeypatch.setenv("RESOURCEY_DATABASE_URL", url)
         monkeypatch.setenv("RESOURCEY_DATABASE_PASSWORD", "secret")
         FrameworkConfig.clear_instance_cache()
         cfg = FrameworkConfig.get_instance()
-        assert cfg.database.host == "db.example.com"
-        assert cfg.database.port == 6543
-        assert cfg.database.password == "secret"
+        assert cfg.database.url == url
+        assert cfg.database.password.get_secret_value() == "secret"
 
-    def test_database_url_assembly(self):
+    def test_password_spliced_into_database_url(self):
         cfg = FrameworkConfig()
+        cfg.database.url = "postgresql+asyncpg://resourcey@localhost:5432/resourcey"
+        cfg.database.password = SecretStr("s3cret")
         assert (
             cfg.database.database_url
-            == "postgresql+asyncpg://resourcey:resourcey@localhost:5432/resourcey"
+            == "postgresql+asyncpg://resourcey:s3cret@localhost:5432/resourcey"
         )
 
-    def test_database_url_full_db_url_override(self):
-        # When full_db_url is set, it takes precedence over structured fields.
+    def test_reserved_characters_in_password_are_encoded(self):
+        # A password with URL-reserved characters must not corrupt the URL.
         cfg = FrameworkConfig()
-        cfg.database.full_db_url = "sqlite+aiosqlite:///example.db"
+        cfg.database.url = "postgresql+asyncpg://resourcey@localhost:5432/resourcey"
+        cfg.database.password = SecretStr("p@ss/w:rd#x")
+        assert cfg.database.database_url == (
+            "postgresql+asyncpg://resourcey:p%40ss%2Fw%3Ard%23x@localhost:5432/resourcey"
+        )
+
+    def test_database_url_without_password_is_verbatim(self):
+        # No password configured -> the URL is returned exactly as given (an
+        # inline password, if any, still works).
+        cfg = FrameworkConfig()
+        cfg.database.url = "sqlite+aiosqlite:///example.db"
         assert cfg.database.database_url == "sqlite+aiosqlite:///example.db"
 
-    def test_database_url_full_db_url_from_env(self, monkeypatch):
-        # full_db_url is readable from env (RESOURCEY_DATABASE_FULL_DB_URL).
-        monkeypatch.setenv("RESOURCEY_DATABASE_FULL_DB_URL", "sqlite+aiosqlite:///from_env.db")
+    def test_default_database_url(self):
+        cfg = FrameworkConfig()
+        assert cfg.database.database_url == (
+            "postgresql+asyncpg://resourcey@localhost:5432/resourcey"
+        )
+
+    def test_database_url_from_env(self, monkeypatch):
+        monkeypatch.setenv("RESOURCEY_DATABASE_URL", "sqlite+aiosqlite:///from_env.db")
         FrameworkConfig.clear_instance_cache()
         cfg = FrameworkConfig.get_instance()
         assert cfg.database.database_url == "sqlite+aiosqlite:///from_env.db"
@@ -214,6 +234,38 @@ class TestFrameworkConfig:
     def test_database_url_is_property_not_field(self):
         # database_url is a plain @property, not a model field — from_env/to_env ignore it.
         assert "database_url" not in DbConfig.model_fields
+
+    def test_embedded_url_selects_embedded_client(self):
+        cfg = FrameworkConfig()
+        cfg.database.url = "embedded://message_board"
+        assert cfg.database.is_embedded is True
+        assert cfg.database.mongo_database_name("fallback") == "message_board"
+
+    def test_bare_embedded_marker_uses_default_database(self):
+        cfg = FrameworkConfig()
+        cfg.database.url = "embedded"
+        assert cfg.database.is_embedded is True
+        assert cfg.database.mongo_database_name("fallback") == "fallback"
+
+    def test_mongodb_url_database_name_from_path(self):
+        cfg = FrameworkConfig()
+        # Multi-host URLs must parse without a connection or DNS lookup.
+        cfg.database.url = "mongodb://user@h1:27017,h2:27017/message_board?replicaSet=rs0"
+        assert cfg.database.is_embedded is False
+        assert cfg.database.mongo_database_name("fallback") == "message_board"
+
+    def test_mongodb_url_without_database_uses_default(self):
+        cfg = FrameworkConfig()
+        cfg.database.url = "mongodb://localhost:27017"
+        assert cfg.database.mongo_database_name("fallback") == "fallback"
+
+    def test_mongo_password_is_none_when_unset(self):
+        assert FrameworkConfig().database.mongo_password is None
+
+    def test_mongo_password_returns_plaintext(self):
+        cfg = FrameworkConfig()
+        cfg.database.password = SecretStr("s3cret")
+        assert cfg.database.mongo_password == "s3cret"
 
     def test_cors_origins_json_array(self, monkeypatch):
         monkeypatch.setenv(
@@ -239,19 +291,19 @@ class TestFrameworkConfig:
 
 class TestErrorMapping:
     def test_invalid_int_raises_config_error(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_DATABASE_PORT", "not-an-int")
+        monkeypatch.setenv("RESOURCEY_AUTH_IDP_ACCESS_TOKEN_EXPIRES_IN", "not-an-int")
         FrameworkConfig.clear_instance_cache()
         with pytest.raises(ResourceyConfigError, match="RESOURCEY"):
             FrameworkConfig.get_instance()
 
-    def test_out_of_range_port_raises_config_error(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_DATABASE_PORT", "99999")
+    def test_out_of_range_int_raises_config_error(self, monkeypatch):
+        monkeypatch.setenv("RESOURCEY_AUTH_IDP_ACCESS_TOKEN_EXPIRES_IN", "0")
         FrameworkConfig.clear_instance_cache()
         with pytest.raises(ResourceyConfigError, match="RESOURCEY"):
             FrameworkConfig.get_instance()
 
     def test_config_error_is_resourcey_error(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_DATABASE_PORT", "not-an-int")
+        monkeypatch.setenv("RESOURCEY_AUTH_IDP_ACCESS_TOKEN_EXPIRES_IN", "not-an-int")
         FrameworkConfig.clear_instance_cache()
         with pytest.raises(ResourceyError):
             FrameworkConfig.get_instance()
