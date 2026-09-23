@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.resource import SqlResource
 from resourcey.v2.core.service import Action, NotFoundError, Service
+from resourcey.v2.sql.resource import SqlResource
 
 
 class Thread(DTO):

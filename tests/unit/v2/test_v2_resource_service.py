@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.resource import Resource, SqlResource
+from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
     STORAGE_KEY,
     Action,
@@ -28,6 +28,7 @@ from resourcey.v2.core.service import (
     ServiceError,
     assert_real_actions,
 )
+from resourcey.v2.sql.resource import SqlResource
 
 
 class Thread(DTO):
@@ -169,20 +170,24 @@ async def test_batch_read_and_batch_edit(resources):
         assert edited[1] is None
 
 
-async def test_search_unknown_sort_field_raises(resources):
+async def test_search_rejects_sort_and_desc_for_now(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
-        with pytest.raises(NotFoundError):
-            await service.search(sort="nope")
+        with pytest.raises(NotImplementedError):
+            await service.search(sort="title")
+        with pytest.raises(NotImplementedError):
+            await service.search(desc=True)
+        with pytest.raises(NotImplementedError):
+            await service.search(filters={"title": "x"})
 
 
-async def test_search_desc_orders_by_id_descending(resources):
+async def test_search_orders_by_id_ascending(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
         await service.create(Thread.get_dto_type()(title="a"))
         await service.create(Thread.get_dto_type()(title="b"))
-        page = await service.search(limit=10, sort="id", desc=True)
-        assert [item.title for item in page.items] == ["b", "a"]
+        page = await service.search(limit=10)
+        assert [item.title for item in page.items] == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------
