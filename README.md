@@ -52,21 +52,34 @@ paging, sort, filters, and cache headers are identical across all three.
 A **list-backed** resource is read-only: it narrows its actions to
 `read` / `search` / `count` / `batch_read` and serves data already modelled as
 Pydantic objects (country codes, feature flags, catalog entries) without
-copying it into a table. Supply the data by overriding `get_items` (sync or
-async); the list *is* the storage, so there is no table and no migration.
+copying it into a table. Because the objects already exist as Pydantic models,
+there is no schema generation — the model *is* the read model, and (being
+read-only) there is no create/update model and no columns. The list *is* the
+storage, so there is no table and no migration.
 
 ```python
-class Country(ListResource):
+from pydantic import BaseModel
+from resourcey.list.list_resource import ListResource
+
+
+class Country(BaseModel):
     id: str
     name: str
     iso3: str
 
-    def get_items(self):
-        return [CountryRead(id="us", name="United States", iso3="USA")]
 
+countries = [
+    Country(id="us", name="United States", iso3="USA"),
+    Country(id="ca", name="Canada", iso3="CAN"),
+]
+resource = ListResource(models=countries, path="countries")
 
-manifest = ResourceManifest(resources=(Country,))
+manifest = ResourceManifest(resources=(resource,))
 ```
+
+`defensive=True` is the default: every object the resource outputs is a deep
+copy of the stored object, so a caller cannot mutate the served collection
+through a result. Pass `defensive=False` to serve the stored objects directly.
 
 ## Stack
 

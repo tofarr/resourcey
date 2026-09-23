@@ -37,7 +37,7 @@ async def client() -> AsyncIterator[AsyncClient]:
     )
     set_config(config)
 
-    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest = ResourceManifest(resources=(Thread(), Message()))
     app = manifest.create_app()
     await manifest.__aenter__()
     try:

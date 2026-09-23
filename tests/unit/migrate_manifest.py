@@ -12,4 +12,4 @@ from migrate_resources_a import Widget
 
 from resourcey.manifest import ResourceManifest
 
-manifest = ResourceManifest(resources=(Widget,))
+manifest = ResourceManifest(resources=(Widget(),))

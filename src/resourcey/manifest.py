@@ -1,15 +1,15 @@
 """The application-owned resource manifest (issue #51).
 
 A :class:`ResourceManifest` is a frozen declaration of the resources an app
-serves. The app author constructs it with resource **types**; the manifest owns
-the resource **instances** and their lifecycle.
+serves. The app author constructs it with resource **instances**; the manifest
+owns the resource **lifecycle**:
 
-    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest = ResourceManifest(resources=(Thread(), Message()))
     app = manifest.create_app()
 
 For a user who owns their own FastAPI app:
 
-    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest = ResourceManifest(resources=(Thread(), Message()))
     @asynccontextmanager
     async def lifespan(app):
         async with manifest:
@@ -17,8 +17,8 @@ For a user who owns their own FastAPI app:
     app = FastAPI(lifespan=lifespan)
     manifest.add_to_app(app, prefix="/api")
 
-Construction instantiates each type and calls ``on_register`` (SQL resources
-build their ORM model so the table lands in metadata before migrations run).
+Construction calls ``on_register`` on each instance (SQL resources build their
+ORM model so the table lands in metadata before migrations run).
 ``__aenter__`` / ``__aexit__`` enter/exit each instance's runtime lifecycle
 (build/dispose connections) in declaration order / reverse.
 """
@@ -41,39 +41,37 @@ from resourcey.resource.routes import register_error_handlers, register_routes
 
 
 class ResourceManifest(BaseModel):
-    """Frozen declaration of an app's resources, owning their instances.
+    """Frozen declaration of an app's resources, owning them.
 
     Attributes:
-        resources: Resource **types** (subclasses of :class:`BaseResource`),
-            in declaration order. The manifest instantiates each on
-            construction and calls ``on_register`` so backend artifacts (SQL
-            models, etc.) are materialised.
+        resources: Resource **instances** (subclasses of :class:`BaseResource`),
+            in declaration order. Construction calls ``on_register`` on each so
+            backend artifacts (SQL models, etc.) are materialised. A resource
+            that needs per-app inputs — e.g. a ``ListResource`` whose data is
+            the model instances themselves — is simply constructed with them::
+
+                manifest = ResourceManifest(resources=(Thread(), Message()))
     """
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    resources: tuple[type[BaseResource], ...]
+    resources: tuple[BaseResource, ...]
 
     # Instance state set after validation. Non-annotated so Pydantic ignores
     # them; stored on the instance via model_post_init.
-    _instances: tuple[BaseResource, ...]
     _ctx: AppContext
     _entered: bool
 
     def model_post_init(self, _context: object) -> None:
-        """Instantiate each resource type and call ``on_register``."""
-        instances: list[BaseResource] = []
-        for cls in self.resources:
-            instance = cls()
+        """Call ``on_register`` on each resource instance."""
+        for instance in self.resources:
             instance.on_register()
-            instances.append(instance)
-        object.__setattr__(self, "_instances", tuple(instances))
         object.__setattr__(self, "_entered", False)
 
     @property
     def instances(self) -> tuple[BaseResource, ...]:
-        """The materialised resource instances (in declaration order)."""
-        return self._instances
+        """The resource instances, in declaration order (alias for ``resources``)."""
+        return self.resources
 
     def materialize(self) -> None:
         """Ensure backend artifacts are built (idempotent, for migrations).
@@ -82,7 +80,7 @@ class ResourceManifest(BaseModel):
         so a manifest imported by ``env.py`` (without entering the lifecycle)
         has its tables in metadata before Alembic diffs.
         """
-        for instance in self._instances:
+        for instance in self.resources:
             instance.on_register()
 
     async def __aenter__(self) -> AppContext:
@@ -99,7 +97,7 @@ class ResourceManifest(BaseModel):
         if ctx is None:
             ctx = AppContext(get_config_as(FrameworkConfig))
             object.__setattr__(self, "_ctx", ctx)
-        for instance in self._instances:
+        for instance in self.resources:
             await instance.__aenter__(ctx)
         return ctx
 
@@ -107,7 +105,7 @@ class ResourceManifest(BaseModel):
         """Exit each resource in reverse order, then run context disposers."""
         ctx = getattr(self, "_ctx", None)
         first_exc: BaseException | None = None
-        for instance in reversed(self._instances):
+        for instance in reversed(self.resources):
             try:
                 await instance.__aexit__(*exc)
             except BaseException as ex:
@@ -156,7 +154,7 @@ class ResourceManifest(BaseModel):
         app = FastAPI(lifespan=lifespan)
         _configure_cors(app, active.cors_origins)
         register_error_handlers(app)
-        for instance in self._instances:
+        for instance in self.resources:
             register_routes(app, instance)
         return app
 
@@ -168,7 +166,7 @@ class ResourceManifest(BaseModel):
         composed explicitly.
         """
         register_error_handlers(app)
-        for instance in self._instances:
+        for instance in self.resources:
             register_routes(app, instance, prefix=prefix)
 
 

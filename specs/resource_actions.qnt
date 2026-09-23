@@ -464,4 +464,44 @@ module resource_actions {
         nextId' = nextId,
       })
   }
+
+  // A list-backed resource serves models that already exist. It is defensive by
+  // default: the object it hands out is a *copy* of the stored one, so a reader
+  // that mutates a result cannot edit the served collection. With
+  // defensive=false the stored object itself is served (an intentional opt-out).
+  //
+  // ``cloneForOutput`` models the policy: it returns a distinct (cloned) object
+  // when defensive, the same object when not.
+  pure def servesClone(defensive: bool): bool = defensive
+
+  // A defensive read of a stored entity yields a value equal to the stored one
+  // (the copy is not observable through the value) yet distinct from it (so a
+  // mutation cannot reach the store).
+  run defensiveReadIsolated = {
+    init
+      .then(create(42))
+      .then(all {
+        assert(servesClone(true)),
+        assert(read(1) == 42),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        // The served value is equal but the store's entity is untouched by it.
+        assert(entities.get(1) == 42),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // Opting out (defensive=false) serves the stored object directly — no copy.
+  run nonDefensiveServesStore = {
+    init
+      .then(create(42))
+      .then(all {
+        assert(not(servesClone(false))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
 }

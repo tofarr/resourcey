@@ -42,7 +42,7 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
     )
     set_config(config)
 
-    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest = ResourceManifest(resources=(Thread(), Message()))
     manifest.materialize()
     migrate_runner.upgrade(config.migrations, database_url=db_url)
 

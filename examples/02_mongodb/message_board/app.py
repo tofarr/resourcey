@@ -17,6 +17,6 @@ from resourcey.manifest import ResourceManifest
 from message_board.message import Message
 from message_board.thread import Thread
 
-manifest = ResourceManifest(resources=(Thread, Message))
+manifest = ResourceManifest(resources=(Thread(), Message()))
 app = manifest.create_app()
 

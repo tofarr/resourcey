@@ -249,7 +249,7 @@ async def secured_app(monkeypatch) -> AsyncIterator[FastAPI]:
     cfg = FrameworkConfig()
     ctx = AppContext(cfg)
     ctx.set(_SESSION_FACTORY_KEY, factory)
-    manifest = ResourceManifest(resources=(AppWidget,))
+    manifest = ResourceManifest(resources=(AppWidget(),))
     app = manifest.create_app(config=cfg, app_context=ctx)
     async with manifest:
         yield app

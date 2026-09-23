@@ -1,9 +1,8 @@
 """``ListService`` - the read-only service over an in-process list of objects.
 
-A :class:`~resourcey.list.list_resource.ListResource` subclass yields a
-``ListService`` from
-:meth:`~resourcey.list.list_resource.ListResource.build_service`. The service
-holds the resolved items as instance state (mirroring how
+A :class:`~resourcey.list.list_resource.ListResource` yields a ``ListService``
+from :meth:`~resourcey.list.list_resource.ListResource.build_service`. The
+service holds the resolved items as instance state (mirroring how
 :class:`~resourcey.resource.service.SqlService` holds an ``AsyncSession``) and
 implements the read subset of the standard
 :class:`~resourcey.resource.service_base.BaseService` contract - ``read``,
@@ -19,6 +18,11 @@ Write actions (``create`` / ``update`` / ``delete`` / ``batch_edit``) are
 intentionally left as the raising :class:`BaseService` defaults: a list
 resource narrows its ``actions`` to the read set, so those methods are never
 routed and never called.
+
+Every output passes through the resource's
+:meth:`~resourcey.resource.base.BaseResource.clone_for_output`, so a defensive
+``ListResource`` hands out deep copies and a caller cannot mutate the served
+collection through a result.
 """
 
 from __future__ import annotations
@@ -145,17 +149,25 @@ class ListService(PagedService):
     def _to_read_model(self, item: Any) -> Any:
         """Project an item into the resource's read-model instance.
 
-        Pydantic models are dumped to a dict first (so a resource read model is
-        never confused with a differently-named caller model); mappings are used
-        as-is; any other object is projected field-by-field. Validation uses the
-        serialization context so secret fields decrypt consistently.
+        The item is first passed through the resource's ``clone_for_output``
+        (a defensive ``ListResource`` deep-copies here, so a served object can
+        never be mutated through). When the served object is already the read
+        model — the common case, where the wrapped Pydantic model *is* the read
+        model — it is returned as-is. Otherwise it is dumped to a dict first (so
+        a resource read model is never confused with a differently-named caller
+        model), mappings are used as-is, and any other object is projected
+        field-by-field. Validation uses the serialization context so secret
+        fields decrypt consistently.
         """
-        if isinstance(item, BaseModel):
-            data = item.model_dump()
-        elif isinstance(item, Mapping):
-            data = dict(item)
+        served = self.resource.clone_for_output(item)
+        if isinstance(served, self.read_model):
+            return served
+        if isinstance(served, BaseModel):
+            data = served.model_dump()
+        elif isinstance(served, Mapping):
+            data = dict(served)
         else:
-            data = {name: getattr(item, name, None) for name in self.read_model.model_fields}
+            data = {name: getattr(served, name, None) for name in self.read_model.model_fields}
         return self.read_model.model_validate(data, context=self._ctx())
 
     def _sort(self, models: list[Any], sort_parsed: tuple[str, bool] | None) -> list[Any]:
