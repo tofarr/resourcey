@@ -60,7 +60,8 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
 * `resources` — resource metadata, service generation, field annotations.
 * `migrations` — Alembic autogeneration from resource models.
 * `auth-rbac` — users, groups, roles, per-action permission computation.
-* `config` — env parser usage and `DiscriminatedUnionMixin`.
+* `config` — env parser usage, `BaseConfig` semantics, and
+  `DiscriminatedUnionMixin`.
 * `pr-review-checklist` — checklist for agents reviewing PRs.
 
 ### `auth2` replaces `auth`
@@ -167,6 +168,45 @@ HTTP construction (`create_app`) is **not** part of `v2/core` — it belongs to
 the transport layer. A test asserts no module under `v2/core` makes a runtime
 import of any `resourcey` package outside `v2/core`, which pins it as the
 bottom layer (`if TYPE_CHECKING:` imports are allowed).
+
+### `v2/util` and `v2/config` — the config rung
+
+`src/resourcey/v2/util/` (issue #82) is where the dependency-free vendored
+leaves now live: `models.py` (`DiscriminatedUnionMixin`),
+`import_paths.py` (dotted-path resolution), and `env_parser.py`. They are
+copies, not moves — v1 `resourcey/util/` is untouched until it is removed.
+`v2/util` depends on `v2/core` for the `Missing` sentinel (below); the
+dependency runs one way and `v2/core` imports no `v2/util`.
+
+**One sentinel.** `Missing` / `MISSING` from `v2/core/dto.py` is the only
+definition in `v2`; `v2/util/env_parser.py` imports it and drops its own
+`MissingType`. A test pins `env_parser.MISSING is dto.MISSING` so a future
+re-copy of the vendored file cannot quietly reintroduce a second sentinel.
+
+`src/resourcey/v2/config/` ships the generic machinery only: `config_base.py`,
+`config_loader.py` (`load_dotenv`), and `lazy_field.py`. `FrameworkConfig`,
+`DbConfig`, `MigrationConfig`, `AuthConfig`, `IdpConfig`, and
+`DependencyBuilder` are deferred to a later PR, so there is no
+`config_framework.py` / `config_dependency.py` here yet, and no
+`config_runtime` at all.
+
+`BaseConfig.get_instance()` caches **per class** and is typed to the owning
+class: `MyAppConfig.get_instance()` returns a `MyAppConfig`,
+`FrameworkConfig.get_instance()` returns a `FrameworkConfig`. There is no
+super/subclass acceptance check and therefore no "not a subclass" error, and
+`clear_instance_cache()` clears only the class it is called on — a base and a
+subclass cache independently. The environment is the single source of truth:
+each class parses its own slice under its own `get_prefix()`, so an app config
+can extend a framework config without the framework needing to know the app's
+fields. `ResourceyConfigError` (with `ResourceyError`) lives in
+`v2/core/errors.py` and covers build/parse failures only; `ServiceError` /
+`NotFoundError` stay in `v2/core/service.py`.
+
+The `v2` isolation test is widened to cover **all** of `v2/`: no module under
+`v2/` may make a runtime import of any `resourcey` code outside `v2/`, with no
+exemption for the legacy `resourcey.util`. It also asserts the core file set is
+exactly `{dto, errors, manifest, resource, service}.py` and that no `v2` module
+imports `openhands`.
 
 ## Database configuration — one connection
 
