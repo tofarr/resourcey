@@ -73,6 +73,17 @@ any of a list of env-configured API keys and composes the check with each
 resource's service dependency, with `api_key_dependency` reusable in any
 router.
 
+The next rung up is the stored API key: `auth2_api_key_resource.py` declares
+`ApiKey` (UUID id, optional `name`, generated `key`, timestamps) and
+`auth2_api_key_service.py` reveals a minted key exactly once. The key is
+`creatable=False` / `updatable=False` / `readable=False`, so the generated
+create, update, and read models omit it and — because the query surface is
+derived from the read model — `?sort=key` and `?key__eq=` are rejected too.
+`ApiKeyService.create` widens the read model with the minted value for the
+`201` only; `specs/api_key.qnt` pins that contract. The column stores the key
+in plaintext so a later lookup-based authenticator can match a presented key;
+moving to a digest column is the hardening step when that lands.
+
 ## Code structure — reusable & testable
 
 * Methods are short and single-purpose. If a method exceeds ~40 lines or does
