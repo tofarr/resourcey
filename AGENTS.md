@@ -84,6 +84,21 @@ derived from the read model — `?sort=key` and `?key__eq=` are rejected too.
 in plaintext so a later lookup-based authenticator can match a presented key;
 moving to a digest column is the hardening step when that lands.
 
+### Storage backends and the shared paging base
+
+Three backends implement the same action contract: `SqlResource`/`SqlService`,
+`MongoResource`/`MongoService`, and `ListResource`/`ListService`. Storage-agnostic
+paging/sort/cursor/cache logic lives in
+`src/resourcey/resource/paged_service.py` (`PagedService`) — a new backend
+subclasses it and implements only its data access, never a copy of the cursor
+or sort-validation code.
+
+`ListResource` is **read-only**: it narrows `actions` to
+`read`/`search`/`count`/`batch_read` so no write route is ever mounted, and its
+data comes from an overridden `get_items()` (sync or async). The list *is* the
+storage, delivered through the same `open_storage`/`build_service` seam; there
+is no table and no migration.
+
 ## Code structure — reusable & testable
 
 * Methods are short and single-purpose. If a method exceeds ~40 lines or does

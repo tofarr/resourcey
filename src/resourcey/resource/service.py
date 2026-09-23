@@ -24,14 +24,12 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from resourcey.cache.cache_header import CacheHeader
-from resourcey.resource.cursor import decode_cursor, encode_cursor
-from resourcey.resource.errors import InvalidInputError, NotFoundError
+from resourcey.resource.errors import NotFoundError
+from resourcey.resource.paged_service import DEFAULT_LIMIT, PagedService
 from resourcey.resource.repository import ResourceRepository
 from resourcey.resource.service_base import BaseService
 
 if TYPE_CHECKING:
-    from resourcey.encryption.encryption_service import EncryptionService
     from resourcey.resource.base import BaseResource
     from resourcey.util.search_filter import SearchFilter
 
@@ -54,13 +52,7 @@ class Page(BaseModel, Generic[T]):
     next_cursor: str | None
 
 
-# Default pagination bounds. ``limit`` is capped so a client cannot request
-# an unbounded scan.
-_DEFAULT_LIMIT = 20
-_MAX_LIMIT = 100
-
-
-class SqlService(BaseService):
+class SqlService(PagedService):
     """The SQL-backed service exposing the standard resource actions.
 
     Constructed from a :class:`~resourcey.resource.base.BaseResource` (a
@@ -79,11 +71,10 @@ class SqlService(BaseService):
         repository_cls: type[ResourceRepository] | None = None,
         serialization_context: dict[str, Any] | None = None,
     ) -> None:
-        self.resource = resource
+        super().__init__(resource)
         self.create_model = resource.get_create_model()
         self.update_model = resource.get_update_model()
         self.read_model = resource.get_read_model()
-        self.id_field = resource.get_id_field()
         self.repository = (repository_cls or ResourceRepository)(resource)
         self._serialization_context = serialization_context
         self._session = session
@@ -103,9 +94,6 @@ class SqlService(BaseService):
         ``encryption_service`` / ``expose_secrets`` context.
         """
         return self._serialization_context
-
-    def _ctx(self) -> dict[str, Any] | None:
-        return self.serialization_context()
 
     # ------------------------------------------------------------------
     # Standard actions
@@ -138,7 +126,7 @@ class SqlService(BaseService):
     async def search(
         self,
         *,
-        limit: int = _DEFAULT_LIMIT,
+        limit: int = DEFAULT_LIMIT,
         cursor: str | None = None,
         sort: str | None = None,
         desc: bool = False,
@@ -153,9 +141,9 @@ class SqlService(BaseService):
         (default ascending). The returned ``next_cursor`` is ``None`` when
         this page is the last.
         """
-        limit = self._validate_limit(limit)
-        sort_parsed = self._parse_sort(sort, desc)
-        decoded_cursor = self._decode_cursor(cursor, sort_parsed)
+        limit = self.validate_limit(limit)
+        sort_parsed = self.parse_sort(sort, desc)
+        decoded_cursor = self.decode_cursor(cursor, sort_parsed)
         # Fetch one extra row to detect whether a next page exists without a
         # separate count query (keyset pagination does not use total/offset).
         items = await self.repository.search(
@@ -168,7 +156,7 @@ class SqlService(BaseService):
         )
         has_next = len(items) > limit
         items = items[:limit]
-        next_cursor = self._next_cursor(items, sort_parsed) if has_next else None
+        next_cursor = self.next_cursor(items, sort_parsed) if has_next else None
         return Page(items=items, limit=limit, next_cursor=next_cursor)
 
     async def count(
@@ -212,149 +200,6 @@ class SqlService(BaseService):
             )
             results.append(updated)
         return results
-
-    # ------------------------------------------------------------------
-    # Cache header computation (logic; delegates to the resource strategy)
-    # ------------------------------------------------------------------
-
-    def compute_cache_header(self, items: list[Any]) -> CacheHeader | None:
-        """Resolve the resource's cache strategy and compute a header for ``items``.
-
-        Returns the :class:`~resourcey.cache.cache_header.CacheHeader`, or
-        ``None`` when the strategy yields no validators and no expiry (so the
-        HTTP layer skips header setting entirely). The serialization context
-        (``self._ctx()``) is threaded into the strategy so the ETag validates
-        the same bytes the response body serializes to.
-        """
-        header = self.resource.get_cache_strategy().get_cache_header(items, context=self._ctx())
-        return header if header.has_any() else None
-
-    def compute_count_cache_header(
-        self,
-        count: int,
-        filters: SearchFilter[Any] | None,
-    ) -> CacheHeader | None:
-        """Compute a count-derived cache header for the ``count`` route.
-
-        ``count`` returns a bare integer, not read-model instances, so the
-        model-based ``get_cache_header`` does not apply. The ETag is a stable
-        hash of the count value together with the canonical-JSON serialization
-        of the resolved filter (distinct filters get distinct ETags). No
-        ``Last-Modified`` (a row delete changes the count without touching any
-        ``updated_at``, so last-modified is an unreliable validator for a
-        count). ``expire_in`` from the resource's strategy is honoured.
-        """
-        from resourcey.cache.cache_strategy import _digest, _stable_json
-
-        strategy = self.resource.get_cache_strategy()
-        parts: list[bytes] = [str(count).encode("utf-8"), b"\n"]
-        if filters is not None:
-            parts.append(_stable_json(filters.model_dump(mode="json")).encode("utf-8"))
-        header = CacheHeader(etag=f'"{_digest(parts)}"')
-        return strategy.with_expiry(header) if header.has_any() else None
-
-    # ------------------------------------------------------------------
-    # Validation helpers
-    # ------------------------------------------------------------------
-
-    def _validate_limit(self, limit: int) -> int:
-        if limit < 1:
-            raise InvalidInputError(f"limit must be >= 1, got {limit}")
-        if limit > _MAX_LIMIT:
-            limit = _MAX_LIMIT
-        return limit
-
-    def _encryption_service(self) -> EncryptionService:
-        """The encryption service used to encrypt/decrypt cursors.
-
-        Sourced from the serialization context (shared with at-rest field
-        encryption) when present, otherwise the process-wide singleton. The
-        singleton is always available in production (the encryption key is
-        required config); tests set ``RESOURCEY_ENCRYPTION_KEY_*`` env vars.
-        """
-        from resourcey.encryption.encryption_service import get_encryption_service
-
-        ctx = self._serialization_context
-        if ctx is not None:
-            enc = ctx.get("encryption_service")
-            if enc is not None:
-                return enc  # type: ignore[no-any-return]
-        return get_encryption_service()
-
-    def _sort_key_field(self, sort_parsed: tuple[str, bool] | None) -> str:
-        """The field whose value the cursor keys off (id when no sort is requested)."""
-        if sort_parsed is None:
-            return self.id_field
-        return sort_parsed[0]
-
-    def _decode_cursor(
-        self,
-        cursor: str | None,
-        sort_parsed: tuple[str, bool] | None,
-    ) -> tuple[Any, Any] | None:
-        """Decrypt an opaque cursor into a ``(sort_key, id)`` pair, or ``None``.
-
-        Validates that the cursor was built for the same ``(sort_field,
-        ascending)`` as the current request: a cursor from a ``sort=size``
-        page reused under ``sort=created_at`` (or no sort) would apply the
-        decrypted key against the wrong column, yielding silently wrong
-        results, so it is rejected with ``400 invalid_input``.
-        """
-        if not cursor:
-            return None
-        try:
-            c_field, c_ascending, sort_key, id_value = decode_cursor(
-                self._encryption_service(), cursor
-            )
-        except (ValueError, KeyError) as exc:
-            raise InvalidInputError(f"Invalid or tampered cursor: {exc}") from exc
-        expected_field = sort_parsed[0] if sort_parsed is not None else None
-        expected_ascending = sort_parsed[1] if sort_parsed is not None else True
-        if c_field != expected_field or c_ascending != expected_ascending:
-            raise InvalidInputError(
-                "Cursor was built for a different sort than the current request; "
-                "start a new search without a cursor when changing sort."
-            )
-        return sort_key, id_value
-
-    def _next_cursor(
-        self,
-        items: list[Any],
-        sort_parsed: tuple[str, bool] | None,
-    ) -> str | None:
-        """Encode a ``next_cursor`` from the last item, or ``None`` if the page is exhausted."""
-        if not items:
-            return None
-        last = items[-1]
-        field = self._sort_key_field(sort_parsed)
-        sort_key = getattr(last, field)
-        id_value = getattr(last, self.id_field)
-        sort_field = sort_parsed[0] if sort_parsed is not None else None
-        ascending = sort_parsed[1] if sort_parsed is not None else True
-        return encode_cursor(
-            self._encryption_service(),
-            sort_field=sort_field,
-            ascending=ascending,
-            sort_key=sort_key,
-            id_value=id_value,
-        )
-
-    def _parse_sort(self, sort: str | None, desc: bool) -> tuple[str, bool] | None:
-        """Map a sort field name + ``desc`` flag to a ``(field, ascending)`` tuple.
-
-        Validates the field against the resource's ``sortable`` flag (unknown
-        / non-sortable fields -> :class:`InvalidInputError`). Returns ``None``
-        when no sort is requested. ``ascending`` is ``not desc``.
-        """
-        if not sort:
-            return None
-        if sort not in self.resource.model_fields:
-            raise InvalidInputError(f"Unknown sort field {sort!r}")
-        field = self.resource.model_fields[sort]
-        config = self.resource.get_config_for_field(sort, field)
-        if not config.sortable:
-            raise InvalidInputError(f"Field {sort!r} is not sortable")
-        return sort, not desc
 
 
 # Re-export for backward-compatible imports (tests / app still import these

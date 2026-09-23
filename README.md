@@ -38,6 +38,36 @@ Declaring a resource produces:
 * **Permissions** — the resource declares which actions a role may perform,
   and the framework computes the effective permission set per user.
 
+## Storage backends
+
+A resource is declared against one of three backends; the action contract,
+paging, sort, filters, and cache headers are identical across all three.
+
+| Backend | Base class | Storage |
+|---|---|---|
+| SQL | `SqlResource` | SQLAlchemy 2 (async) table |
+| Mongo | `MongoResource` | an async `motor` collection |
+| List | `ListResource` | an in-process list of Pydantic objects |
+
+A **list-backed** resource is read-only: it narrows its actions to
+`read` / `search` / `count` / `batch_read` and serves data already modelled as
+Pydantic objects (country codes, feature flags, catalog entries) without
+copying it into a table. Supply the data by overriding `get_items` (sync or
+async); the list *is* the storage, so there is no table and no migration.
+
+```python
+class Country(ListResource):
+    id: str
+    name: str
+    iso3: str
+
+    def get_items(self):
+        return [CountryRead(id="us", name="United States", iso3="USA")]
+
+
+manifest = ResourceManifest(resources=(Country,))
+```
+
 ## Stack
 
 | Concern | Tool |
