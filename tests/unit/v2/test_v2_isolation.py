@@ -1,15 +1,18 @@
 """The ``v2`` isolation test (issues #75 / #78 / #82).
 
 Asserts that no module under ``resourcey/v2/`` makes a **runtime** import of any
-``resourcey`` module *outside* ``v2/`` — that is what lets the whole of ``v2``
-be layered and eventually replace v1 without a hidden dependency on the code it
-replaces. Imports under ``if TYPE_CHECKING:`` are allowed (they do not execute
-at runtime, and the existing base relies on that to avoid cycles), so the check
-is a static AST walk that tracks whether an import sits inside a
-``TYPE_CHECKING`` guard.
+``resourcey`` module *outside* ``v2/`` — that is what pins ``v2`` as a
+self-contained layer (its ``core``, ``config``, ``encryption``, ``sql``, and
+``util`` packages import only each other and the wider third-party stack, never
+the legacy ``v1`` packages). Imports under ``if TYPE_CHECKING:`` are allowed
+(they do not execute at runtime, and the existing base relies on that to avoid
+cycles), so the check is a static AST walk that tracks whether an import sits
+inside a ``TYPE_CHECKING`` guard.
 
 ``v2/util`` depends on ``v2/core`` (the ``Missing`` sentinel is defined in core
 and consumed by util); that is a one-way edge inside ``v2`` and is allowed.
+
+It fails if a runtime cross-layer import is added.
 """
 
 from __future__ import annotations
@@ -18,12 +21,7 @@ import ast
 import pathlib
 
 V2_DIR = pathlib.Path(__file__).resolve().parents[3] / "src" / "resourcey" / "v2"
-CORE_DIR = V2_DIR / "core"
 _V2_PREFIX = "resourcey.v2"
-
-
-def _core_modules() -> list[pathlib.Path]:
-    return sorted(p for p in CORE_DIR.glob("*.py"))
 
 
 def _v2_modules() -> list[pathlib.Path]:
@@ -51,13 +49,13 @@ def _within_type_checking(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> boo
 
 
 def _is_outside_v2(module: str) -> bool:
-    """Whether a ``resourcey`` dotted module resolves outside ``v2``."""
+    """Whether a ``resourcey`` dotted module resolves outside ``v2/``."""
     if module == "resourcey":
         return True
     return not (module == _V2_PREFIX or module.startswith(_V2_PREFIX + "."))
 
 
-def _runtime_cross_package_imports(path: pathlib.Path) -> list[str]:
+def _runtime_cross_layer_imports(path: pathlib.Path) -> list[str]:
     tree = ast.parse(path.read_text(), filename=str(path))
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     found: list[str] = []
@@ -82,22 +80,43 @@ def _runtime_cross_package_imports(path: pathlib.Path) -> list[str]:
     return sorted(set(found))
 
 
-def test_v2_has_no_runtime_cross_package_imports():
+def test_v2_has_no_runtime_cross_layer_imports():
     violations: dict[str, list[str]] = {}
     for path in _v2_modules():
-        imports = _runtime_cross_package_imports(path)
+        imports = _runtime_cross_layer_imports(path)
         if imports:
             violations[str(path.relative_to(V2_DIR))] = imports
     assert violations == {}, (
-        "every v2 module must import only v2 code at runtime; these import "
-        f"resourcey packages outside v2: {violations}"
+        "v2 must stand alone; these modules import resourcey packages outside v2 "
+        f"at runtime: {violations}"
     )
 
 
 def test_the_core_files_exist_without_an_init():
-    names = {p.name for p in _core_modules()}
+    core = V2_DIR / "core"
+    names = {p.name for p in sorted(core.glob("*.py"))}
     assert names == {"dto.py", "errors.py", "manifest.py", "resource.py", "service.py"}
-    assert not (CORE_DIR / "__init__.py").exists()
+    assert not (core / "__init__.py").exists()
+
+
+def test_the_sql_files_exist_without_an_init():
+    sql = V2_DIR / "sql"
+    names = {p.name for p in sorted(sql.glob("*.py"))}
+    assert names == {
+        "cursor.py",
+        "migration.py",
+        "resource.py",
+        "service.py",
+        "sqlalchemy_2_dto.py",
+    }
+    assert not (sql / "__init__.py").exists()
+
+
+def test_the_encryption_files_exist_without_an_init():
+    encryption = V2_DIR / "encryption"
+    names = {p.name for p in sorted(encryption.glob("*.py"))}
+    assert names == {"encryption_config.py", "encryption_service.py"}
+    assert not (encryption / "__init__.py").exists()
 
 
 def _imports_openhands(path: pathlib.Path) -> bool:
@@ -124,22 +143,22 @@ def test_no_v2_module_imports_openhands():
     assert offenders == []
 
 
-def test_detector_catches_an_added_cross_package_import(tmp_path):
-    # A runtime cross-package import is flagged...
+def test_detector_catches_an_added_cross_layer_import(tmp_path):
+    # A runtime cross-layer import is flagged...
     bad = tmp_path / "bad.py"
     bad.write_text("from resourcey.resource.base import BaseResource\n")
-    assert _runtime_cross_package_imports(bad) == ["resourcey.resource.base"]
+    assert _runtime_cross_layer_imports(bad) == ["resourcey.resource.base"]
 
     # ...an intra-v2 import is fine...
     ok = tmp_path / "ok.py"
     ok.write_text("from resourcey.v2.core.dto import DTO\n")
-    assert _runtime_cross_package_imports(ok) == []
+    assert _runtime_cross_layer_imports(ok) == []
 
-    # ...and a TYPE_CHECKING-guarded cross-package import is allowed.
+    # ...and a TYPE_CHECKING-guarded cross-layer import is allowed.
     guarded = tmp_path / "guarded.py"
     guarded.write_text(
         "from typing import TYPE_CHECKING\n"
         "if TYPE_CHECKING:\n"
         "    from resourcey.resource.base import BaseResource\n"
     )
-    assert _runtime_cross_package_imports(guarded) == []
+    assert _runtime_cross_layer_imports(guarded) == []
