@@ -370,6 +370,56 @@ def test_resource_path_override():
     assert resource.get_resource_path() == "custom/threads"
 
 
+class ByCode(DTO, id_field_name="code"):
+    code: str
+    name: str
+
+
+@pytest_asyncio.fixture
+async def code_resource() -> AsyncIterator[tuple[SqlResource[Any], Any]]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(ByCode, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(resource.metadata.create_all)
+    yield resource, maker
+    await engine.dispose()
+
+
+def test_get_id_field_reads_the_dto_declaration(code_resource):
+    resource, _maker = code_resource
+    assert resource.get_id_field() == "code"
+    assert [c.name for c in resource.table.primary_key.columns] == ["code"]
+
+
+def test_non_integer_identifier_is_a_plain_primary_key(code_resource):
+    resource, _maker = code_resource
+    column = resource.table.c["code"]
+    assert column.primary_key is True
+    # A string key is not an autoincrement integer; the caller must supply it.
+    assert column.autoincrement is not True
+    assert resource.table.c["name"].nullable is True
+
+
+async def test_crud_with_a_custom_identifier(code_resource):
+    resource, _maker = code_resource
+    async with resource.get_service() as service:
+        created = await service.create(ByCode.get_dto_type()(code="US", name="United States"))
+        assert (created.code, created.name) == ("US", "United States")
+
+        read = await service.read("US")
+        assert read.name == "United States"
+
+        updated = await service.update("US", ByCode.get_dto_type()(name="USA"))
+        assert updated.name == "USA"
+        # The identifier is never overwritten by an update payload.
+        assert updated.code == "US"
+
+        await service.delete("US")
+        with pytest.raises(NotFoundError):
+            await service.read("US")
+
+
 def test_table_and_metadata_properties():
     resource = SqlResource(Thread, session_factory=_dummy_factory())
     assert resource.table.name == "threads"

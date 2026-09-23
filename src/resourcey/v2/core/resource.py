@@ -74,6 +74,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.v2.core.dto import (
+    DEFAULT_ID_FIELD_NAME,
     DTO,
     MISSING,
     DtoField,
@@ -128,8 +129,8 @@ class Resource(Generic[T]):
         return self._dto.get_rest_models()
 
     def get_id_field(self) -> str:
-        """The primary identifier field name (``id``)."""
-        return "id"
+        """The identifier field name, from the DTO declaration (``id`` by default)."""
+        return self._dto.id_field_name
 
     def get_search_filter_type(self) -> type | None:
         """The declared search-filter class, or ``None`` for no filtering."""
@@ -499,14 +500,16 @@ def _column_type(annotation: Any) -> Any:
     raise ServiceError(f"No SQL column type for DTO field annotation {annotation!r}")
 
 
-def _column_for(field_name: str, annotation: Any) -> Column[Any]:
-    """A column for one DTO field (the ``id`` is the autoincrement primary key)."""
+def _column_for(field_name: str, annotation: Any, id_field_name: str) -> Column[Any]:
+    """A column for one DTO field (the identifier is the primary key)."""
     column_type = _column_type(annotation)
-    if field_name == "id" and column_type is Integer:
+    if field_name != id_field_name:
+        return Column(field_name, column_type, nullable=True)
+    # Only the conventional ``id`` is server-generated; an author-chosen
+    # identifier is a natural key the caller supplies.
+    if field_name == DEFAULT_ID_FIELD_NAME and column_type is Integer:
         return Column(field_name, Integer, primary_key=True, autoincrement=True)
-    if field_name == "id":
-        return Column(field_name, column_type, primary_key=True)
-    return Column(field_name, column_type, nullable=True)
+    return Column(field_name, column_type, primary_key=True)
 
 
 def _dto_fields(dto: type[DTO]) -> list[tuple[str, Any, DtoField]]:
@@ -518,6 +521,7 @@ def _build_table(dto: type[DTO], metadata: MetaData) -> Table:
     """Generate a SQLAlchemy table from a DTO declaration (one column per field)."""
     name = _pluralize(_camel_to_kebab(dto.__name__).lower().replace("-", "_"))
     columns = [
-        _column_for(field_name, annotation) for field_name, annotation, _cfg in _dto_fields(dto)
+        _column_for(field_name, annotation, dto.id_field_name)
+        for field_name, annotation, _cfg in _dto_fields(dto)
     ]
     return Table(name, metadata, *columns)

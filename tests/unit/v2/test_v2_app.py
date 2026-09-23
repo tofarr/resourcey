@@ -57,6 +57,12 @@ def build_app(manifest: Manifest[Any]) -> FastAPI:
     return app
 
 
+def _id_type(models: Any, id_field: str) -> type:
+    """The declared type of the identifier, taken from the read model."""
+    annotation = models.read_response.model_fields[id_field].annotation
+    return annotation if isinstance(annotation, type) else str
+
+
 def _mount_resource(app: FastAPI, resource: Any) -> None:
     """Register one resource's supported action routes (closures bound per resource)."""
     exposed = resource.get_exposed_resource()
@@ -65,7 +71,8 @@ def _mount_resource(app: FastAPI, resource: Any) -> None:
     models = exposed.get_rest_models()
     supported = exposed.get_supported_actions()
     dep = Depends(exposed.get_service_dependency)
-    id_type = int
+    id_field = exposed.get_id_field()
+    id_type = _id_type(models, id_field)
     prefix = exposed.get_resource_path()
 
     if Action.CREATE in supported:
@@ -109,7 +116,7 @@ def _mount_resource(app: FastAPI, resource: Any) -> None:
     if Action.READ in supported:
 
         async def read(
-            id: int,  # noqa: A002
+            id: id_type,  # noqa: A002
             service: Service[Any] = dep,
             _models: Any = models,
             _prefix: str = prefix,
@@ -123,7 +130,7 @@ def _mount_resource(app: FastAPI, resource: Any) -> None:
     if Action.UPDATE in supported:
 
         async def update(
-            id: int,  # noqa: A002
+            id: id_type,  # noqa: A002
             payload: Any,
             service: Service[Any] = dep,
             _models: Any = models,
@@ -139,7 +146,7 @@ def _mount_resource(app: FastAPI, resource: Any) -> None:
     if Action.DELETE in supported:
 
         async def delete(
-            id: int,  # noqa: A002
+            id: id_type,  # noqa: A002
             service: Service[Any] = dep,
             _models: Any = models,
             _prefix: str = prefix,
@@ -221,3 +228,43 @@ async def test_read_response_uses_the_read_model_projections(client: AsyncClient
     read = (await client.get(f"/threads/{created['id']}")).json()
     # The read model for Thread is id + title (both default-visible).
     assert set(read) == {"id", "title"}
+
+
+class Country(DTO, id_field_name="code"):
+    code: str
+    name: str
+
+
+@pytest_asyncio.fixture
+async def code_client() -> AsyncIterator[AsyncClient]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    countries = SqlResource(Country, session_factory=maker, path="/countries")
+    async with engine.begin() as conn:
+        await conn.run_sync(countries.metadata.create_all)
+
+    manifest: Manifest[Any] = Manifest(resources=[countries])
+    app = build_app(manifest)
+    async with manifest:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            yield c
+    await engine.dispose()
+
+
+async def test_custom_identifier_over_http(code_client: AsyncClient):
+    # The identifier is client-supplied (not a create-request field, no autoincrement).
+    created = await code_client.post("/countries", json={"code": "US", "name": "United States"})
+    assert created.status_code == 201
+    assert created.json() == {"code": "US", "name": "United States"}
+
+    fetched = await code_client.get("/countries/US")
+    assert fetched.status_code == 200
+    assert fetched.json()["name"] == "United States"
+
+    updated = await code_client.patch("/countries/US", json={"name": "USA"})
+    assert updated.status_code == 200
+    assert updated.json() == {"code": "US", "name": "USA"}
+
+    assert (await code_client.delete("/countries/US")).status_code == 204
+    assert (await code_client.get("/countries/US")).status_code == 404

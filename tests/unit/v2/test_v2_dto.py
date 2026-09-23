@@ -8,7 +8,7 @@ logical-default precedence, and the six derived REST models.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, ClassVar
+from typing import Annotated, Any, ClassVar
 from uuid import UUID, uuid4
 
 import pytest
@@ -35,6 +35,13 @@ def test_missing_is_singleton_and_type_usable():
     assert Missing() is MISSING
     assert repr(MISSING) == "MISSING"
     assert not MISSING
+
+
+def test_missing_copies_stay_the_singleton():
+    import copy
+
+    assert copy.copy(MISSING) is MISSING
+    assert copy.deepcopy(MISSING) is MISSING
 
 
 def test_missing_usable_in_annotation_and_omitted_distinct_from_none():
@@ -204,3 +211,239 @@ def test_new_and_get_fields_cover_to_dto_paths():
     key = uuid4()
     instance = MyStoredKey.get_dto_type()(id=key, key="k")
     assert instance.id == key
+
+
+# ---------------------------------------------------------------------------
+# id_field_name — selecting which field is the identifier
+# ---------------------------------------------------------------------------
+
+
+def test_id_field_name_defaults_to_id():
+    class M(DTO):
+        id: int
+        name: str
+
+    assert DTO.id_field_name == "id"
+    assert M.id_field_name == "id"
+
+
+def test_id_field_name_selects_another_field_and_applies_id_conventions():
+    class Country(DTO, id_field_name="code"):
+        code: str
+        name: str
+
+    assert Country.id_field_name == "code"
+    # A custom identifier is a natural key the client supplies on create, but it
+    # is immutable, so it never appears in an update request.
+    assert Country.get_fields()["code"].in_create_request is True
+    assert Country.get_fields()["code"].in_update_request is False
+    assert Country.get_fields()["name"].in_create_request is True
+    assert list(Country.get_rest_models().create_request.model_fields) == ["code", "name"]
+    assert list(Country.get_rest_models().update_request.model_fields) == ["name"]
+    assert list(Country.get_rest_models().read_response.model_fields) == ["code", "name"]
+
+
+def test_conventional_id_is_excluded_from_create_requests():
+    class M(DTO):
+        id: int
+        name: str
+
+    assert M.get_fields()["id"].in_create_request is False
+    assert M.get_fields()["id"].in_update_request is False
+    assert list(M.get_rest_models().create_request.model_fields) == ["name"]
+
+
+def test_id_field_name_leaves_a_declared_id_field_alone():
+    class M(DTO, id_field_name="code"):
+        id: int
+        code: str
+        name: str
+
+    # Only ``code`` is the identifier: it is immutable but client-supplied on
+    # create, while a plain ``id`` is just an ordinary field here.
+    assert M.get_fields()["code"].in_create_request is True
+    assert M.get_fields()["code"].in_update_request is False
+    assert M.get_fields()["id"].in_create_request is True
+    assert M.get_fields()["id"].in_update_request is True
+
+
+def test_id_field_name_can_be_declared_in_the_class_body():
+    class M(DTO):
+        id_field_name = "slug"
+
+        slug: str
+        title: str
+
+    assert M.id_field_name == "slug"
+    assert M.get_fields()["slug"].in_create_request is True
+    assert M.get_fields()["slug"].in_update_request is False
+
+
+def test_id_field_name_is_inherited_and_overridable():
+    class Base(DTO, id_field_name="code"):
+        code: str
+        name: str
+
+    class Child(Base):
+        population: int
+
+    class Override(Base, id_field_name="name"):
+        population: int
+
+    assert Child.id_field_name == "code"
+    assert list(Child.get_rest_models().create_request.model_fields) == [
+        "code",
+        "name",
+        "population",
+    ]
+    assert Override.id_field_name == "name"
+    # The override re-points the identifier; ``code`` reverts to an ordinary field.
+    assert list(Override.get_rest_models().create_request.model_fields) == [
+        "code",
+        "name",
+        "population",
+    ]
+    assert list(Override.get_rest_models().update_request.model_fields) == ["code", "population"]
+    assert Override.get_fields()["name"].in_update_request is False
+    assert Override.get_fields()["code"].in_update_request is True
+
+
+def test_id_field_name_must_reference_a_declared_field():
+    with pytest.raises(TypeError, match="has no such field"):
+
+        class Bad(DTO, id_field_name="nope"):
+            id: int
+
+
+def test_id_field_name_must_be_a_non_empty_string():
+    with pytest.raises(TypeError, match="non-empty string"):
+
+        class Empty(DTO, id_field_name=""):
+            id: int
+
+    with pytest.raises(TypeError, match="non-empty string"):
+
+        class NotAString(DTO, id_field_name=7):  # type: ignore[arg-type]
+            id: int
+
+
+def test_id_field_name_is_not_itself_a_field():
+    class M(DTO, id_field_name="code"):
+        code: str
+        name: str
+
+    assert list(M.get_fields()) == ["code", "name"]
+    assert "id_field_name" not in M.get_dto_type().model_fields
+
+
+# ---------------------------------------------------------------------------
+# metadata — the free-form extra-data store on DTO and DtoField
+# ---------------------------------------------------------------------------
+
+
+def test_dto_metadata_defaults_to_empty_and_is_stored():
+    class Plain(DTO):
+        id: int
+
+    assert Plain.metadata == {}
+
+    class Tagged(DTO, metadata={"table": "threads", "version": 1}):
+        id: int
+
+    assert Tagged.metadata == {"table": "threads", "version": 1}
+
+
+def test_dto_metadata_is_inherited_and_merged_child_wins():
+    class Base(DTO, metadata={"table": "threads", "version": 1}):
+        id: int
+
+    class Child(Base, metadata={"version": 2, "extra": True}):
+        title: str
+
+    assert Child.metadata == {"table": "threads", "version": 2, "extra": True}
+    # The parent's own mapping is not mutated by the subclass.
+    assert Base.metadata == {"table": "threads", "version": 1}
+
+    # Subclassing without metadata still inherits.
+    class GrandChild(Child):
+        body: str
+
+    assert GrandChild.metadata == Child.metadata
+
+
+def test_dto_metadata_can_be_declared_in_the_body():
+    class Base(DTO, metadata={"table": "threads", "version": 1}):
+        id: int
+
+    class Child(Base):
+        metadata: ClassVar[dict[str, Any]] = {"version": 2}
+
+        title: str
+
+    assert Child.metadata == {"table": "threads", "version": 2}
+    assert Base.metadata == {"table": "threads", "version": 1}
+
+
+def test_dto_metadata_holds_arbitrary_values():
+    marker = object()
+
+    class Rich(DTO, metadata={"anything": marker, "nested": {"a": [1, 2]}}):
+        id: int
+
+    assert Rich.metadata["anything"] is marker
+    assert Rich.metadata["nested"] == {"a": [1, 2]}
+
+
+def test_metadata_is_not_treated_as_a_dto_field():
+    class Tagged(DTO, metadata={"x": 1}):
+        id: int
+        title: str
+
+    assert list(Tagged.get_fields()) == ["id", "title"]
+    assert "metadata" not in Tagged.get_dto_type().model_fields
+
+
+def test_dto_field_metadata_defaults_to_empty_and_is_stored():
+    assert DtoField().metadata == {}
+    field = DtoField(in_read_response=False, metadata={"label": "Key", "ui": {"width": 10}})
+    assert field.metadata == {"label": "Key", "ui": {"width": 10}}
+
+
+def test_dto_field_metadata_survives_overrides_and_is_reachable_from_the_dto():
+    class M(DTO):
+        id: int
+        title: str = DtoField(metadata={"label": "Title"})
+
+    resolved = M.get_fields()["title"]
+    assert resolved.metadata == {"label": "Title"}
+    # Convention overrides must not drop metadata.
+    id_config = M.get_fields()["id"]
+    assert id_config.in_create_request is False
+    assert id_config.metadata == {}
+
+    overridden = DtoField(metadata={"label": "T"}).with_overrides(in_create_request=False)
+    assert overridden.metadata == {"label": "T"}
+    assert overridden.in_create_request is False
+
+
+def test_dto_field_metadata_needs_no_copy_per_field():
+    # Each instance owns its own dict, so one declaration cannot leak into another.
+    a = DtoField()
+    b = DtoField()
+    a.metadata["k"] = 1
+    assert b.metadata == {}
+
+
+def test_dto_field_metadata_via_annotated_metadata():
+    class M(DTO):
+        id: int
+        secret: Annotated[str, DtoField(metadata={"sensitive": True})]
+
+    assert M.get_fields()["secret"].metadata == {"sensitive": True}
+
+
+def test_dto_field_equality_and_hash_ignore_metadata():
+    # metadata is an annotation, not identity: it is excluded from comparison so
+    # a difference in it does not churn derived models or hashing.
+    assert DtoField(metadata={"a": 1}) == DtoField(metadata={"b": 2})
+    assert hash(DtoField(metadata={"a": 1})) == hash(DtoField())

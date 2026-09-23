@@ -33,7 +33,7 @@ import operator
 import types
 import typing
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import reduce
 from typing import Any, ClassVar, get_args, get_origin, get_type_hints
@@ -42,6 +42,12 @@ from pydantic import BaseModel, Field, create_model
 
 _UNSET: Any = object()
 _NO_DEFAULT: Any = object()
+
+# The field that identifies a row / resource unless a declaration says otherwise.
+DEFAULT_ID_FIELD_NAME = "id"
+
+# Names owned by the declaration machinery, never DTO fields.
+_RESERVED_NAMES = frozenset({"metadata", "id_field_name"})
 
 
 # ---------------------------------------------------------------------------
@@ -122,6 +128,11 @@ class DtoField:
     ``logical_default_value`` / ``logical_default_value_factory`` are the
     values used when the client omits the field (distinct from ``MISSING``);
     precedence is client value -> logical default -> ``MISSING``.
+
+    ``metadata`` is free-form: a general-purpose store for extra data a
+    downstream layer wants to attach to the field (a UI label, a column hint,
+    a validation rule). ``v2/core`` never reads it; it is there so extensions
+    do not need a new ``DtoField`` attribute each.
     """
 
     in_create_request: bool = True
@@ -132,6 +143,7 @@ class DtoField:
     in_search_response: bool = True
     logical_default_value: Any = _UNSET
     logical_default_value_factory: Callable[[], Any] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
     @property
     def has_logical_default(self) -> bool:
@@ -188,23 +200,59 @@ class DTO:
     :class:`DtoField` as its class-attribute value, or just leave it bare and
     let the conventions apply::
 
-        class MyStoredKey(DTO):
+        class MyStoredKey(DTO, metadata={"table": "stored_keys"}):
             id: UUID
-            key: str = DtoField(in_read_response=False)
+            key: str = DtoField(in_read_response=False, metadata={"label": "Key"})
             description: str | None = DtoField(logical_default_value=None)
             created_at: datetime = DtoField(
                 in_create_request=False, logical_default_value_factory=utc_now
             )
+
+    ``metadata`` is free-form extra data, inherited and merged down the MRO; a
+    subclass may pass ``metadata=`` as a class keyword or declare a ``metadata``
+    attribute in its body. See :attr:`metadata`.
     """
 
     __dto_fields__: ClassVar[dict[str, tuple[Any, DtoField]]]
     __dto_model__: ClassVar[type[BaseModel]]
     __rest_models__: ClassVar[RestModels]
 
-    def __init_subclass__(cls, **kwargs: Any) -> None:
+    metadata: ClassVar[dict[str, Any]] = {}
+    """Free-form extra data attached to the declaration.
+
+    A general-purpose store for whatever a downstream layer needs (a table
+    name, a label, a feature flag). ``v2/core`` never reads it. It is inherited
+    and merged across the MRO, and is *not* a DTO field.
+    """
+
+    id_field_name: ClassVar[str] = DEFAULT_ID_FIELD_NAME
+    """The field that identifies a row / resource — ``id`` by default.
+
+    Override with the ``id_field_name=`` class keyword to use another declared
+    field as the identifier (e.g. a natural key)::
+
+        class Country(DTO, id_field_name="code"):
+            code: str
+            name: str
+
+    The identifier gets the ``id`` conventions (omitted from create/update
+    requests) and, in the SQL backend, becomes the primary key. Validated at
+    subclass creation: the named field must exist, or ``TypeError`` is raised.
+    """
+
+    def __init_subclass__(
+        cls,
+        *,
+        metadata: dict[str, Any] | None = None,
+        id_field_name: str | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init_subclass__(**kwargs)
+        cls.metadata = _resolve_metadata(cls, metadata)
+        cls.id_field_name = _resolve_id_field_name(cls, id_field_name)
         fields = _collect_dto_fields(cls)
         cls.__dto_fields__ = fields
+        _assert_id_field_exists(cls, fields)
         cls.__dto_model__ = _build_dto_model(cls.__name__, fields)
         cls.__rest_models__ = _build_rest_models(cls.__name__, fields)
 
@@ -252,12 +300,56 @@ class DTO:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_metadata(cls: type[DTO], declared: dict[str, Any] | None) -> dict[str, Any]:
+    """The class metadata: the nearest ancestor's mapping merged with the subclass's.
+
+    Sources, lowest precedence first: the nearest base's resolved ``metadata``,
+    a mapping written in this class body, and a ``metadata=`` class keyword.
+    """
+    parent: dict[str, Any] = {}
+    for base in cls.__mro__[1:]:
+        inherited = base.__dict__.get("metadata")
+        if isinstance(inherited, dict):
+            parent = dict(inherited)
+            break
+    merged = dict(parent)
+    own = cls.__dict__.get("metadata")
+    if isinstance(own, dict):
+        merged.update(own)
+    if declared:
+        merged.update(declared)
+    return merged
+
+
+def _resolve_id_field_name(cls: type[DTO], declared: str | None) -> str:
+    """The identifier field name: the class keyword, else the inherited value."""
+    if declared is not None:
+        resolved: Any = declared
+    else:
+        resolved = getattr(cls, "id_field_name", DEFAULT_ID_FIELD_NAME)
+    if not isinstance(resolved, str) or not resolved:
+        raise TypeError(
+            f"{cls.__name__} needs id_field_name to be a non-empty string, got {resolved!r}"
+        )
+    return resolved
+
+
+def _assert_id_field_exists(cls: type[DTO], fields: Mapping[str, tuple[Any, DtoField]]) -> None:
+    """Fail at declaration time if the declared identifier is not a real field."""
+    if cls.id_field_name not in fields:
+        raise TypeError(
+            f"{cls.__name__} declares id_field_name={cls.id_field_name!r} but has no such "
+            f"field (fields: {', '.join(fields) or 'none'})"
+        )
+
+
 def _collect_dto_fields(cls: type[DTO]) -> dict[str, tuple[Any, DtoField]]:
     """Resolve ``cls``'s declared fields into ``(annotation, DtoField)`` pairs.
 
     Walks the MRO base-first so a subclass override replaces an inherited
-    field while preserving declaration order. Underscore-prefixed names and
-    ``ClassVar`` attributes are infrastructure, not fields.
+    field while preserving declaration order. Underscore-prefixed names,
+    ``ClassVar`` attributes, and the reserved declaration names are
+    infrastructure, not fields.
     """
     fields: dict[str, tuple[Any, DtoField]] = {}
     for klass in reversed(cls.__mro__):
@@ -269,11 +361,13 @@ def _collect_dto_fields(cls: type[DTO]) -> dict[str, tuple[Any, DtoField]]:
         except Exception:  # pragma: no cover - unresolved forward references
             hints = {}
         for name, raw in annotations.items():
-            if name.startswith("_") or _is_classvar(raw, hints.get(name)):
+            if name.startswith("_") or name in _RESERVED_NAMES:
+                continue
+            if _is_classvar(raw, hints.get(name)):
                 continue
             annotation = hints.get(name, raw)
             config = _config_from(klass.__dict__.get(name, _NO_DEFAULT), annotation)
-            fields[name] = (annotation, _apply_conventions(name, config))
+            fields[name] = (annotation, _apply_conventions(name, cls.id_field_name, config))
     return fields
 
 
@@ -290,10 +384,17 @@ def _config_from(value: Any, annotation: Any) -> DtoField:
     return DtoField(logical_default_value=value)
 
 
-def _apply_conventions(name: str, config: DtoField) -> DtoField:
+def _apply_conventions(name: str, id_field_name: str, config: DtoField) -> DtoField:
     """Apply the id / timestamp conventions the author did not set explicitly."""
-    if name == "id":
-        return config.with_overrides(in_create_request=False, in_update_request=False)
+    if name == id_field_name:
+        # The conventional ``id`` is server-generated, so it is never client
+        # input. A *custom* identifier is the author's own key (a natural key),
+        # so it stays available on create — the client supplies it — but is
+        # still immutable, so it is excluded from updates either way.
+        overrides = {"in_update_request": False}
+        if name == DEFAULT_ID_FIELD_NAME:
+            overrides["in_create_request"] = False
+        return config.with_overrides(**overrides)
     if name in ("created_at", "updated_at"):
         config = config.with_overrides(in_create_request=False, in_update_request=False)
         if not config.has_logical_default:

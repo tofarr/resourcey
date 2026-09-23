@@ -129,6 +129,20 @@ The four files:
   serializes to `null`), so `UUID | Missing` validates. The six REST models are
   field-selection projections of the DTO — never hand-written — and the
   one-time-reveal case (`key` in the create response only) is expressible.
+  Both `DTO` and `DtoField` carry a free-form `metadata: dict[str, Any]`, a
+  general-purpose store for extra data that `core` never reads. A DTO's
+  metadata is inherited and merged down the MRO and is not a field; a
+  `DtoField`'s metadata is per-field and excluded from equality/hash, so
+  differing metadata never churns the derived models.
+  `DTO.id_field_name` selects the identifier — `id` by default, overridable
+  with the `id_field_name=` class keyword to make another declared field the
+  identifier (a natural key). It is validated at declaration time: a name with
+  no matching field raises `TypeError`. The identifier is always immutable
+  (never in an update request); the conventional `id` is also server-generated
+  in the SQL backend and so excluded from create requests, while a custom
+  identifier stays client-supplied on create, e.g.
+  `class Country(DTO, id_field_name="code")` with a `code: str` field.
+
 * **`resource.py`** — a `Resource` is derived from a DTO. `SqlResource` is the
   first backend (a DTO-derived table over an injected async session factory;
   the backend is chosen explicitly at construction, not inferred from config).
