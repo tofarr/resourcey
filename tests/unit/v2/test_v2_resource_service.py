@@ -181,6 +181,14 @@ async def test_search_rejects_sort_and_desc_for_now(resources):
             await service.search(filters={"title": "x"})
 
 
+async def test_count_rejects_filters_for_now(resources):
+    """``count`` must not silently ignore filters while ``search`` raises."""
+    _maker, threads, _messages = resources
+    async with threads.get_service() as service:
+        with pytest.raises(NotImplementedError):
+            await service.count(filters={"title": "x"})
+
+
 async def test_search_orders_by_id_ascending(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
@@ -403,7 +411,8 @@ def test_non_integer_identifier_is_a_plain_primary_key(code_resource):
     assert column.primary_key is True
     # A string key is not an autoincrement integer; the caller must supply it.
     assert column.autoincrement is not True
-    assert resource.table.c["name"].nullable is True
+    # A required (non-optional) DTO field becomes a NOT NULL column.
+    assert resource.table.c["name"].nullable is False
 
 
 async def test_crud_with_a_custom_identifier(code_resource):

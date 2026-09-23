@@ -7,12 +7,14 @@ manifest's tables, and returns the path. The ``__main__`` block generates only.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -163,6 +165,42 @@ def _generate_migration_round_trip(tmp_path: Path, url: str) -> None:
 def test_generate_migration_round_trip(tmp_path):
     url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
     _generate_migration_round_trip(tmp_path, url)
+
+
+def test_generated_migrations_apply_under_a_plain_alembic_config(tmp_path):
+    """The generated directory must be usable by plain Alembic (no attributes)."""
+    from uuid import uuid4
+
+    module_name = f"_resourcey_mig_{uuid4().hex}"
+    module_path = tmp_path / f"{module_name}.py"
+    module_path.write_text(
+        "from sqlalchemy.orm import DeclarativeBase\n\n\n"
+        "class EscBase(DeclarativeBase):\n    pass\n",
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(tmp_path))
+    try:
+        base = resolve_base(f"{module_name}:EscBase")
+    finally:
+        sys.path.remove(str(tmp_path))
+
+    db_file = str(tmp_path / "plain.db")
+    url = f"sqlite+aiosqlite:///{db_file}"
+    maker = _session_factory(url)
+    SqlResource(Widget, session_factory=maker, base=base)
+
+    migrations_dir = tmp_path / "migrations_plain"
+    generate_migration(base, database_url=url, message="plain", migrations_dir=migrations_dir)
+
+    # A config with no process-local attributes, as a user's alembic.ini would be.
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(migrations_dir))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_file}")
+    config.set_main_option("resourcey.base", f"{module_name}:EscBase")
+    alembic_command.upgrade(config, "head")
+    assert "widgets" in _tables(db_file)
+    alembic_command.downgrade(config, "base")
+    assert "widgets" not in _tables(db_file)
 
 
 # ---------------------------------------------------------------------------

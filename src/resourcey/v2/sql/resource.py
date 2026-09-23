@@ -26,7 +26,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from typing import TYPE_CHECKING, Any, TypeVar, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel
 from sqlalchemy import (
@@ -141,8 +141,24 @@ class SqlResource(Resource[T]):
 
     @property
     def metadata(self) -> Any:
-        """The metadata holding this resource's table (the base's metadata)."""
-        return self._base.metadata
+        """The metadata holding this resource's table.
+
+        An adopted model keeps the base it was declared on (``base=`` is ignored
+        in that case), so the metadata is read off the model's own table rather
+        than ``self._base`` — otherwise ``resource.metadata.create_all`` would be
+        a silent no-op for an adopted resource.
+        """
+        return self.table.metadata
+
+    @property
+    def id_column(self) -> Column[Any]:
+        """The table column backing the identifier.
+
+        The DTO field name is the mapper *attribute* name, which can differ from
+        the *column* name for an adopted model, so the identifier must be
+        resolved through the same attribute→column map the payload uses.
+        """
+        return cast("Column[Any]", self.table.c[self._column_for_attr[self.get_id_field()]])
 
     def build_service(self, ctx: MutableMapping[Any, Any]) -> Service[T]:
         """Build a :class:`SqlService` over ``ctx`` and the injected session factory."""
@@ -222,9 +238,19 @@ def _column_for(field_name: str, annotation: Any, id_field_name: str) -> Column[
     """A column for one DTO field (the identifier is the primary key)."""
     column_type = _column_type(annotation)
     if field_name != id_field_name:
-        return Column(field_name, column_type, nullable=True)
-    # Only the conventional ``id`` is server-generated; an author-chosen
-    # identifier is a natural key the caller supplies.
-    if field_name == DEFAULT_ID_FIELD_NAME and column_type is Integer:
-        return Column(field_name, Integer, primary_key=True, autoincrement=True)
+        return Column(field_name, column_type, nullable=_allows_none(annotation))
+    # The conventional ``id`` is server-generated; an author-chosen identifier
+    # is a natural key the caller supplies.
+    if field_name == DEFAULT_ID_FIELD_NAME:
+        if column_type is Integer:
+            return Column(field_name, Integer, primary_key=True, autoincrement=True)
+        # A non-integer id (e.g. the ``id: UUID`` convention) is client-supplied
+        # and never in a create request, so generate it client-side rather than
+        # inserting NULL.
+        return Column(field_name, column_type, primary_key=True, default=uuid4)
     return Column(field_name, column_type, primary_key=True)
+
+
+def _allows_none(annotation: Any) -> bool:
+    """Whether an annotation admits ``None`` (i.e. the column is nullable)."""
+    return any(branch is type(None) for branch in _union_branches(_strip_annotated(annotation)))

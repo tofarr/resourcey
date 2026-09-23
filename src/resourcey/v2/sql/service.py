@@ -27,8 +27,6 @@ from resourcey.v2.core.service import STORAGE_KEY, NotFoundError, Page, Service,
 from resourcey.v2.sql.cursor import decode_cursor, encode_cursor, keyset_predicate
 
 if TYPE_CHECKING:
-    from sqlalchemy import Table
-
     from resourcey.v2.encryption.encryption_service import EncryptionService
     from resourcey.v2.sql.resource import SqlResource
 
@@ -101,15 +99,17 @@ class SqlService(Service[T]):
         result = await session.execute(table.insert().values(**insert_data))
         if id_field not in data:
             data[id_field] = result.inserted_primary_key[0]  # type: ignore[attr-defined]
-        row = (await session.execute(_by_id(table, id_field, data[id_field]))).mappings().first()
+        row = (
+            (await session.execute(_by_id(self._resource.id_column, data[id_field])))
+            .mappings()
+            .first()
+        )
         return self._to_dto(row)
 
     async def read(self, id: Any) -> T:  # noqa: A002
         """Fetch one DTO by id; raise :class:`NotFoundError` if absent."""
         session = self._active_session()
-        table = self._resource.table
-        id_field = self._resource.get_id_field()
-        found = (await session.execute(_by_id(table, id_field, id))).mappings().first()
+        found = (await session.execute(_by_id(self._resource.id_column, id))).mappings().first()
         if found is None:
             raise NotFoundError(id)
         return self._to_dto(found)
@@ -119,24 +119,25 @@ class SqlService(Service[T]):
         session = self._active_session()
         table = self._resource.table
         id_field = self._resource.get_id_field()
+        id_column = self._resource.id_column
         data = {k: v for k, v in _payload_values(payload).items() if k != id_field}
-        existing = (await session.execute(_by_id(table, id_field, id))).mappings().first()
+        existing = (await session.execute(_by_id(id_column, id))).mappings().first()
         if existing is None:
             raise NotFoundError(id)
         if data:
             columns = self._to_columns(data)
-            await session.execute(update(table).where(table.c[id_field] == id).values(**columns))
+            await session.execute(update(table).where(id_column == id).values(**columns))
         return await self.read(id)
 
     async def delete(self, id: Any) -> None:  # noqa: A002
         """Delete by id; raise :class:`NotFoundError` if absent."""
         session = self._active_session()
         table = self._resource.table
-        id_field = self._resource.get_id_field()
-        existing = (await session.execute(_by_id(table, id_field, id))).mappings().first()
+        id_column = self._resource.id_column
+        existing = (await session.execute(_by_id(id_column, id))).mappings().first()
         if existing is None:
             raise NotFoundError(id)
-        await session.execute(delete(table).where(table.c[id_field] == id))
+        await session.execute(delete(table).where(id_column == id))
 
     async def search(
         self,
@@ -157,21 +158,29 @@ class SqlService(Service[T]):
             raise NotImplementedError("v2 SqlService.search does not support sort/desc/filters yet")
         session = self._active_session()
         table = self._resource.table
-        id_field = self._resource.get_id_field()
-        id_column = table.c[id_field]
+        id_column = self._resource.id_column
         stmt = select(table).order_by(id_column.asc()).limit(limit + 1)
         if cursor is not None:
             stmt = stmt.where(keyset_predicate(id_column, self._decode(cursor)))
         rows = (await session.execute(stmt)).mappings().all()
         has_more = len(rows) > limit
         page_rows = rows[:limit]
-        next_cursor = self._next_cursor(page_rows[-1][id_field]) if has_more and page_rows else None
+        next_cursor = (
+            self._next_cursor(page_rows[-1][id_column.name]) if has_more and page_rows else None
+        )
         return Page(
             items=[self._to_dto(row) for row in page_rows], limit=limit, next_cursor=next_cursor
         )
 
     async def count(self, *, filters: Any = None) -> int:
-        """Return the number of rows."""
+        """Return the number of rows.
+
+        ``filters`` is accepted for interface compatibility but not yet
+        implemented, so — like :meth:`search` — passing one raises rather than
+        silently returning the unfiltered total.
+        """
+        if filters is not None:
+            raise NotImplementedError("v2 SqlService.count does not support filters yet")
         session = self._active_session()
         result = await session.execute(select(func.count()).select_from(self._resource.table))
         return int(result.scalar_one())
@@ -180,13 +189,9 @@ class SqlService(Service[T]):
         """Return DTOs positionally aligned with ``ids`` (``None`` for absent)."""
         session = self._active_session()
         table = self._resource.table
-        id_field = self._resource.get_id_field()
-        rows = (
-            (await session.execute(select(table).where(table.c[id_field].in_(ids))))
-            .mappings()
-            .all()
-        )
-        by_id = {row[id_field]: self._to_dto(row) for row in rows}
+        id_column = self._resource.id_column
+        rows = (await session.execute(select(table).where(id_column.in_(ids)))).mappings().all()
+        by_id = {row[id_column.name]: self._to_dto(row) for row in rows}
         return [by_id.get(i) for i in ids]
 
     async def batch_edit(self, edits: list[tuple[Any, T]]) -> list[T | None]:
@@ -252,6 +257,6 @@ def _payload_values(payload: Any) -> dict[str, Any]:
     return {name: value for name, value in payload.__dict__.items() if value is not MISSING}
 
 
-def _by_id(table: Table, id_field: str, value: Any) -> Any:
+def _by_id(id_column: Any, value: Any) -> Any:
     """A ``SELECT`` for the row whose id column equals ``value``."""
-    return select(table).where(table.c[id_field] == value)
+    return select(id_column.table).where(id_column == value)

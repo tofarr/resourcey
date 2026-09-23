@@ -258,6 +258,8 @@ def test_dto_to_model_round_trip_through_the_orm_model():
     assert [c.name for c in resource.table.columns] == ["id", "label", "weight"]
     assert resource.table.c["id"].primary_key is True
     assert resource.table.c["id"].autoincrement is True
+    # Nullability follows the annotation: ``label`` is required, ``weight`` optional.
+    assert resource.table.c["label"].nullable is False
     assert resource.table.c["weight"].nullable is True
 
 
@@ -336,7 +338,8 @@ async def widget_resources() -> AsyncIterator[tuple[SqlResource[Any], AsyncSessi
     dto = sqlalchemy_2_dto(Widget)
     resource = SqlResource(dto, session_factory=maker, encryption_service=_encryption())
     async with engine.begin() as conn:
-        await conn.run_sync(Widget.metadata.create_all)
+        # ``resource.metadata`` must carry the adopted table, or this is a no-op.
+        await conn.run_sync(resource.metadata.create_all)
     async with maker() as session:
         yield resource, session
     await engine.dispose()
@@ -410,3 +413,77 @@ def test_metadata_property_exposes_the_base_metadata():
     resource = SqlResource(Plain, session_factory=_maker())
     assert resource.metadata is V2Base.metadata
     assert inspect(resource.model).local_table is resource.table
+
+
+def test_adopted_model_metadata_is_the_models_own_metadata():
+    """An adopted model's table lives on its own base, not ``V2Base``."""
+    resource = SqlResource(sqlalchemy_2_dto(Widget), session_factory=_maker())
+    assert resource.metadata is AdoptedBase.metadata
+    assert "widgets" in resource.metadata.tables
+
+
+def test_required_field_generates_a_not_null_column():
+    class Required(DTO):
+        id: int
+        label: str
+        note: str | None = None
+
+    resource = SqlResource(Required, session_factory=_maker())
+    assert resource.table.c["label"].nullable is False
+    assert resource.table.c["note"].nullable is True
+
+
+def test_generated_uuid_identifier_is_defaulted():
+    """A non-integer conventional id is generated, not left NULL."""
+
+    class Keyed(DTO):
+        id: UUID
+        name: str
+
+    resource = SqlResource(Keyed, session_factory=_maker())
+    column = resource.table.c["id"]
+    assert column.primary_key is True
+    assert column.default is not None
+
+
+def test_adopted_model_with_a_renamed_identifier_attribute():
+    """The PK attribute name and its column name may differ."""
+
+    class Renamed(AdoptedBase):
+        __tablename__ = "renamed_countries"
+        code: Mapped[str] = mapped_column("country_code", String(2), primary_key=True)
+        name: Mapped[str] = mapped_column("country_name", String(50))
+
+    resource = SqlResource(sqlalchemy_2_dto(Renamed), session_factory=_maker())
+    assert resource.id_column is resource.table.c["country_code"]
+    assert inspect(resource.model).local_table is resource.table
+
+
+async def test_adopted_model_with_a_renamed_identifier_crud():
+    class RenamedCrud(AdoptedBase):
+        __tablename__ = "renamed_countries_crud"
+        code: Mapped[str] = mapped_column("country_code", String(3), primary_key=True)
+        name: Mapped[str] = mapped_column("country_name", String(50))
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(sqlalchemy_2_dto(RenamedCrud), session_factory=maker)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(resource.metadata.create_all)
+        dto = resource.get_dto_type()
+        async with (
+            maker() as session,
+            resource.get_service(resource_ctx(session)) as service,
+        ):
+            created = await service.create(dto(code="US", name="United States"))
+            assert (created.code, created.name) == ("US", "United States")
+            assert (await service.read("US")).name == "United States"
+            assert await service.batch_read(["US", "ZZ"]) == [
+                created,
+                None,
+            ]
+            page = await service.search(limit=5)
+            assert [item.code for item in page.items] == ["US"]
+    finally:
+        await engine.dispose()
