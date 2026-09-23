@@ -74,7 +74,7 @@ class WrapperResourceBase(BaseResource):
 
     # Marker: tells BaseResource.__init_subclass__ to skip field collection
     # (model_fields is proxied to the inner resource via a property).
-    _is_wrapper_base: bool = True
+    _is_proxy_resource: bool = True
 
     # Instance state (set in __init__ via object.__setattr__ to bypass
     # Pydantic's __setattr__). Declared here so mypy/static analysis can
@@ -157,6 +157,10 @@ class WrapperResourceBase(BaseResource):
     def migrate_document(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Delegate lazy document migration to the inner resource."""
         return self._inner.migrate_document(doc)
+
+    def clone_for_output(self, item: Any) -> Any:
+        """Delegate output cloning to the inner resource (its isolation policy)."""
+        return self._inner.clone_for_output(item)
 
     def open_storage(self, request: Any) -> Any:
         return self._inner.open_storage(request)

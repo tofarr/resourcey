@@ -73,7 +73,7 @@ async def app_with_resources(sqlite_factory) -> AsyncIterator[FastAPI]:
     """An assembled app serving AppWidget + AppGadget via the manifest."""
     ctx = AppContext(FrameworkConfig())
     ctx.set(_SESSION_FACTORY_KEY, sqlite_factory)
-    manifest = ResourceManifest(resources=(AppWidget, AppGadget))
+    manifest = ResourceManifest(resources=(AppWidget(), AppGadget()))
     app = manifest.create_app(app_context=ctx)
     # ASGITransport does not run the Starlette lifespan, so enter the manifest
     # manually — this copies the pre-seeded session factory onto each instance.
@@ -169,24 +169,31 @@ class TestManifestStructure:
 
 
 class TestManifestInstances:
-    def test_manifest_instantiates_resources(self):
-        manifest = ResourceManifest(resources=(AppWidget, AppGadget))
+    def test_manifest_owns_the_given_instances(self):
+        widget, gadget = AppWidget(), AppGadget()
+        manifest = ResourceManifest(resources=(widget, gadget))
         assert len(manifest.instances) == 2
-        assert isinstance(manifest.instances[0], AppWidget)
-        assert isinstance(manifest.instances[1], AppGadget)
+        # The manifest works with the caller's instances — it does not rebuild them.
+        assert manifest.instances[0] is widget
+        assert manifest.instances[1] is gadget
+        assert manifest.resources == (widget, gadget)
+
+    def test_manifest_rejects_resource_types(self):
+        with pytest.raises(ValidationError):
+            ResourceManifest(resources=(AppWidget,))  # type: ignore[arg-type]
 
     def test_on_register_materialises_sql_model(self):
-        manifest = ResourceManifest(resources=(AppWidget,))
+        manifest = ResourceManifest(resources=(AppWidget(),))
         instance = manifest.instances[0]
         assert instance._sqlalchemy_model is not None
 
     def test_manifest_is_frozen(self):
-        manifest = ResourceManifest(resources=(AppWidget,))
+        manifest = ResourceManifest(resources=(AppWidget(),))
         with pytest.raises((ValidationError, TypeError)):
             manifest.resources = ()  # type: ignore[misc]
 
     def test_materialize_is_idempotent(self):
-        manifest = ResourceManifest(resources=(AppWidget,))
+        manifest = ResourceManifest(resources=(AppWidget(),))
         manifest.materialize()
         manifest.materialize()
         assert manifest.instances[0]._sqlalchemy_model is not None
@@ -217,7 +224,7 @@ class TestEngineEscapeHatches:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         ctx = AppContext(FrameworkConfig())
         ctx.set(_SESSION_FACTORY_KEY, factory)
-        manifest = ResourceManifest(resources=(AppWidget,))
+        manifest = ResourceManifest(resources=(AppWidget(),))
         app = manifest.create_app(app_context=ctx)
         assert app.router.lifespan_context is not None
         await engine.dispose()
@@ -300,7 +307,7 @@ class TestResourceLifecycle:
     async def test_manifest_async_context_manager_enters_exits(self, sqlite_factory):
         ctx = AppContext(FrameworkConfig())
         ctx.set(_SESSION_FACTORY_KEY, sqlite_factory)
-        manifest = ResourceManifest(resources=(AppWidget,))
+        manifest = ResourceManifest(resources=(AppWidget(),))
         manifest.create_app(app_context=ctx)
         async with manifest:
             instance = manifest.instances[0]
@@ -313,7 +320,7 @@ class TestResourceLifecycle:
         """``add_to_app`` mounts routes on a user-owned app without wiring lifespan."""
         ctx = AppContext(FrameworkConfig())
         ctx.set(_SESSION_FACTORY_KEY, sqlite_factory)
-        manifest = ResourceManifest(resources=(AppWidget,))
+        manifest = ResourceManifest(resources=(AppWidget(),))
         object.__setattr__(manifest, "_ctx", ctx)
         app = FastAPI()
         manifest.add_to_app(app, prefix="/api")

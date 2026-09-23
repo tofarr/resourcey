@@ -26,7 +26,7 @@ async def app() -> FastAPI:
     from resourcey.config.config_framework import FrameworkConfig
     from resourcey.resource.sql import _SESSION_FACTORY_KEY
 
-    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest = ResourceManifest(resources=(Thread(), Message()))
     manifest.materialize()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)

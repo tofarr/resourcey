@@ -94,10 +94,26 @@ subclasses it and implements only its data access, never a copy of the cursor
 or sort-validation code.
 
 `ListResource` is **read-only**: it narrows `actions` to
-`read`/`search`/`count`/`batch_read` so no write route is ever mounted, and its
-data comes from an overridden `get_items()` (sync or async). The list *is* the
-storage, delivered through the same `open_storage`/`build_service` seam; there
-is no table and no migration.
+`read`/`search`/`count`/`batch_read` so no write route is ever mounted. It is
+installed with the models it serves (`ListResource(models=[...])`) and the
+wrapped Pydantic model *is* the read model — there is no schema generation, no
+create/update model, and no columns. It is **defensive** by default: every
+object it outputs is a deep copy of the stored object, so a caller cannot
+mutate the served collection through a result. The list *is* the storage,
+delivered through the same `open_storage`/`build_service` seam; there is no
+table and no migration.
+
+The manifest is declared with resource **instances**, not types:
+
+```python
+manifest = ResourceManifest(resources=(Thread(), Message()))
+app = manifest.create_app()
+```
+
+Because instances carry their own configuration, a resource needing per-app
+inputs is simply constructed with them — that is how a `ListResource` gets its
+data (`ListResource(models=countries)`), and how a caller can override a hook
+per instance.
 
 ## Database configuration — one connection
 

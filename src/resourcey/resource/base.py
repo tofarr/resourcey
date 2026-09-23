@@ -121,13 +121,12 @@ class BaseResource(ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        # WrapperResourceBase proxies model_fields to its inner resource via
-        # a property; skip field collection so it doesn't shadow the property.
-        # Detected via a class-level marker (``_is_wrapper_base = True``) to
-        # avoid an import cycle (wrapper.py imports base.py).
-        if cls.__dict__.get("_is_wrapper_base") or any(
-            getattr(b, "__dict__", {}).get("_is_wrapper_base") for b in cls.__mro__
-        ):
+        # WrapperResourceBase proxies model_fields to its inner resource, and
+        # ListResource proxies it to an existing Pydantic model; both expose it
+        # as a property, so skip field collection to avoid shadowing it.
+        # Detected via a class-level marker (set on the class that owns the
+        # property) to avoid an import cycle (wrapper.py imports base.py).
+        if _is_proxy_resource(cls):
             return
         cls.model_fields = _collect_field_infos(cls)
 
@@ -238,6 +237,18 @@ class BaseResource(ABC):
                 "available on storage-backed resources (or a wrapper delegating to one)."
             )
         return getter()
+
+    def clone_for_output(self, item: Any) -> Any:
+        """Return the object to serve for a stored ``item`` (default: unchanged).
+
+        The output seam for read actions. Storage-backed resources return the
+        projected read model directly, so the default is the identity. A
+        read-only model-backed resource (:class:`~resourcey.list.list_resource.ListResource`)
+        overrides this to deep-copy each stored object when it is configured
+        ``defensive``, so a client cannot mutate the in-process collection
+        through a response.
+        """
+        return item
 
     def migrate_document(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Lazily upgrade a stored document to the current shape on read (default no-op).
@@ -641,6 +652,20 @@ def _collect_field_infos(cls: type[BaseResource]) -> dict[str, FieldInfo]:
 
 _NO_DEFAULT: Any = object()
 
+# Class-level marker set (as ``True``) on the class that *owns* a
+# ``model_fields`` property instead of a collected field registry:
+# ``WrapperResourceBase`` (proxying an inner resource) and ``ListResource``
+# (proxying an existing Pydantic model). ``BaseResource.__init_subclass__``
+# skips field collection when it finds the marker anywhere in the MRO, so a
+# concrete subclass of one of these proxies does not shadow the property.
+_PROXY_MARKER = "_is_proxy_resource"
+
+
+def _is_proxy_resource(cls: type[Any]) -> bool:
+    """Whether ``cls`` (or a base) owns a ``model_fields`` property."""
+    return any(bool(b.__dict__.get(_PROXY_MARKER)) for b in cls.__mro__)
+
+
 # Attributes declared (with annotations) on ``BaseResource`` itself that must
 # never be treated as resource fields. Because ``BaseResource`` is a plain
 # class, its own ``model_fields`` / cache annotations would otherwise be
@@ -662,6 +687,7 @@ _INFRA_ATTRS: frozenset[str] = frozenset(
         "_db",
         "_instances",
         "_entered",
+        "_is_proxy_resource",
     }
 )
 

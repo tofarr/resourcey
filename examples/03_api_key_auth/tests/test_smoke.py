@@ -49,7 +49,7 @@ async def app(monkeypatch) -> AsyncIterator[FastAPI]:
     clear_config_cache()
     FrameworkConfig.clear_instance_cache()
 
-    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest = ResourceManifest(resources=(Thread(), Message()))
     manifest.materialize()
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
@@ -143,7 +143,7 @@ async def test_empty_key_list_denies_everything(monkeypatch) -> None:
     clear_config_cache()
     FrameworkConfig.clear_instance_cache()
 
-    manifest = ResourceManifest(resources=(Thread, Message))
+    manifest = ResourceManifest(resources=(Thread(), Message()))
     manifest.materialize()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     async with engine.begin() as conn:

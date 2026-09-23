@@ -67,6 +67,6 @@ def _verify_posture() -> None:
 # variables still win, so tests and deployments can override it.
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-manifest = ResourceManifest(resources=(Thread, Message))
+manifest = ResourceManifest(resources=(Thread(), Message()))
 app = manifest.create_app()
 _verify_posture()

@@ -33,4 +33,4 @@ class AppGadget(SqlResource):
 
 # Module-level manifest for migrate tests (``RESOURCEY_MANIFEST`` points here).
 # Construction calls ``on_register`` on each resource, materialising tables.
-manifest = ResourceManifest(resources=(AppWidget, AppGadget))
+manifest = ResourceManifest(resources=(AppWidget(), AppGadget()))
