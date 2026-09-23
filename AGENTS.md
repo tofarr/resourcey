@@ -115,6 +115,48 @@ inputs is simply constructed with them — that is how a `ListResource` gets its
 data (`ListResource(models=countries)`), and how a caller can override a hook
 per instance.
 
+### `v2/core` — the DTO / Resource / Service bottom layer
+
+`src/resourcey/v2/core/` is a new, deliberately minimal package (issue #75)
+that runs **parallel to** the existing packages: it states the architecture in
+terms of **DTO**, **Resource**, **Service**, plus a **Manifest**, and the
+existing modules are migrated onto it later. Nothing existing is removed by it,
+and it is not a refactor.
+
+Four files, no `__init__.py`:
+
+* `dto.py` — `DTO` is a plain declaration class (not a Pydantic model). Fields
+  carry ordinary Pydantic annotations plus a `DtoField` describing how each
+  projects into the six REST shapes via six `in_*` flags; `DtoField` also
+  carries a logical default with precedence *client value → logical default →
+  `MISSING`*. `DTO.__init_subclass__` applies the `id`/timestamp conventions
+  and wraps every field `ann | Missing = MISSING`. `Missing` is a usable
+  annotation type (core schema + serializes to `null`), unlike the legacy
+  `resourcey.resource.missing.MISSING`. The six REST models are field-selection
+  **projections** of the DTO, never hand-written.
+* `resource.py` — `Resource` is derived from the DTO. `SqlResource` is the
+  first backend (a DTO-derived `Table` over an injected async session factory;
+  the backend is explicit at construction, not inferred from config).
+  `get_service(ctx)` is **sync**, takes an optional call-scoped
+  `MutableMapping`, and returns a `Service` that is the async CM.
+  `get_supported_actions()` is the single action declaration (no `actions`
+  property); `get_exposed_resource()` composes on top of it and the exposed
+  resource's declaration wins outright.
+* `service.py` — `Service` is generic over the DTO, declares the eight actions,
+  and *is* the async context manager; a call before `__aenter__` raises. It
+  carries no storage: session-per-service and session-per-operation are both
+  expressible and core privileges neither. The shared rule is *whoever opens
+  the storage owns its commit and close; a resource that finds storage already
+  in `ctx` reuses it and neither commits nor closes it*.
+* `manifest.py` — `Manifest` owns the resource set and lifecycle, and asserts
+  at construction that every `get_supported_actions()` names only real
+  `Action` members (a typo would otherwise silently drop a route).
+
+HTTP construction (`create_app`) is **not** part of `v2/core` — it belongs to
+the transport layer. A test asserts no module under `v2/core` makes a runtime
+import of any `resourcey` package outside `v2/core`, which pins it as the
+bottom layer (`if TYPE_CHECKING:` imports are allowed).
+
 ## Database configuration — one connection
 
 `FrameworkConfig.database` is a single `DbConfig` (`url` + optional
