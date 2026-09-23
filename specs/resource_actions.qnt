@@ -380,4 +380,88 @@ module resource_actions {
         nextId' = nextId,
       })
   }
+
+  // The full action surface a writable resource advertises.
+  pure val allActions: Set[Action] =
+    Set(Create, Read, Update, Delete, Search, Count, BatchRead, BatchEdit)
+
+  // The read-only subset a list-backed resource advertises: no write actions.
+  pure val readOnlyActions: Set[Action] =
+    Set(Read, Search, Count, BatchRead)
+
+  // The action surface a resource advertises. A read-only resource (e.g. a
+  // list-backed resource) exposes only the read subset; its write actions are
+  // neither advertised nor routed, so a write request is rejected (405) rather
+  // than reaching an unimplemented service method.
+  pure def availableActions(readOnly: bool): Set[Action] =
+    if (readOnly) readOnlyActions else allActions
+
+  // A read-only resource advertises exactly the read subset; every write
+  // action is absent from its surface.
+  run readOnlyResourceExposesReadSubset = {
+    init
+      .then(all {
+        assert(availableActions(true) == readOnlyActions),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(not(availableActions(true).contains(Create))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(not(availableActions(true).contains(Update))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(not(availableActions(true).contains(Delete))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(not(availableActions(true).contains(BatchEdit))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // A writable resource advertises the full action set.
+  run writableResourceExposesAllActions = {
+    init
+      .then(all {
+        assert(availableActions(false) == allActions),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // A read-only resource still serves the read subset against its items: read,
+  // search, count, and batch_read behave exactly as for a writable resource.
+  run readOnlyResourceServesReads = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        assert(read(1) == 10),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(search(true, Map()) == Set(1, 2)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(count(true, Map()) == 2),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(batch_read(List(1, 999)) == List(Present(10), Absent)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
 }

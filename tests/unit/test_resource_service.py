@@ -378,7 +378,7 @@ class TestServiceSearch:
     async def test_search_limit_capped_to_max(self, session: AsyncSession) -> None:
         svc = SqlService(SvcWidget(), session=session)
         page = await svc.search(limit=999)
-        assert page.limit == 100  # _MAX_LIMIT
+        assert page.limit == 100  # MAX_LIMIT
 
     @pytest.mark.asyncio
     async def test_search_with_declared_filter(self, session: AsyncSession) -> None:

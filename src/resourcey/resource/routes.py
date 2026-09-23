@@ -44,17 +44,13 @@ from resourcey.resource.errors import (
     ResourceyConfigError,
 )
 from resourcey.resource.missing import MISSING
+from resourcey.resource.paged_service import DEFAULT_LIMIT
 from resourcey.resource.service import Page
 from resourcey.resource.service_base import BaseService, ServiceError
 from resourcey.util import utc_now
 
 if TYPE_CHECKING:
     from resourcey.util.search_filter import SearchFilter
-
-
-# Default pagination bounds (kept in sync with the service's defaults so the
-# OpenAPI schema documents the same default ``limit`` the service applies).
-_DEFAULT_LIMIT = 20
 
 
 def register_routes(
@@ -266,7 +262,7 @@ def _sortable_search_handler(
 
     async def handler(  # type: ignore[no-untyped-def]
         request,
-        limit=_DEFAULT_LIMIT,
+        limit=DEFAULT_LIMIT,
         cursor=cursor_default,
         sort=sort_default,
         desc=desc_default,
@@ -312,7 +308,7 @@ def _sortless_search_handler(
 
     async def handler(  # type: ignore[no-untyped-def]
         request,
-        limit=_DEFAULT_LIMIT,
+        limit=DEFAULT_LIMIT,
         cursor=cursor_default,
         filters=Depends(filter_dep) if filter_dep is not None else None,  # noqa: B008
         service=Depends(service_dep),  # noqa: B008
