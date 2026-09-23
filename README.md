@@ -81,6 +81,96 @@ manifest = ResourceManifest(resources=(resource,))
 copy of the stored object, so a caller cannot mutate the served collection
 through a result. Pass `defensive=False` to serve the stored objects directly.
 
+## The `v2/core` package — DTO, Resource, Service, Manifest
+
+`src/resourcey/v2/core/` is a new, deliberately minimal package that states the
+architecture in terms of three constructs plus a manifest. It runs **parallel
+to** the existing packages; the existing modules are migrated onto it later, as
+an iterative follow-up, and nothing existing is removed by it.
+
+The split separates **the DTO** (the data object you work with internally) from
+**the six REST models** (the wire shapes), which the older code entangled, and
+does away with six hand-written models per resource — those are now *derived*.
+
+```python
+from resourcey.v2.core.dto import DTO
+from resourcey.v2.core.manifest import Manifest
+from resourcey.v2.core.resource import SqlResource
+
+
+class Thread(DTO):
+    id: int
+    title: str
+
+
+class Message(DTO):
+    id: int
+    thread_id: int
+    body: str
+
+
+manifest = Manifest(resources=[SqlResource(Thread), SqlResource(Message)])
+```
+
+The four files:
+
+* **`dto.py`** — a `DTO` is a plain declaration class (not a Pydantic model).
+  Fields carry ordinary Pydantic annotations plus a `DtoField` describing how
+  each projects into the six REST shapes via six `in_*` flags
+  (`in_create_request`, `in_create_response`, `in_update_request`,
+  `in_update_response`, `in_read_response`, `in_search_response` — all default
+  `True`, superseding the older `creatable` / `updatable` / `readable` triple).
+  `DtoField` also carries a logical default (`logical_default_value` /
+  `logical_default_value_factory`), whose precedence is *client value →
+  logical default → `MISSING`*. `DTO.__init_subclass__` applies the `id` /
+  timestamp conventions and wraps every field as `ann | Missing` defaulting to
+  `MISSING`, so an omitted field is distinguishable from an explicit `None`.
+  `Missing` is a usable annotation type (it carries a Pydantic core schema and
+  serializes to `null`), so `UUID | Missing` validates. The six REST models are
+  field-selection projections of the DTO — never hand-written — and the
+  one-time-reveal case (`key` in the create response only) is expressible.
+  Both `DTO` and `DtoField` carry a free-form `metadata: dict[str, Any]`, a
+  general-purpose store for extra data that `core` never reads. A DTO's
+  metadata is inherited and merged down the MRO and is not a field; a
+  `DtoField`'s metadata is per-field and excluded from equality/hash, so
+  differing metadata never churns the derived models.
+  `DTO.id_field_name` selects the identifier — `id` by default, overridable
+  with the `id_field_name=` class keyword to make another declared field the
+  identifier (a natural key). It is validated at declaration time: a name with
+  no matching field raises `TypeError`. The identifier is always immutable
+  (never in an update request); the conventional `id` is also server-generated
+  in the SQL backend and so excluded from create requests, while a custom
+  identifier stays client-supplied on create, e.g.
+  `class Country(DTO, id_field_name="code")` with a `code: str` field.
+
+* **`resource.py`** — a `Resource` is derived from a DTO. `SqlResource` is the
+  first backend (a DTO-derived table over an injected async session factory;
+  the backend is chosen explicitly at construction, not inferred from config).
+  `get_service(ctx)` is **sync** and takes an optional call-scoped
+  `MutableMapping`; the returned `Service` is the async context manager that
+  owns the storage. `get_supported_actions()` is the single action declaration
+  (there is no `actions` property), and `get_exposed_resource()` composes on
+  top of it — the exposed resource's declaration wins outright.
+* **`service.py`** — `Service` is generic over the DTO, declares the eight
+  actions, and *is* the async context manager; a call before `__aenter__`
+  raises clearly. `Action` is the action enum.
+* **`manifest.py`** — the `Manifest` owns the resource set and its lifecycle,
+  and asserts at construction that every resource's supported actions name only
+  real `Action` members (a typo would otherwise silently drop a route).
+
+Storage ownership follows one rule, letting session-per-service and
+session-per-operation both live:
+
+> Whoever opens the storage owns its commit and close. A resource that finds
+> storage already in `ctx` reuses it and neither commits nor closes it.
+
+`ctx` is a plain `MutableMapping` keyed by module-level sentinels, so a caller
+can pre-seed storage (the escape hatch) and every resource in the call adopts
+it. `AppContext` (app-scoped) stays a separate concept. HTTP construction
+(`create_app`) is deliberately **not** part of `v2/core` — it belongs to the
+transport layer. A test asserts no module under `v2/core` makes a runtime
+import of any other `resourcey` package, which pins it as the bottom layer.
+
 ## Stack
 
 | Concern | Tool |
