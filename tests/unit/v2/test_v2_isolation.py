@@ -1,13 +1,16 @@
-"""The ``v2`` isolation test (issues #75, #78).
+"""The ``v2`` isolation test (issues #75 / #78 / #82).
 
 Asserts that no module under ``resourcey/v2/`` makes a **runtime** import of any
 ``resourcey`` module *outside* ``v2/`` — that is what pins ``v2`` as a
-self-contained layer (its ``core``, ``encryption``, and ``sql`` packages import
-only each other and the wider third-party stack, never the legacy ``v1``
-packages). Imports under ``if TYPE_CHECKING:`` are allowed (they do not execute
-at runtime, and the existing base relies on that to avoid cycles), so the check
-is a static AST walk that tracks whether an import sits inside a
-``TYPE_CHECKING`` guard.
+self-contained layer (its ``core``, ``config``, ``encryption``, ``sql``, and
+``util`` packages import only each other and the wider third-party stack, never
+the legacy ``v1`` packages). Imports under ``if TYPE_CHECKING:`` are allowed
+(they do not execute at runtime, and the existing base relies on that to avoid
+cycles), so the check is a static AST walk that tracks whether an import sits
+inside a ``TYPE_CHECKING`` guard.
+
+``v2/util`` depends on ``v2/core`` (the ``Missing`` sentinel is defined in core
+and consumed by util); that is a one-way edge inside ``v2`` and is allowed.
 
 It fails if a runtime cross-layer import is added.
 """
@@ -92,7 +95,7 @@ def test_v2_has_no_runtime_cross_layer_imports():
 def test_the_core_files_exist_without_an_init():
     core = V2_DIR / "core"
     names = {p.name for p in sorted(core.glob("*.py"))}
-    assert names == {"dto.py", "manifest.py", "resource.py", "service.py"}
+    assert names == {"dto.py", "errors.py", "manifest.py", "resource.py", "service.py"}
     assert not (core / "__init__.py").exists()
 
 
@@ -114,6 +117,30 @@ def test_the_encryption_files_exist_without_an_init():
     names = {p.name for p in sorted(encryption.glob("*.py"))}
     assert names == {"encryption_config.py", "encryption_service.py"}
     assert not (encryption / "__init__.py").exists()
+
+
+def _imports_openhands(path: pathlib.Path) -> bool:
+    """Whether ``path`` imports the ``openhands`` package at runtime.
+
+    A docstring may legitimately *mention* the SDK the code was vendored from,
+    so this checks actual import statements rather than the raw text.
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            continue
+        if any(name == "openhands" or name.startswith("openhands.") for name in names):
+            return True
+    return False
+
+
+def test_no_v2_module_imports_openhands():
+    offenders = [str(p.relative_to(V2_DIR)) for p in _v2_modules() if _imports_openhands(p)]
+    assert offenders == []
 
 
 def test_detector_catches_an_added_cross_layer_import(tmp_path):

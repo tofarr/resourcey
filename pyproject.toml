@@ -99,10 +99,13 @@ mypy_path = "src"
 # Vendored utilities (env_parser, models) originated from a non-strict
 # codebase. They are correct but not yet fully annotated for --strict.
 # They are excluded from the strict check; remove the exclude once the
-# vendored code is fully annotated.
+# vendored code is fully annotated. The v2 copies (issue #82) carry the
+# same exclusion.
 exclude = [
     "src/resourcey/util/env_parser\\.py",
     "src/resourcey/util/models\\.py",
+    "src/resourcey/v2/util/env_parser\\.py",
+    "src/resourcey/v2/util/models\\.py",
 ]
 
 [[tool.mypy.overrides]]
