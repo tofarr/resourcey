@@ -17,7 +17,7 @@ schema-version field, but the framework does not prescribe it.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -31,9 +31,27 @@ from resourcey.util.naming import camel_to_snake, pluralize
 # default build.
 _MONGO_CLIENT_KEY = object()
 
+# Database name used when the config URL names no database (a bare ``embedded``
+# marker or a ``mongodb://`` URL with no path).
+DEFAULT_MONGO_DATABASE = "resourcey"
+
 
 async def _noop_dispose() -> None:
     """No-op disposer for clients that need no explicit close (embedded)."""
+
+
+def _motor_dispose(client: Any) -> Callable[[], Awaitable[None]]:
+    """Adapt ``motor``'s synchronous ``close()`` to the async disposer contract.
+
+    ``AppContext.add_disposer`` awaits every disposer, but ``AsyncIOMotorClient
+    .close()`` returns ``None`` (it tears down the underlying sync client), so
+    registering it directly would raise at shutdown.
+    """
+
+    async def dispose() -> None:
+        client.close()
+
+    return dispose
 
 
 class MongoResource(BaseResource):
@@ -52,7 +70,7 @@ class MongoResource(BaseResource):
     # Set by ``__aenter__`` before the app serves requests. ``None`` means
     # unconfigured.
     _client: Any = None
-    _database_name: str = "resourcey"
+    _database_name: str = DEFAULT_MONGO_DATABASE
     _db: Any = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -107,34 +125,41 @@ class MongoResource(BaseResource):
     def build_client(self, ctx: AppContext) -> tuple[Any, str, Any]:
         """Build the shared ``motor`` client + return its disposer.
 
-        Default: read ``mongo.url`` / ``mongo.database`` from the app config
-        (``ctx.config``). When the URL is ``embedded`` (or empty), use the
-        in-process :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient``. Otherwise
-        build a real ``motor`` client against the URL.
+        Default: read the connection from ``ctx.config.database`` (the single
+        :class:`~resourcey.config.config_framework.DbConfig`). When the URL is
+        the ``embedded`` marker or an ``embedded://<db>`` URL, use the
+        in-process :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient`.
+        Otherwise build a real ``motor`` client against the URL; the database
+        name is the URL's database component and the password, when configured
+        separately, is passed as a client kwarg.
 
         Returns:
             ``(client, database_name, disposer)`` where ``disposer`` is a
             no-arg async callable run on app shutdown (e.g. ``client.close``).
         """
         config = ctx.config
-        mongo = getattr(config, "mongo", None)
-        if mongo is not None:
-            url = mongo.url
-            database_name = mongo.database
-        else:
-            url = "embedded"
-            database_name = "resourcey"
-        url = (url or "embedded").strip()
-        client: Any
-        if not url or url == "embedded":
+        database = getattr(config, "database", None)
+        if database is None:
             from resourcey.mongo.embedded import AsyncEmbeddedClient
 
-            client = AsyncEmbeddedClient()
-            return client, database_name, _noop_dispose
+            return AsyncEmbeddedClient(), DEFAULT_MONGO_DATABASE, _noop_dispose
+        database_name = database.mongo_database_name(DEFAULT_MONGO_DATABASE)
+        if database.is_embedded:
+            from resourcey.mongo.embedded import AsyncEmbeddedClient
+
+            return AsyncEmbeddedClient(), database_name, _noop_dispose
         from motor.motor_asyncio import AsyncIOMotorClient
 
-        client = AsyncIOMotorClient(url)
-        return client, database_name, client.close
+        # Only pass ``password`` when set: pymongo treats an explicit
+        # ``password=None`` as clearing the credential, overriding any password
+        # embedded in the URL.
+        password = database.mongo_password
+        client: Any
+        if password is not None:
+            client = AsyncIOMotorClient(database.url, password=password)
+        else:
+            client = AsyncIOMotorClient(database.url)
+        return client, database_name, _motor_dispose(client)
 
     def get_collection(self) -> Any:
         """The configured ``motor`` collection for this resource.

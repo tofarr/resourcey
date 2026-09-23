@@ -18,8 +18,9 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from mongo_mock import make_mock_client
-from pydantic import Field
+from pydantic import Field, SecretStr
 
+from resourcey.mongo.embedded import AsyncEmbeddedClient
 from resourcey.mongo.mongo_filter import to_mongo_query
 from resourcey.mongo.mongo_resource import MongoResource
 from resourcey.mongo.mongo_service import MongoService
@@ -558,16 +559,19 @@ class TestMongoLifecycle:
     """Tests for the instance-level lifecycle / build_client protocol (issue #51)."""
 
     @pytest.mark.asyncio
-    async def test_lifespan_builds_embedded_client_by_default(self) -> None:
+    async def test_lifespan_builds_embedded_client_when_configured(self) -> None:
         from resourcey.app_context import AppContext
         from resourcey.config.config_framework import FrameworkConfig
 
-        ctx = AppContext(FrameworkConfig())
+        cfg = FrameworkConfig()
+        cfg.database.url = "embedded://widgets"
+        ctx = AppContext(cfg)
         instance = MongoWidget()
         instance.on_register()
         await instance.__aenter__(ctx)
         assert instance._client is not None
         assert instance._db is not None
+        assert instance._database_name == "widgets"
         coll = instance.get_collection()
         assert coll is not None
         await instance.__aexit__(None, None, None)
@@ -594,17 +598,65 @@ class TestMongoLifecycle:
         await ctx.aclose()
 
     @pytest.mark.asyncio
-    async def test_build_client_reads_mongo_config(self) -> None:
+    async def test_build_client_reads_database_config(self) -> None:
         from resourcey.app_context import AppContext
-        from resourcey.config.config_framework import FrameworkConfig, MongoConfig
+        from resourcey.config.config_framework import FrameworkConfig
 
         cfg = FrameworkConfig()
-        cfg.mongo = MongoConfig(url="embedded", database="custom_db")
+        cfg.database.url = "embedded://custom_db"
         ctx = AppContext(cfg)
         instance = MongoWidget()
         instance.on_register()
         client, db_name, dispose = instance.build_client(ctx)
         assert client is not None
+        assert db_name == "custom_db"
+        await dispose()
+
+    @pytest.mark.asyncio
+    async def test_build_client_passes_separate_password_to_motor(self) -> None:
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+
+        cfg = FrameworkConfig()
+        cfg.database.url = "mongodb://user@localhost:27017/message_board"
+        cfg.database.password = SecretStr("s3cret")
+        ctx = AppContext(cfg)
+        instance = MongoWidget()
+        instance.on_register()
+        client, db_name, dispose = instance.build_client(ctx)
+        # A real motor client (not the embedded one) carries the spliced credential.
+        assert not isinstance(client, AsyncEmbeddedClient)
+        assert db_name == "message_board"
+        assert client.options.pool_options._credentials.password == "s3cret"
+        await dispose()
+
+    @pytest.mark.asyncio
+    async def test_build_client_omits_password_when_unset(self) -> None:
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+
+        cfg = FrameworkConfig()
+        # Password embedded in the URL must survive when no separate password is set.
+        cfg.database.url = "mongodb://user:inline@localhost:27017/message_board"
+        ctx = AppContext(cfg)
+        instance = MongoWidget()
+        instance.on_register()
+        client, _, dispose = instance.build_client(ctx)
+        assert client.options.pool_options._credentials.password == "inline"
+        await dispose()
+
+    @pytest.mark.asyncio
+    async def test_build_client_uses_embedded_for_embedded_url(self) -> None:
+        from resourcey.app_context import AppContext
+        from resourcey.config.config_framework import FrameworkConfig
+
+        cfg = FrameworkConfig()
+        cfg.database.url = "embedded://custom_db"
+        ctx = AppContext(cfg)
+        instance = MongoWidget()
+        instance.on_register()
+        client, db_name, dispose = instance.build_client(ctx)
+        assert isinstance(client, AsyncEmbeddedClient)
         assert db_name == "custom_db"
         await dispose()
 

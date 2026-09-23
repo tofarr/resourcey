@@ -224,7 +224,7 @@ class TestEngineEscapeHatches:
 
     @pytest.mark.asyncio
     async def test_app_built_engine_disposed_on_lifespan_exit(self, monkeypatch):
-        monkeypatch.setenv("RESOURCEY_DATABASE_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+        monkeypatch.setenv("RESOURCEY_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
         FrameworkConfig.clear_instance_cache()
         manifest = ResourceManifest(resources=())
         app = manifest.create_app()
@@ -248,7 +248,7 @@ class TestResourceLifecycle:
     async def test_sql_lifespan_builds_session_factory_from_config(self, monkeypatch):
         from sqlalchemy.ext.asyncio import async_sessionmaker
 
-        monkeypatch.setenv("RESOURCEY_DATABASE_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+        monkeypatch.setenv("RESOURCEY_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
         FrameworkConfig.clear_instance_cache()
         cfg = FrameworkConfig()
         ctx = AppContext(cfg)

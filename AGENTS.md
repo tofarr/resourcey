@@ -99,6 +99,23 @@ data comes from an overridden `get_items()` (sync or async). The list *is* the
 storage, delivered through the same `open_storage`/`build_service` seam; there
 is no table and no migration.
 
+## Database configuration — one connection
+
+`FrameworkConfig.database` is a single `DbConfig` (`url` + optional
+`SecretStr` `password`); there is no separate `MongoConfig`. An app talks to
+SQL **or** MongoDB, never both, so one connection field is enough. The URL
+scheme selects the backend: `postgresql+asyncpg` / `sqlite+aiosqlite` (SQL),
+`mongodb://` (Mongo via motor), or `embedded://<db>` (in-process mongomock).
+
+The password is its own field, not part of the URL, so it can be injected from
+a dedicated env var (`RESOURCEY_DATABASE_PASSWORD`) and encrypted at rest
+(e.g. with SOPS) independently of the plaintext URL. `DbConfig.database_url`
+splices it in for SQLAlchemy (percent-encoding reserved characters); for Mongo
+the plaintext is passed as a `MongoClient` kwarg, and **only when set** —
+`password=None` is not neutral to pymongo, it clears a URL-embedded password.
+The Mongo database name is the URL's database component (`embedded://<db>`
+takes it from the host), read from the string so multi-host URLs need no DNS.
+
 ## Code structure — reusable & testable
 
 * Methods are short and single-purpose. If a method exceeds ~40 lines or does

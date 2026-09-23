@@ -2,8 +2,9 @@
 
 Declares a :class:`ResourceManifest` with the two resources and builds a
 FastAPI app from it. Each ``MongoResource`` builds its client from
-``config.mongo`` (``RESOURCEY_MONGO_URL`` / ``RESOURCEY_MONGO_DATABASE``) in
-its ``__aenter__``, so the manifest stays storage-agnostic.
+``config.database`` (``RESOURCEY_DATABASE_URL``, e.g.
+``embedded://message_board``) in its ``__aenter__``, so the manifest stays
+storage-agnostic.
 
 Run with::
 

@@ -1,10 +1,19 @@
 """The framework's own configuration.
 
 :class:`FrameworkConfig` is a :class:`~resourcey.config.config_base.BaseConfig`
-parsed with the ``RESOURCEY`` prefix. The database connection is a structured
-:class:`DbConfig` nested model (rather than a single connection string) so
-each component can be injected independently — e.g. a secret store populates
-``password`` while the rest comes from plaintext env vars.
+parsed with the ``RESOURCEY`` prefix. The database connection is a single
+:class:`DbConfig` nested model holding the connection :attr:`DbConfig.url` plus
+an optional :attr:`DbConfig.password`. The password is a separate field rather
+than being embedded in the URL so a secret store can populate it
+independently — e.g. an ``RESOURCEY_DATABASE_PASSWORD`` env var encrypted at
+rest with a tool such as SOPS, while the plaintext URL comes from ordinary env
+vars.
+
+There is one connection, not one per backend: an app talks to a SQL database or
+MongoDB, never both in the same app. The URL scheme selects the driver
+(``postgresql+asyncpg``, ``sqlite+aiosqlite``, ``mongodb``, ...); the
+``embedded`` scheme selects the in-process mongomock client used for local
+development and tests.
 
 The :attr:`manifest` field is a dotted/colon import path
 (``module:attr``) to the app's :class:`~resourcey.manifest.ResourceManifest`
@@ -16,8 +25,10 @@ source of truth for "what does this app serve".
 from __future__ import annotations
 
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, SecretStr
+from sqlalchemy.engine import make_url
 
 from resourcey.config.config_base import BaseConfig
 from resourcey.config.config_dependency import DefaultDependencyBuilder, DependencyBuilder
@@ -27,69 +38,94 @@ MIGRATIONS_DIR_DEFAULT = "migrations"
 
 
 class DbConfig(BaseModel):
-    """Structured database connection configuration.
+    """Database connection configuration.
 
-    The SQLAlchemy async URL is assembled from these fields rather than read
-    as a single connection string, so each component can be injected
-    independently. Use the :attr:`database_url` property to get the assembled
-    ``postgresql+asyncpg`` URL.
+    Holds the connection :attr:`url` and an optional :attr:`password`, kept
+    separate so the secret can be injected from its own env var (and encrypted
+    independently). The URL scheme selects the backend and driver:
 
-    For databases whose URL shape doesn't fit the ``protocol://user:pass@
-    host:port/db`` pattern (notably SQLite, which is
-    ``sqlite+aiosqlite:///path/to/file.db``), set :attr:`full_db_url` to the
-    complete URL. When set, it takes precedence over the structured fields.
+    * ``postgresql+asyncpg://user@host:port/db`` — SQL via SQLAlchemy.
+    * ``sqlite+aiosqlite:///path/to/file.db`` — SQLite (URL is used verbatim).
+    * ``mongodb://user@host:port/db`` — MongoDB via ``motor``, the database name
+      read from the URL path (like any Mongo connection string).
+    * ``embedded://<db>`` — the in-process mongomock client (no external
+      server), for local development and tests. The host component names the
+      database (``embedded://message_board``); a bare ``embedded`` uses the
+      default database name.
+
+    Use :attr:`database_url` for the SQL (SQLAlchemy) view of the connection,
+    and :attr:`mongo_password` / :meth:`mongo_database_name` for the Mongo view.
     """
 
-    protocol: str = Field(default="postgresql+asyncpg", description="Database driver protocol.")
-    host: str = Field(default="localhost", description="Database host.")
-    port: int = Field(default=5432, ge=1, le=65535, description="Database port.")
-    db_name: str = Field(default="resourcey", description="Database name.")
-    username: str = Field(default="resourcey", description="Database username.")
-    password: str = Field(default="resourcey", description="Database password.")
-    full_db_url: str | None = Field(
+    url: str = Field(
+        default="postgresql+asyncpg://resourcey@localhost:5432/resourcey",
+        description=(
+            "Database connection URL. The scheme selects the backend/driver: "
+            "'postgresql+asyncpg://user@host:port/db' or 'sqlite+aiosqlite:///path.db' "
+            "for SQL, 'mongodb://user@host:port/db' for MongoDB, or "
+            "'embedded://<db>' for the in-process mongomock client."
+        ),
+    )
+    password: SecretStr | None = Field(
         default=None,
         description=(
-            "Complete SQLAlchemy URL override (takes precedence over the "
-            "structured fields). Use for SQLite or any URL that doesn't fit "
-            "the protocol://user:pass@host:port/db pattern."
+            "Database password, injected separately from the URL so a secret "
+            "store can supply (and encrypt) it on its own. When None the "
+            "password embedded in the URL — if any — is used as-is."
         ),
     )
 
     @property
     def database_url(self) -> str:
-        """Assemble the async SQLAlchemy URL from the structured fields.
+        """The SQL connection URL with :attr:`password` spliced in when set.
 
-        Returns :attr:`full_db_url` verbatim when set (the escape hatch for
-        SQLite etc.); otherwise assembles ``protocol://user:pass@host:port/db``.
+        Returns a plain ``str`` (SQLAlchemy accepts a string URL). The password
+        is spliced with SQLAlchemy's URL parser so reserved characters are
+        percent-encoded rather than corrupting the URL. When :attr:`password`
+        is ``None`` the URL is returned exactly as configured (so a password
+        embedded in the URL still works).
         """
-        if self.full_db_url is not None:
-            return self.full_db_url
-        return (
-            f"{self.protocol}://{self.username}:"
-            f"{self.password}@{self.host}:{self.port}/{self.db_name}"
-        )
+        if self.password is None:
+            return self.url
+        spliced = make_url(self.url).set(password=self.password.get_secret_value())
+        return spliced.render_as_string(hide_password=False)
 
+    @property
+    def mongo_password(self) -> str | None:
+        """The plaintext password for the Mongo driver, or ``None`` when unset.
 
-class MongoConfig(BaseModel):
-    """MongoDB connection configuration.
+        Mongo receives the password as a client kwarg rather than spliced into
+        the URL: ``motor`` (via ``pymongo``) treats it as a separate connection
+        option, and passing it explicitly *overrides* any password in the URL.
+        The caller must therefore pass it only when not ``None`` — passing
+        ``password=None`` is not neutral, it clears a URL-embedded password.
+        """
+        return self.password.get_secret_value() if self.password is not None else None
 
-    ``url`` is the ``mongodb://`` connection string. When empty or
-    ``"embedded"``, :meth:`MongoResource.build_client` uses the in-process
-    :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient` (no external
-    server) — the default for local development and tests.
-    """
+    @property
+    def is_embedded(self) -> bool:
+        """Whether the URL selects the in-process mongomock client.
 
-    url: str = Field(
-        default="embedded",
-        description=(
-            "MongoDB connection URL, or 'embedded' (the default) for the "
-            "in-process mongomock-backed client."
-        ),
-    )
-    database: str = Field(
-        default="resourcey",
-        description="MongoDB database name.",
-    )
+        True for the bare ``embedded`` marker and any ``embedded://`` URL (whose
+        host component names the database).
+        """
+        return self.url == "embedded" or self.url.startswith("embedded://")
+
+    def mongo_database_name(self, default: str) -> str:
+        """The Mongo database name: the URL's database component, else ``default``.
+
+        For ``embedded://<name>`` the name is the host component (a bare
+        ``embedded`` has none). For a real ``mongodb://`` URL it is the first
+        path segment — the standard Mongo convention — parsed from the string
+        rather than via a driver so a multi-host URL
+        (``mongodb://h1,h2/db``) needs no connection or DNS.
+        """
+        if self.url == "embedded":
+            return default
+        if self.url.startswith("embedded://"):
+            return self.url[len("embedded://") :] or default
+        path = urlsplit(self.url).path.lstrip("/")
+        return path.split("/", 1)[0] or default
 
 
 class MigrationConfig(BaseModel):
@@ -252,9 +288,6 @@ class FrameworkConfig(BaseConfig):
 
     database: DbConfig = Field(
         default_factory=DbConfig, description="Database connection configuration."
-    )
-    mongo: MongoConfig = Field(
-        default_factory=MongoConfig, description="MongoDB connection configuration."
     )
     migrations: MigrationConfig = Field(
         default_factory=MigrationConfig, description="Alembic migration configuration."

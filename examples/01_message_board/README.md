@@ -91,18 +91,23 @@ uv run pytest
 ### Configuration
 
 The example uses the stock `FrameworkConfig` with a committed `.env` that
-points it at a local SQLite file (`message_board.db`). SQLite URLs don't fit
-the structured `protocol://user:pass@host:port/db` pattern, so the
-`RESOURCEY_DATABASE_FULL_DB_URL` escape hatch is used to pass the complete
-URL verbatim. Edit `.env` to change the database:
+points it at a local SQLite file (`message_board.db`). The connection is a
+single `RESOURCEY_DATABASE_URL`; the URL scheme selects the driver. Edit `.env`
+to change the database:
 
-| Env var                            | Default                           | Purpose                          |
-| ---------------------------------- | --------------------------------- | -------------------------------- |
-| `RESOURCEY_DATABASE_FULL_DB_URL`   | `sqlite+aiosqlite:///message_board.db` | Complete SQLAlchemy URL (SQLite escape hatch). |
-| `RESOURCEY_RESOURCES`              | _(set in .env)_                   | Dotted import paths to resources. |
+| Env var                  | Default                                | Purpose                                    |
+| ------------------------ | -------------------------------------- | ------------------------------------------ |
+| `RESOURCEY_DATABASE_URL` | `sqlite+aiosqlite:///message_board.db` | Complete SQLAlchemy URL (driver in scheme). |
+| `RESOURCEY_MANIFEST`     | `message_board.app:manifest`           | Dotted import path to the resource manifest. |
 
-To target Postgres instead, unset `RESOURCEY_DATABASE_FULL_DB_URL` and set the
-structured `RESOURCEY_DATABASE_*` vars (`HOST`, `PORT`, `DB_NAME`, etc.).
+To target Postgres instead, set a Postgres URL — the password can be embedded
+in the URL or supplied separately via `RESOURCEY_DATABASE_PASSWORD` (kept in its
+own variable so it can be encrypted at rest, e.g. with SOPS):
+
+```bash
+RESOURCEY_DATABASE_URL=postgresql+asyncpg://resourcey@localhost:5432/resourcey
+RESOURCEY_DATABASE_PASSWORD=secret
+```
 
 ## Example HTTP requests
 
