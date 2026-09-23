@@ -217,9 +217,40 @@ obtains the config is the caller's concern. It sits in its own package (not
 `core`, which stays crypto-free, and not `sql`, so a future `v2` auth can use
 it without reaching into `sql`).
 
+### `v2/http` — the transport layer (issue #87)
+
+`src/resourcey/v2/http/` holds HTTP assembly as **free functions**, not methods
+on `Manifest` (which stays a plain container) and with no lazy imports:
+
+* `app.py` — `create_app(manifest, *, cors_origins=None)` builds a fresh
+  FastAPI whose lifespan is `async with manifest`, then mounts routes + error
+  handlers + CORS; `add_to_app(manifest, app, *, prefix="/")` mounts the same
+  onto a user-owned app and **does not wire a lifespan** (Starlette has one
+  lifespan slot, so the caller composes it). The function form is the extension
+  point — later concerns (the `DependencyBuilder` of #86, auth, config) become
+  additional keyword arguments with no core change.
+* `routes.py` — `register_routes(app_or_router, resource, *, prefix="",
+  tags=None)` resolves the exposed resource once and registers one route per
+  supported action, tagged with the exposed resource's class name, through the
+  `_route` no-clobber escape hatch (a developer's route wins). It also holds
+  `register_error_handlers`, the projection helper, and the batch-edit item
+  model.
+
+Where the port differs from `v1`: `get_rest_models()` replaces the
+create/update/read model getters, so each action maps explicitly to its shape
+(`create` → `create_response`, so a one-time-reveal field survives); services
+return DTO instances, so the response is **projected** onto the REST model
+(dropping `MISSING`) in the transport; and `v1`'s sort / filter / cache surface
+is out of scope (#79 and the cache follow-up), so search is `limit` + `cursor`
+only. There is no `DependencyBuilder` yet, so the service dependency is read
+directly behind one private helper (`_service_dependency`) that #86 replaces.
+The error envelope maps only what `v2` has now — `NotFoundError`→404,
+`IntegrityError`→409, `ServiceError`→500, pydantic→422 (kept by FastAPI) — and
+#83 extends the same function.
+
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/encryption`, `v2/util`, and `v2/config` are
+`v2/core`, `v2/sql`, `v2/encryption`, `v2/util`, `v2/config`, and `v2/http` are
 **parallel** to the existing packages — nothing existing is removed by them and
 they are not a refactor. The old `v1` packages/modules (and the old
 `resourcey.encryption`) stay in place until a follow-up removal. A test asserts
