@@ -26,9 +26,11 @@ Three things are generated from a declaration, at subclass-creation time:
 
 Conventions (``id`` is not client-supplied; ``created_at`` is created once and
 never touched on update; ``updated_at`` is set on create *and* re-set on every
-update) are applied in
+update; a conventional ``UUID`` ``id`` is generated server-side) are applied in
 :meth:`DTO.__init_subclass__` because ``__set_name__`` does not fire for
-``Annotated`` metadata.
+``Annotated`` metadata. One rule governs them all: an expressed intent wins — an
+explicit ``DtoField`` is honoured verbatim, and (in the SQL path) a column-level
+default beats a convention-generated factory.
 
 This module is part of the ``v2/core`` bottom layer: it imports no other
 ``resourcey`` module (only Pydantic and the standard library).
@@ -44,6 +46,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import reduce
 from typing import Any, ClassVar, get_args, get_origin, get_type_hints
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, create_model
 
@@ -158,6 +161,19 @@ class DtoField:
     default_for_update: Any = _UNSET
     default_factory_for_update: Callable[[], Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict, compare=False)
+
+    def __post_init__(self) -> None:
+        # A value and a factory for the same operation are mutually exclusive:
+        # which one wins would be arbitrary. Both are *supplied* rather than
+        # inferred, so the contradiction is a declaration error, not a
+        # convention one.
+        for operation in ("create", "update"):
+            value, factory = self._default_parts(operation)
+            if value is not _UNSET and factory is not None:
+                raise ValueError(
+                    f"DtoField declares both a value and a factory default for "
+                    f"{operation}; declare only one"
+                )
 
     def has_default_for(self, operation: str) -> bool:
         """Whether a default (value or factory) was declared for ``operation``."""
@@ -388,7 +404,7 @@ def _collect_dto_fields(cls: type[DTO]) -> dict[str, tuple[Any, DtoField]]:
             continue
         try:
             hints = get_type_hints(klass, include_extras=True)
-        except Exception:  # pragma: no cover - unresolved forward references
+        except NameError:  # pragma: no cover - unresolved forward references
             hints = {}
         for name, raw in annotations.items():
             if name.startswith("_") or name in _RESERVED_NAMES:
@@ -396,40 +412,78 @@ def _collect_dto_fields(cls: type[DTO]) -> dict[str, tuple[Any, DtoField]]:
             if _is_classvar(raw, hints.get(name)):
                 continue
             annotation = hints.get(name, raw)
-            config = _config_from(klass.__dict__.get(name, _NO_DEFAULT), annotation)
-            fields[name] = (annotation, _apply_conventions(name, cls.id_field_name, config))
+            config, explicit = _config_from(klass.__dict__.get(name, _NO_DEFAULT), annotation)
+            fields[name] = (
+                annotation,
+                _apply_conventions(name, cls.id_field_name, annotation, config, explicit),
+            )
     return fields
 
 
-def _config_from(value: Any, annotation: Any) -> DtoField:
+def _config_from(value: Any, annotation: Any) -> tuple[DtoField, bool]:
     """Build the ``DtoField`` for a field from its class attribute / annotation.
 
     An ``Annotated[T, DtoField(...)]`` metadata entry wins; otherwise a
     ``DtoField`` class attribute, a bare class default (shorthand for a create
-    default), or a bare field with the conventions only.
+    default), or a bare field with the conventions only. The second element is
+    whether the author expressed the config *explicitly* (a ``DtoField``) rather
+    than leaving it to a bare value or nothing; the conventions only apply to
+    the latter.
     """
     for meta in _annotated_metadata(annotation):
         if isinstance(meta, DtoField):
-            return meta
+            return meta, True
     if isinstance(value, DtoField):
-        return value
+        return value, True
     if value is _NO_DEFAULT:
-        return DtoField()
+        return DtoField(), False
     # A bare default value is shorthand for a create default.
-    return DtoField(default_for_create=value)
+    return DtoField(default_for_create=value), False
 
 
-def _apply_conventions(name: str, id_field_name: str, config: DtoField) -> DtoField:
-    """Apply the id / timestamp conventions the author did not set explicitly."""
+def _apply_conventions(
+    name: str,
+    id_field_name: str,
+    annotation: Any,
+    config: DtoField,
+    explicit: bool,
+    *,
+    identifier_is_backend_managed: bool = False,
+) -> DtoField:
+    """Apply the id / timestamp conventions the author did not set explicitly.
+
+    An explicit ``DtoField`` is honoured verbatim — the conventions never alter
+    declared flags or defaults (the developer's intent wins outright). Only a
+    bare field (no ``DtoField``) is decorated. ``id_field_name`` is the resolved
+    identifier, so a caller that knows it (the SQL path, from the primary key)
+    does not have to synthesize a declaration, and
+    ``identifier_is_backend_managed`` lets that caller report a database-owned
+    key so no application-side factory is generated.
+    """
+    if explicit:
+        return config
     if name == id_field_name:
         # The conventional ``id`` is server-generated, so it is never client
         # input. A *custom* identifier is the author's own key (a natural key),
         # so it stays available on create — the client supplies it — but is
         # still immutable, so it is excluded from updates either way.
-        overrides = {"in_update_request": False}
+        overrides: dict[str, Any] = {"in_update_request": False}
         if name == DEFAULT_ID_FIELD_NAME:
             overrides["in_create_request"] = False
-        return config.with_overrides(**overrides)
+        config = config.with_overrides(**overrides)
+        # A UUID identifier is generated server-side by the application (never
+        # by a database default), so an omitted create gets a fresh ``uuid4``.
+        # Deliberately narrow: a UUID under a *custom* ``id_field_name`` (a
+        # natural key), a non-UUID id, or a column that already declares its own
+        # default (the expressed intent — a column default wins) is left alone.
+        if (
+            name == DEFAULT_ID_FIELD_NAME
+            and _is_uuid_annotation(annotation)
+            and not config.has_default_for("create")
+            and not identifier_is_backend_managed
+        ):
+            config = config.with_overrides(default_factory_for_create=uuid4)
+        return config
     if name in ("created_at", "updated_at"):
         # Neither is client input. ``created_at`` is written once (no update
         # default, so an omitted update leaves it alone); ``updated_at`` is
@@ -477,6 +531,16 @@ def _strip_annotated(annotation: Any) -> Any:
     if _is_union(annotation):
         return reduce(operator.or_, (_strip_annotated(arg) for arg in get_args(annotation)))
     return annotation
+
+
+def _is_uuid_annotation(annotation: Any) -> bool:
+    """Whether ``annotation`` is exactly ``UUID`` (an ``Annotated`` wrapper allowed).
+
+    Deliberately narrow: only the bare ``UUID`` type qualifies. ``str`` /
+    ``CHR(36)`` uuid columns, unions, and ``Any`` do not — the issue scopes
+    server-side generation to the ``UUID`` type only.
+    """
+    return _strip_annotated(annotation) is UUID
 
 
 def _with_missing(annotation: Any) -> Any:

@@ -54,7 +54,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapper
 
-from resourcey.v2.core.dto import DTO, DtoField
+from resourcey.v2.core.dto import DTO, DtoField, _apply_conventions
 
 # The ``Column.info`` key under which a developer supplies an explicit
 # ``DtoField`` for a column; absent it, the projection is inferred.
@@ -94,19 +94,45 @@ def sqlalchemy_2_dto(model: type[Any], *, name: str | None = None) -> type[DTO]:
 
 
 def _field_declarations(mapper: Mapper[Any]) -> dict[str, tuple[Any, DtoField]]:
-    """The ``{field_name: (annotation, DtoField)}`` declarations for a mapper."""
+    """The ``{field_name: (annotation, DtoField)}`` declarations for a mapper.
+
+    The column's own generation behaviour is the expressed intent and wins over
+    a convention-generated default: when the column declares a client-side
+    default the convention sees a create default already present and leaves it
+    alone, and when the column is backend-generated (``server_default`` /
+    auto-increment) the convention is told so and adds none.
+    """
     declarations: dict[str, tuple[Any, DtoField]] = {}
+    id_field_name = _primary_key_attr(mapper)
     for attr in mapper.column_attrs:
         column = attr.columns[0]
+        annotation = _annotation_for_column(column)
+        explicit = column.info.get(DTO_FIELD_INFO_KEY)
+        if isinstance(explicit, DtoField):
+            config, is_explicit = explicit, True
+        else:
+            config, is_explicit = _dto_field_for_column(column, mapper), False
         declarations[attr.key] = (
-            _annotation_for_column(column),
-            _dto_field_for_column(column, mapper),
+            annotation,
+            _apply_conventions(
+                attr.key,
+                id_field_name,
+                annotation,
+                config,
+                is_explicit,
+                identifier_is_backend_managed=_column_generates_id(column, mapper),
+            ),
         )
     return declarations
 
 
+def _column_generates_id(column: Any, mapper: Mapper[Any]) -> bool:
+    """Whether the database, not the application, supplies this column's value."""
+    return column.server_default is not None or _is_auto_increment(column, mapper)
+
+
 def _dto_field_for_column(column: Any, mapper: Mapper[Any]) -> DtoField:
-    """The ``DtoField`` for a column: the explicit one in ``info``, else inferred.
+    """The ``DtoField`` inferred from a column's type and generation behaviour.
 
     A client-side ``default`` becomes the create default and the field drops out
     of create requests (the application supplies it); a client-side ``onupdate``
@@ -117,16 +143,13 @@ def _dto_field_for_column(column: Any, mapper: Mapper[Any]) -> DtoField:
     preserves ORM ergonomics after optionality stopped coming from the
     annotation.
     """
-    explicit = column.info.get(DTO_FIELD_INFO_KEY)
-    if isinstance(explicit, DtoField):
-        return explicit
     create_overrides = _default_overrides(column.default, "create")
     update_overrides = _default_overrides(column.onupdate, "update")
     if create_overrides:
         # A create default means the application supplies the value, so the field
         # is not client-suppliable (though it is still filled on create).
         return DtoField(in_create_request=False, **create_overrides, **update_overrides)
-    if column.server_default is not None or _is_auto_increment(column, mapper):
+    if _column_generates_id(column, mapper):
         # The database supplies the value: drop from create with no default.
         return DtoField(in_create_request=False, **update_overrides)
     if column.nullable:
