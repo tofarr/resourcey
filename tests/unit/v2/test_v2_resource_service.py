@@ -305,7 +305,7 @@ def test_manifest_accepts_a_narrowed_real_action_set():
 
 async def test_manifest_lifecycle_and_lookup(resources):
     _maker, threads, messages = resources
-    manifest: Manifest[Any] = Manifest(resources=[threads, messages])
+    manifest: Manifest = Manifest(resources=[threads, messages])
     assert manifest.resource_names() == ("threads", "messages")
     assert manifest.get_resource("messages") is messages
     with pytest.raises(KeyError):
@@ -317,7 +317,7 @@ async def test_manifest_lifecycle_and_lookup(resources):
 
 async def test_manifest_double_entry_raises(resources):
     _maker, threads, messages = resources
-    manifest: Manifest[Any] = Manifest(resources=[threads, messages])
+    manifest: Manifest = Manifest(resources=[threads, messages])
     async with manifest:
         with pytest.raises(ServiceError, match="already entered"):
             await manifest.__aenter__()

@@ -17,15 +17,13 @@ This module is part of the ``v2/core`` bottom layer: it imports no other
 
 from __future__ import annotations
 
-from typing import Any, Generic, TypeVar
+from typing import Any
 
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import ServiceError, assert_real_actions
 
-T = TypeVar("T")
 
-
-class Manifest(Generic[T]):
+class Manifest:
     """A declaration of an app's resources, owning their lifecycle.
 
     Attributes:
@@ -53,7 +51,7 @@ class Manifest(Generic[T]):
 
     # -- lifecycle ------------------------------------------------------
 
-    async def __aenter__(self) -> Manifest[T]:
+    async def __aenter__(self) -> Manifest:
         """Enter each resource's runtime lifecycle in declaration order."""
         if self._entered:
             raise ServiceError("Manifest already entered")

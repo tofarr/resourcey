@@ -29,7 +29,7 @@ from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.http.routes import register_error_handlers, register_routes
 
 
-def create_app(manifest: Manifest[Any], *, cors_origins: list[str] | None = None) -> FastAPI:
+def create_app(manifest: Manifest, *, cors_origins: list[str] | None = None) -> FastAPI:
     """Build a fresh FastAPI app wired to this manifest's lifecycle.
 
     Sugar: a fresh ``FastAPI`` with the manifest as its lifespan (``async with
@@ -47,7 +47,7 @@ def create_app(manifest: Manifest[Any], *, cors_origins: list[str] | None = None
     return app
 
 
-def add_to_app(manifest: Manifest[Any], app: FastAPI, *, prefix: str = "/") -> None:
+def add_to_app(manifest: Manifest, app: FastAPI, *, prefix: str = "/") -> None:
     """Mount routes + error handlers onto a user-owned FastAPI app.
 
     Does **not** wire the lifespan — the caller must ``async with manifest``
@@ -59,7 +59,7 @@ def add_to_app(manifest: Manifest[Any], app: FastAPI, *, prefix: str = "/") -> N
         register_routes(app, resource, prefix=prefix)
 
 
-def _lifespan(manifest: Manifest[Any]) -> Callable[[FastAPI], Any]:
+def _lifespan(manifest: Manifest) -> Callable[[FastAPI], Any]:
     """An ASGI lifespan entering/exiting ``manifest`` around the app's life."""
 
     @asynccontextmanager
