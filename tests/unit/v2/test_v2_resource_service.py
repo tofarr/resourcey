@@ -31,6 +31,7 @@ from resourcey.v2.core.service import (
     ServiceError,
     assert_real_actions,
 )
+from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
 from resourcey.v2.http.routes import _service_dependency
 from resourcey.v2.sql.resource import SqlResource
 
@@ -373,7 +374,7 @@ async def test_manifest_exits_resources_in_reverse(resources):
 
 async def test_service_dependency_yields_entered_service(resources):
     _maker, threads, _messages = resources
-    dependency = _service_dependency(threads)
+    dependency = _service_dependency(threads, DefaultDependencyBuilder())
 
     class _State:
         pass

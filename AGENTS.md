@@ -116,13 +116,14 @@ inputs is simply constructed with them — that is how a `ListResource` gets its
 data (`ListResource(models=countries)`), and how a caller can override a hook
 per instance.
 
-### `v2/core` — the DTO / Resource / Service bottom layer
+### `v2/core` — the DTO / Resource / Service layer
 
 `src/resourcey/v2/core/` is a new, deliberately minimal package (issue #75)
 that runs **parallel to** the existing packages: it states the architecture in
 terms of **DTO**, **Resource**, **Service**, plus a **Manifest**, and the
 existing modules are migrated onto it later. Nothing existing is removed by it,
-and it is not a refactor.
+and it is not a refactor. It sits one rung above the `v2/util` bottom layer and
+imports only `v2/util` (the `Missing` sentinel) among project packages.
 
 Four files, no `__init__.py`:
 
@@ -261,19 +262,41 @@ it without reaching into `sql`).
 `src/resourcey/v2/http/` holds HTTP assembly as **free functions**, not methods
 on `Manifest` (which stays a plain container) and with no lazy imports:
 
-* `app.py` — `create_app(manifest, *, cors_origins=None)` builds a fresh
-  FastAPI whose lifespan is `async with manifest`, then mounts routes + error
-  handlers + CORS; `add_to_app(manifest, app, *, prefix="/")` mounts the same
-  onto a user-owned app and **does not wire a lifespan** (Starlette has one
-  lifespan slot, so the caller composes it). The function form is the extension
-  point — later concerns (the `DependencyBuilder` of #86, auth, config) become
-  additional keyword arguments with no core change.
+* `app.py` — `create_app(manifest, *, cors_origins=None,
+  dependency_builder=None)` builds a fresh FastAPI whose lifespan is `async
+  with manifest`, then mounts routes + error handlers + CORS;
+  `add_to_app(manifest, app, *, prefix="/", dependency_builder=None)` mounts
+  the same onto a user-owned app and **does not wire a lifespan** (Starlette
+  has one lifespan slot, so the caller composes it). Both thread
+  `dependency_builder` to `register_routes`; the keyword-only, default-`None`
+  extension keeps every current call site unchanged.
+* `dependency_builder.py` — the per-request service-dependency seam (issue
+  #86). `DependencyBuilder` (a `DiscriminatedUnionMixin`, so a later config
+  rung selects it by `kind`) declares
+  `get_service_dependency(resource) -> Callable[..., object]`; it returns an
+  ordinary FastAPI dependency whose author may declare any parameter FastAPI
+  can wire (the `Request`, other `Depends(...)`, i.e. an auth dependency) — the
+  same composition the `v1` builder used, so the seam covers authentication as
+  well as authorization. `DefaultDependencyBuilder` is the default: it builds
+  the resource's own service over the request-scoped `ctx` and yields it. The
+  public `request_ctx(request)` helper owns the call-scoped mapping (the
+  request-state key is `resourcey_ctx`), shared by every resource in one
+  request. The builder lives here, not on the `Manifest`, because it is
+  transport code (`Request` is annotated `starlette.requests.Request`) and
+  `v2/core` must not import `v2/http`; the manifest stays a plain container.
+  The seam is **authorization only** — it cannot add or remove routes (that is
+  `get_exposed_resource()`'s sole call), and a restrictive posture returns a
+  dependency that *denies* rather than nothing, keeping the route visible in
+  OpenAPI. `register_routes` calls it **once** at registration and asserts the
+  result is callable, so a misconfigured builder fails at startup, not per
+  request.
 * `routes.py` — `register_routes(app_or_router, resource, *, prefix="",
-  tags=None)` resolves the exposed resource once and registers one route per
-  supported action, tagged with the exposed resource's class name, through the
-  `_route` no-clobber escape hatch (a developer's route wins). It also holds
-  `register_error_handlers`, the projection helper, and the batch-edit item
-  model.
+  tags=None, dependency_builder=None)` resolves the exposed resource once and
+  registers one route per supported action, tagged with the exposed resource's
+  class name, through the `_route` no-clobber escape hatch (a developer's route
+  wins). The builder is resolved on the **exposed** resource, so a projection's
+  wrapped service is the projection's. It also holds `register_error_handlers`,
+  the projection helper, and the batch-edit item model.
 
 Where the port differs from `v1`: `get_rest_models()` replaces the
 create/update/read model getters, so each action maps explicitly to its shape
@@ -281,9 +304,9 @@ create/update/read model getters, so each action maps explicitly to its shape
 return DTO instances, so the response is **projected** onto the REST model
 (dropping `MISSING`) in the transport; and `v1`'s sort / filter surface is out
 of scope (#79), so search is `limit` + `cursor` only. Caching is back (issue
-#92) — see the `v2/cache` section below. There is no `DependencyBuilder` yet, so
-the service dependency is read directly behind one private helper
-(`_service_dependency`) that #86 replaces. The error envelope maps only what
+#92) — see the `v2/cache` section below. The service dependency is built
+through the configured `DependencyBuilder` behind the one private helper
+(`_service_dependency`). The error envelope maps only what
 `v2` has now — `NotFoundError`→404, `IntegrityError`→409, `ServiceError`→500,
 pydantic→422 (kept by FastAPI) — and #83 extends the same function.
 
@@ -325,17 +348,25 @@ removed by them and they are not a refactor. The old `v1` packages/modules (and 
 `resourcey.encryption`) stay in place until a follow-up removal. A test asserts
 that no module under `v2/` makes a **runtime** import of any `resourcey` code
 *outside* `v2/` (a static AST walk covering every v2 layer in one rule),
-`if TYPE_CHECKING:` imports still allowed. `v2/sql` implements whatever small
-helpers it needs locally rather than reaching for `resourcey.util`.
+`if TYPE_CHECKING:` imports still allowed. A second test pins the **layer
+ranks** `util < core < {sql, http, config, cache, encryption}`: no module
+imports a strictly-higher project layer at runtime. `v2/sql` implements
+whatever small helpers it needs locally rather than reaching for
+`resourcey.util`.
 
 ### `v2/util` and `v2/config` — the config rung
 
-`src/resourcey/v2/util/` (issue #82) is where the dependency-free vendored
-leaves now live: `models.py` (`DiscriminatedUnionMixin`),
-`import_paths.py` (dotted-path resolution), and `env_parser.py`. They are
-copies, not moves — v1 `resourcey/util/` is untouched until it is removed.
-`v2/util` depends on `v2/core` for the `Missing` sentinel (below); the
-dependency runs one way and `v2/core` imports no `v2/util`.
+`src/resourcey/v2/util/` (issue #82) is the **bottom layer** of `v2` and where
+the dependency-free vendored leaves now live: `models.py`
+(`DiscriminatedUnionMixin`), `import_paths.py` (dotted-path resolution),
+`env_parser.py`, and `missing.py` (the `Missing` / `MISSING` sentinel, moved
+here by issue #86). They are copies, not moves — v1 `resourcey/util/` is
+untouched until it is removed. `v2/util` imports **no project package** at all
+(not even `v2/core`), so the layer ranks are a clean
+
+    util < core < {sql, http, config, cache, encryption}
+
+and `v2/core` may import `v2/util` — the dependency runs one way.
 
 `src/resourcey/v2/util/singleton.py` (issue #95) is a second, non-vendored
 leaf: a small `Singleton` mixin for the process-wide pieces the framework
@@ -351,9 +382,10 @@ validation. `clear_singleton_cache()` mirrors
 `BaseConfig.clear_instance_cache()` and clears only the class it is called on.
 It imports only the standard library.
 
-**One sentinel.** `Missing` / `MISSING` from `v2/core/dto.py` is the only
-definition in `v2`; `v2/util/env_parser.py` imports it and drops its own
-`MissingType`. A test pins `env_parser.MISSING is dto.MISSING` so a future
+**One sentinel.** `Missing` / `MISSING` from `v2/util/missing.py` is the only
+definition in `v2`; `v2/util/env_parser.py`, `v2/core/dto.py`,
+`v2/config/lazy_field.py`, and `v2/sql/service.py` import it and there is no
+re-export. A test pins `env_parser.MISSING is missing.MISSING` so a future
 re-copy of the vendored file cannot quietly reintroduce a second sentinel.
 
 `src/resourcey/v2/config/` ships the generic machinery only: `config_base.py`,

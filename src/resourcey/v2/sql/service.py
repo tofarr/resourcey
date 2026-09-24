@@ -22,9 +22,9 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from resourcey.v2.core.dto import MISSING
 from resourcey.v2.core.service import STORAGE_KEY, NotFoundError, Page, Service, ServiceError
 from resourcey.v2.sql.cursor import decode_cursor, encode_cursor, keyset_predicate
+from resourcey.v2.util.missing import MISSING
 
 if TYPE_CHECKING:
     from resourcey.v2.encryption.encryption_service import EncryptionService

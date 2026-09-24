@@ -4,7 +4,7 @@ Vendored from the OpenHands Software Agent SDK (written by the same author)
 so that resourcey has no external dependency on the SDK. This is the ``v2``
 home (issue #82) with two deliberate divergences from upstream: the models
 import path, and the sentinel — ``Missing`` / ``MISSING`` come from
-:mod:`resourcey.v2.core.dto` so the whole of ``v2`` shares one sentinel.
+:mod:`resourcey.v2.util.missing` so the whole of ``v2`` shares one sentinel.
 We couldn't use pydantic-settings for this as we need complex nested types
 and polymorphism."""
 
@@ -24,7 +24,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, SecretStr, TypeAdapter
 
-from resourcey.v2.core.dto import MISSING, Missing
+from resourcey.v2.util.missing import MISSING, Missing
 from resourcey.v2.util.models import (
     DiscriminatedUnionMixin,
     get_known_concrete_subclasses,

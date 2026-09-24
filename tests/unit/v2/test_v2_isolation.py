@@ -1,4 +1,4 @@
-"""The ``v2`` isolation test (issues #75 / #78 / #82).
+"""The ``v2`` isolation test (issues #75 / #78 / #82 / #86).
 
 Asserts that no module under ``resourcey/v2/`` makes a **runtime** import of any
 ``resourcey`` module *outside* ``v2/`` — that is what pins ``v2`` as a
@@ -9,8 +9,15 @@ the legacy ``v1`` packages). Imports under ``if TYPE_CHECKING:`` are allowed
 cycles), so the check is a static AST walk that tracks whether an import sits
 inside a ``TYPE_CHECKING`` guard.
 
-``v2/util`` depends on ``v2/core`` (the ``Missing`` sentinel is defined in core
-and consumed by util); that is a one-way edge inside ``v2`` and is allowed.
+It also pins the **layer ranks** inside ``v2``:
+
+    util < core < {sql, http, config, cache, encryption}
+
+no module may import a strictly-higher project layer at runtime. This subsumes
+both "``util`` imports nothing project-level" (it is the bottom layer) and
+"``core`` imports only ``util``". ``Missing`` / ``MISSING`` live in
+``v2/util/missing.py`` so that ``util`` is the true bottom and ``core`` reaches
+down rather than across.
 
 It fails if a runtime cross-layer import is added.
 """
@@ -22,6 +29,18 @@ import pathlib
 
 V2_DIR = pathlib.Path(__file__).resolve().parents[3] / "src" / "resourcey" / "v2"
 _V2_PREFIX = "resourcey.v2"
+
+# The project layers of ``v2``, ordered bottom-up. A module may import from its
+# own layer or any lower one, never strictly higher.
+_LAYER_RANK = {
+    "util": 0,
+    "core": 1,
+    "cache": 2,
+    "config": 2,
+    "encryption": 2,
+    "http": 2,
+    "sql": 2,
+}
 
 
 def _v2_modules() -> list[pathlib.Path]:
@@ -55,7 +74,8 @@ def _is_outside_v2(module: str) -> bool:
     return not (module == _V2_PREFIX or module.startswith(_V2_PREFIX + "."))
 
 
-def _runtime_cross_layer_imports(path: pathlib.Path) -> list[str]:
+def _runtime_resourcey_imports(path: pathlib.Path) -> list[str]:
+    """Runtime ``resourcey`` imports in ``path`` (excluding ``TYPE_CHECKING`` guards)."""
     tree = ast.parse(path.read_text(), filename=str(path))
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
     found: list[str] = []
@@ -72,12 +92,48 @@ def _runtime_cross_layer_imports(path: pathlib.Path) -> list[str]:
             continue
         if not (module == "resourcey" or module.startswith("resourcey.")):
             continue
-        if not _is_outside_v2(module):
-            continue
         if _within_type_checking(node, parents):
             continue
         found.append(module)
     return sorted(set(found))
+
+
+def _runtime_cross_layer_imports(path: pathlib.Path) -> list[str]:
+    """Runtime imports of ``resourcey`` code *outside* ``v2/``."""
+    return [m for m in _runtime_resourcey_imports(path) if _is_outside_v2(m)]
+
+
+def _layer_of(path: pathlib.Path, root: pathlib.Path = V2_DIR) -> str | None:
+    """The ``v2`` layer a module belongs to (its directory under ``root``)."""
+    relative = path.relative_to(root)
+    return relative.parts[0] if len(relative.parts) > 1 else None
+
+
+def _layer_of_module(module: str) -> str | None:
+    """The ``v2`` layer a dotted module belongs to, or ``None`` for non-``v2``."""
+    if not (module == _V2_PREFIX or module.startswith(_V2_PREFIX + ".")):
+        return None
+    parts = module.split(".")
+    return parts[2] if len(parts) > 2 else None
+
+
+def _upward_layer_imports(path: pathlib.Path, root: pathlib.Path = V2_DIR) -> list[str]:
+    """Runtime ``v2`` imports in ``path`` from a strictly-higher project layer."""
+    own = _layer_of(path, root)
+    if own is None:
+        return []
+    own_rank = _LAYER_RANK.get(own)
+    if own_rank is None:
+        return []
+    found: list[str] = []
+    for module in _runtime_resourcey_imports(path):
+        target = _layer_of_module(module)
+        if target is None or target == own:
+            continue
+        target_rank = _LAYER_RANK.get(target)
+        if target_rank is not None and target_rank > own_rank:
+            found.append(module)
+    return found
 
 
 def test_v2_has_no_runtime_cross_layer_imports():
@@ -90,6 +146,35 @@ def test_v2_has_no_runtime_cross_layer_imports():
         "v2 must stand alone; these modules import resourcey packages outside v2 "
         f"at runtime: {violations}"
     )
+
+
+def test_v2_imports_flow_upward_only():
+    violations: dict[str, list[str]] = {}
+    for path in _v2_modules():
+        imports = _upward_layer_imports(path)
+        if imports:
+            violations[str(path.relative_to(V2_DIR))] = imports
+    assert violations == {}, (
+        "v2 layers are ranked util < core < {sql, http, config, cache, encryption}; "
+        f"these modules import a strictly-higher layer: {violations}"
+    )
+
+
+def test_layer_rank_detector_catches_an_upward_import(tmp_path):
+    # A fixture tree stands in for ``v2/`` so the detector can be exercised.
+    (tmp_path / "core").mkdir()
+    (tmp_path / "http").mkdir()
+    (tmp_path / "util").mkdir()
+
+    # core importing http is flagged (http is a strictly-higher layer)...
+    up = tmp_path / "core" / "up.py"
+    up.write_text("from resourcey.v2.http.app import create_app\n")
+    assert _upward_layer_imports(up, tmp_path) == ["resourcey.v2.http.app"]
+
+    # ...while core importing util is fine (a lower layer, the true bottom).
+    down = tmp_path / "core" / "down.py"
+    down.write_text("from resourcey.v2.util.missing import MISSING\n")
+    assert _upward_layer_imports(down, tmp_path) == []
 
 
 def test_the_core_files_exist_without_an_init():
@@ -121,8 +206,21 @@ def test_the_encryption_files_exist_without_an_init():
 def test_the_http_files_exist_without_an_init():
     http = V2_DIR / "http"
     names = {p.name for p in sorted(http.glob("*.py"))}
-    assert names == {"app.py", "routes.py"}
+    assert names == {"app.py", "dependency_builder.py", "routes.py"}
     assert not (http / "__init__.py").exists()
+
+
+def test_the_util_files_exist_without_an_init():
+    util = V2_DIR / "util"
+    names = {p.name for p in sorted(util.glob("*.py"))}
+    assert names == {
+        "env_parser.py",
+        "import_paths.py",
+        "missing.py",
+        "models.py",
+        "singleton.py",
+    }
+    assert not (util / "__init__.py").exists()
 
 
 def test_the_cache_files_exist_without_an_init():

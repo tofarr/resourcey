@@ -4,8 +4,10 @@ These are **free functions**, not methods on
 :class:`~resourcey.v2.core.manifest.Manifest` — keeping HTTP out of ``v2/core``
 honours the documented rule that HTTP construction is a transport concern, and
 leaves core untouched. The function form is the extension point: later
-concerns (the dependency builder of issue #86, auth, config) become additional
-keyword arguments with no core change.
+concerns (auth, config) become additional keyword arguments with no core
+change. The per-request service dependency is supplied through the
+``dependency_builder`` keyword argument (issue #86), which threads to
+:func:`~resourcey.v2.http.routes.register_routes`.
 
 ``create_app`` builds a fresh :class:`~fastapi.FastAPI` wired to the manifest's
 lifespan (``async with manifest``), its routes, error handlers, and optional
@@ -26,10 +28,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from resourcey.v2.core.manifest import Manifest
+from resourcey.v2.http.dependency_builder import DependencyBuilder
 from resourcey.v2.http.routes import register_error_handlers, register_routes
 
 
-def create_app(manifest: Manifest, *, cors_origins: list[str] | None = None) -> FastAPI:
+def create_app(
+    manifest: Manifest,
+    *,
+    cors_origins: list[str] | None = None,
+    dependency_builder: DependencyBuilder | None = None,
+) -> FastAPI:
     """Build a fresh FastAPI app wired to this manifest's lifecycle.
 
     Sugar: a fresh ``FastAPI`` with the manifest as its lifespan (``async with
@@ -40,14 +48,22 @@ def create_app(manifest: Manifest, *, cors_origins: list[str] | None = None) -> 
     Args:
         manifest: The resource set to serve.
         cors_origins: Allowed CORS origins; empty/``None`` adds no middleware.
+        dependency_builder: How each resource's per-request service dependency
+            is built (issue #86); ``None`` uses the default builder.
     """
     app = FastAPI(lifespan=_lifespan(manifest))
     _configure_cors(app, cors_origins)
-    add_to_app(manifest, app)
+    add_to_app(manifest, app, dependency_builder=dependency_builder)
     return app
 
 
-def add_to_app(manifest: Manifest, app: FastAPI, *, prefix: str = "/") -> None:
+def add_to_app(
+    manifest: Manifest,
+    app: FastAPI,
+    *,
+    prefix: str = "/",
+    dependency_builder: DependencyBuilder | None = None,
+) -> None:
     """Mount routes + error handlers onto a user-owned FastAPI app.
 
     Does **not** wire the lifespan — the caller must ``async with manifest``
@@ -56,7 +72,7 @@ def add_to_app(manifest: Manifest, app: FastAPI, *, prefix: str = "/") -> None:
     """
     register_error_handlers(app)
     for resource in manifest.resources:
-        register_routes(app, resource, prefix=prefix)
+        register_routes(app, resource, prefix=prefix, dependency_builder=dependency_builder)
 
 
 def _lifespan(manifest: Manifest) -> Callable[[FastAPI], Any]:

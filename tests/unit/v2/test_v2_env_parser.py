@@ -15,8 +15,6 @@ from uuid import UUID
 import pytest
 from pydantic import BaseModel, SecretStr
 
-from resourcey.v2.core.dto import MISSING as CORE_MISSING
-from resourcey.v2.core.dto import Missing
 from resourcey.v2.util.env_parser import (
     MISSING,
     BoolEnvParser,
@@ -32,6 +30,8 @@ from resourcey.v2.util.env_parser import (
     merge,
     to_env,
 )
+from resourcey.v2.util.missing import MISSING as UTIL_MISSING
+from resourcey.v2.util.missing import Missing
 from resourcey.v2.util.models import DiscriminatedUnionMixin, clear_subclass_cache
 
 
@@ -750,13 +750,13 @@ class TestDictParserInvalidJson:
 
 
 class TestSingleSentinel:
-    def test_env_parser_shares_the_core_sentinel(self):
-        """``v2`` has exactly one ``MISSING``: the one defined in ``v2/core/dto``.
+    def test_env_parser_shares_the_util_sentinel(self):
+        """``v2`` has exactly one ``MISSING``: the one defined in ``v2/util/missing``.
 
         ``env_parser`` is a vendored copy that used to define its own
         ``MissingType``. If a future re-copy reintroduces a second sentinel,
         ``is`` comparisons across the two modules would silently fail — this
         pins the single definition.
         """
-        assert MISSING is CORE_MISSING
+        assert MISSING is UTIL_MISSING
         assert isinstance(MISSING, Missing)

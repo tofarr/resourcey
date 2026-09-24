@@ -20,10 +20,10 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast, get_args, get_origin, get
 
 from pydantic import ValidationError
 
-from resourcey.v2.core.dto import MISSING
 from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.util.env_parser import ListEnvParser, StrEnvParser, from_env
 from resourcey.v2.util.import_paths import resolve_import_paths
+from resourcey.v2.util.missing import MISSING
 
 if TYPE_CHECKING:
     from resourcey.v2.config.config_base import BaseConfig

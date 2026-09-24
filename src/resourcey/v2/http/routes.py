@@ -8,10 +8,11 @@ the matching derived REST model.
 :func:`register_routes` resolves the exposed resource once
 (``resource.get_exposed_resource()``): a hidden resource registers no routes,
 and the exposed resource drives the path, the derived models, the supported
-actions, and the service dependency. There is no dependency builder in ``v2``
-yet (issue #86), so the service dependency is read directly through
-:func:`_service_dependency` — the single function that changes when a builder
-lands.
+actions, and the service dependency. The per-request service dependency is
+built through the configured :class:`~resourcey.v2.http.dependency_builder.DependencyBuilder`
+(issue #86): the builder is resolved on the **exposed** resource, so a
+projection's wrapped service is the projection's, not the hidden inner
+resource's.
 
 Where the ``v2`` seams differ from ``v1``:
 
@@ -33,7 +34,7 @@ This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, MutableMapping, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, TypeVar, cast
@@ -45,9 +46,11 @@ from pydantic import BaseModel, create_model
 from sqlalchemy.exc import IntegrityError
 
 from resourcey.v2.cache.cache_header import CacheHeader
-from resourcey.v2.core.dto import MISSING, RestModels, request_to_dto
+from resourcey.v2.core.dto import RestModels, request_to_dto
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, NotFoundError, Service, ServiceError
+from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
+from resourcey.v2.util.missing import MISSING
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -58,6 +61,7 @@ def register_routes(
     *,
     prefix: str = "",
     tags: Sequence[str] | None = None,
+    dependency_builder: DependencyBuilder | None = None,
 ) -> APIRouter:
     """Build an :class:`APIRouter` with the exposed resource's action routes and include it.
 
@@ -69,6 +73,12 @@ def register_routes(
        gate on exposure.
     2. ``exposed`` drives the path, the derived models, the supported actions,
        and the service dependency.
+
+    ``dependency_builder`` decides how the per-request service dependency is
+    built (issue #86); it defaults to
+    :class:`~resourcey.v2.http.dependency_builder.DefaultDependencyBuilder`. It
+    is resolved on ``exposed``, so a projection's wrapped service is the
+    projection's.
 
     The ``{resource}`` path segment is the plural, lower-case, kebab-case name
     from ``exposed.get_resource_path()``; sub-paths use dashes (``batch-read``,
@@ -83,13 +93,14 @@ def register_routes(
         # Hidden resource: no routes. The (empty) router's tag is irrelevant.
         return APIRouter(tags=list(tags) if tags else [type(resource).__name__])
 
+    builder = dependency_builder if dependency_builder is not None else DefaultDependencyBuilder()
     router = APIRouter(tags=list(tags) if tags else [type(exposed).__name__])
     path = "/" + exposed.get_resource_path().lstrip("/")
     models = exposed.get_rest_models()
     dto_model = exposed.get_dto_type()
     id_field = exposed.get_id_field()
     id_type = _id_python_type(models, id_field)
-    service_dep = _service_dependency(exposed)
+    service_dep = _service_dependency(exposed, builder)
     supported = exposed.get_supported_actions()
     strategy = exposed.get_cache_strategy()
 
@@ -124,32 +135,23 @@ def register_routes(
 # ---------------------------------------------------------------------------
 
 
-def _service_dependency(resource: Resource[T]) -> Callable[..., AsyncIterator[Service[T]]]:
-    """Resolve the per-request service dependency for ``resource``.
+def _service_dependency(
+    resource: Resource[T], builder: DependencyBuilder
+) -> Callable[..., AsyncIterator[Service[T]]]:
+    """Resolve the per-request service dependency for ``resource`` via ``builder``.
 
-    ``v2`` has no ``DependencyBuilder`` yet (issue #86), so this builds the
-    FastAPI dependency directly: it resolves the request-scoped ``ctx`` (so
-    every resource in one request shares storage), builds the service, and
-    enters it for the caller. Keeping it behind one function means the builder,
-    when it lands, changes only this. It is generic over the DTO type, so a
-    route's injected ``service`` is typed against the resource's DTO.
+    The builder is consulted **once, here, at registration time** (issue #86);
+    the callable it returns is what FastAPI invokes per request. It is
+    generic over the DTO type, so a route's injected ``service`` is typed
+    against the resource's DTO.
     """
-
-    async def dependency(request: Request) -> AsyncIterator[Service[T]]:
-        service = resource.get_service(_request_ctx(request))
-        async with service:
-            yield service
-
-    return dependency
-
-
-def _request_ctx(request: Request) -> MutableMapping[Any, Any]:
-    """The call-scoped context for ``request`` (created on first use)."""
-    ctx = getattr(request.state, "_v2_ctx", None)
-    if ctx is None:
-        ctx = {}
-        request.state._v2_ctx = ctx
-    return cast("MutableMapping[Any, Any]", ctx)
+    dependency = builder.get_service_dependency(resource)
+    if not callable(dependency):
+        raise TypeError(
+            f"{type(builder).__name__}.get_service_dependency() returned a "
+            f"non-callable {dependency!r}; a builder must return a FastAPI dependency."
+        )
+    return cast("Callable[..., AsyncIterator[Service[T]]]", dependency)
 
 
 # ---------------------------------------------------------------------------

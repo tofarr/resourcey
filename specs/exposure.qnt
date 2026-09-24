@@ -59,6 +59,22 @@ module exposure {
   pure def routesGivenBuilder(e: Exposure, b: Builder): bool =
     all { b == Default or b == Secured, routesRegistered(e) }
 
+  // The actions the service a builder yields for resource `r` serves. A builder
+  // is a *decorator*, not a filter: it may wrap the service but never narrows
+  // the action contract, so every declared action still has a route.
+  pure def actionsServedByBuilder(r: Resource, _b: Builder): Set[Action] =
+    r.actions
+
+  // The default builder is the identity: the handler receives the resource's
+  // own service, serving exactly its declared actions.
+  pure def defaultBuilderIsIdentity(r: Resource): bool =
+    actionsServedByBuilder(r, Default) == r.actions
+
+  // A wrapping builder preserves the action contract: wrapping changes *which*
+  // service the handler sees, never the set of actions served.
+  pure def wrappedBuilderPreservesTheActionContract(r: Resource, b: Builder): bool =
+    actionsServedByBuilder(r, b) == r.actions
+
   // A wrapper reports itself exposed rather than delegating. Delegating to an
   // inner resource that does not override the hook reaches that resource's
   // *default*, which is Self -- so the route builder sees the inner and the
@@ -165,6 +181,28 @@ module exposure {
     }
   }
 
+  run defaultBuilderIsIdentityTest = {
+    // The default builder yields the resource's own service over the
+    // request-scoped ctx -- it serves exactly the declared actions.
+    val r = { fields: Set("id", "name"), actions: Set(Read, Search, Count) }
+    all {
+      assert(defaultBuilderIsIdentity(r)),
+      assert(actionsServedByBuilder(r, Default) == r.actions),
+    }
+  }
+
+  run wrappedBuilderPreservesTheActionContractTest = {
+    // Wrapping changes which service the handler sees, never the action set:
+    // a hidden resource still mounts no routes, and a visible one serves every
+    // declared action through the wrapped service.
+    val r = { fields: Set("id", "name"), actions: Set(Read, Search, Count) }
+    all {
+      assert(wrappedBuilderPreservesTheActionContract(r, Default)),
+      assert(wrappedBuilderPreservesTheActionContract(r, Secured)),
+      assert(actionsServedByBuilder(r, Secured) == r.actions),
+    }
+  }
+
   run narrowingIsAllowedWideningIsRejected = {
     val r = { fields: Set("id"), actions: Set(Read, Search) }
     all {
@@ -181,6 +219,8 @@ module exposure {
       assert(hiddenFieldsNeverExposed(r, Set("secret"))),
       assert(hiddenFieldsNeverQueryable(r, Set("secret"))),
       assert(wrapperDoesNotDelegate(r, Set("secret"))),
+      assert(defaultBuilderIsIdentity(r)),
+      assert(wrappedBuilderPreservesTheActionContract(r, Secured)),
     }
   }
 }

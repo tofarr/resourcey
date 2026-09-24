@@ -17,13 +17,12 @@ from pydantic_core import PydanticSerializationError
 
 from resourcey.v2.core.dto import (
     DTO,
-    MISSING,
     DtoField,
-    Missing,
     RestModels,
     request_to_dto,
     utc_now,
 )
+from resourcey.v2.util.missing import MISSING, Missing
 
 
 class MyStoredKey(DTO):
