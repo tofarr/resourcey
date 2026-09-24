@@ -119,6 +119,13 @@ def test_the_encryption_files_exist_without_an_init():
     assert not (encryption / "__init__.py").exists()
 
 
+def test_the_http_files_exist_without_an_init():
+    http = V2_DIR / "http"
+    names = {p.name for p in sorted(http.glob("*.py"))}
+    assert names == {"app.py", "routes.py"}
+    assert not (http / "__init__.py").exists()
+
+
 def _imports_openhands(path: pathlib.Path) -> bool:
     """Whether ``path`` imports the ``openhands`` package at runtime.
 
