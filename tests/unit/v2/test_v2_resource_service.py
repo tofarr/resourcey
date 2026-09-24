@@ -10,15 +10,17 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, MutableMapping
+from functools import cache
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from pydantic import BaseModel
+from sqlalchemy import Integer, String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.cache.cache_strategy import ETagCacheStrategy
-from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
@@ -29,25 +31,34 @@ from resourcey.v2.core.service import (
     ServiceError,
     assert_real_actions,
 )
+from resourcey.v2.http.routes import _service_dependency
 from resourcey.v2.sql.resource import SqlResource
 
 
-class Thread(DTO):
-    id: int
-    title: str
+class CoreBase(DeclarativeBase):
+    pass
 
 
-class Message(DTO):
-    id: int
-    thread_id: int
-    body: str
+class Thread(CoreBase):
+    __tablename__ = "threads"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(100))
+
+
+class Message(CoreBase):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    thread_id: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(String(200))
 
 
 class RecordingResource(SqlResource[Any]):
     """A SQL resource recording its ``__aexit__`` calls, for the Manifest test."""
 
-    def __init__(self, dto: type[DTO], *, session_factory: Any, order: list[str]) -> None:
-        super().__init__(dto, session_factory=session_factory)
+    def __init__(self, model: type[Any], *, session_factory: Any, order: list[str]) -> None:
+        super().__init__(model, session_factory=session_factory)
         self._order = order
 
     async def __aexit__(self, *exc: object) -> None:
@@ -64,8 +75,7 @@ async def resources() -> AsyncIterator[
     threads = SqlResource(Thread, session_factory=maker)
     messages = SqlResource(Message, session_factory=maker)
     async with engine.begin() as conn:
-        await conn.run_sync(threads.metadata.create_all)
-        await conn.run_sync(messages.metadata.create_all)
+        await conn.run_sync(CoreBase.metadata.create_all)
     yield maker, threads, messages
     await engine.dispose()
 
@@ -104,12 +114,19 @@ async def test_entered_property_tracks_context_manager(resources):
     assert service.entered is False
 
 
-def test_build_service_on_base_resource_raises():
-    class Bare(Resource[Any]):
-        pass
+_DUMMY_MAKER = _dummy_factory()
 
-    with pytest.raises(ServiceError, match="no storage backend"):
-        Bare(Thread).get_service()
+
+@cache
+def _dto_type(model: type[Any]) -> type[BaseModel]:
+    """The DTO type inferred from a model (handy for building payloads in tests)."""
+    return SqlResource(model, session_factory=_DUMMY_MAKER).get_dto_type()
+
+
+def test_resource_base_is_abstract():
+    # ``Resource`` is now a genuine ABC: it cannot be instantiated at all.
+    with pytest.raises(TypeError, match="abstract"):
+        Resource()  # type: ignore[abstract]
 
 
 # ---------------------------------------------------------------------------
@@ -121,14 +138,14 @@ async def test_crud_and_count_and_search(resources):
     _maker, threads, _messages = resources
     ctx: dict[Any, Any] = {}
     async with threads.get_service(ctx) as service:
-        created = await service.create(Thread.get_dto_type()(title="hello"))
+        created = await service.create(_dto_type(Thread)(title="hello"))
         assert created.id is not None
         assert created.title == "hello"
 
         fetched = await service.read(created.id)
         assert fetched.title == "hello"
 
-        updated = await service.update(created.id, Thread.get_dto_type()(title="bye"))
+        updated = await service.update(created.id, _dto_type(Thread)(title="bye"))
         assert updated.title == "bye"
 
         assert await service.count() == 1
@@ -150,7 +167,7 @@ async def test_update_and_delete_absent_raise(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
         with pytest.raises(NotFoundError):
-            await service.update(999, Thread.get_dto_type()(title="x"))
+            await service.update(999, _dto_type(Thread)(title="x"))
         with pytest.raises(NotFoundError):
             await service.delete(999)
 
@@ -158,14 +175,14 @@ async def test_update_and_delete_absent_raise(resources):
 async def test_batch_read_and_batch_edit(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
-        a = await service.create(Thread.get_dto_type()(title="a"))
-        b = await service.create(Thread.get_dto_type()(title="b"))
+        a = await service.create(_dto_type(Thread)(title="a"))
+        b = await service.create(_dto_type(Thread)(title="b"))
         assert [x.title for x in await service.batch_read([a.id, b.id])] == ["a", "b"]
         # an absent id yields a positional None
         assert (await service.batch_read([a.id, 999]))[1] is None
 
         edited = await service.batch_edit(
-            [(a.id, Thread.get_dto_type()(title="a2")), (999, Thread.get_dto_type()(title="x"))]
+            [(a.id, _dto_type(Thread)(title="a2")), (999, _dto_type(Thread)(title="x"))]
         )
         assert edited[0] is not None and edited[0].title == "a2"
         assert edited[1] is None
@@ -193,8 +210,8 @@ async def test_count_rejects_filters_for_now(resources):
 async def test_search_orders_by_id_ascending(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
-        await service.create(Thread.get_dto_type()(title="a"))
-        await service.create(Thread.get_dto_type()(title="b"))
+        await service.create(_dto_type(Thread)(title="a"))
+        await service.create(_dto_type(Thread)(title="b"))
         page = await service.search(limit=10)
         assert [item.title for item in page.items] == ["a", "b"]
 
@@ -211,7 +228,7 @@ async def test_owner_opens_and_commits_its_own_storage(resources):
     assert STORAGE_KEY not in ctx
     async with service:
         assert STORAGE_KEY in ctx
-        await service.create(Thread.get_dto_type()(title="owned"))
+        await service.create(_dto_type(Thread)(title="owned"))
     # The opener closed and cleared its storage on exit.
     assert STORAGE_KEY not in ctx
     # And the row was committed.
@@ -225,7 +242,7 @@ async def test_reusing_seeded_storage_does_not_commit_or_close(resources):
     ctx: dict[Any, Any] = {STORAGE_KEY: shared}
     service = threads.get_service(ctx)
     async with service:
-        await service.create(Thread.get_dto_type()(title="shared"))
+        await service.create(_dto_type(Thread)(title="shared"))
         assert ctx[STORAGE_KEY] is shared
     # The reusing service neither closed the session nor dropped the key.
     assert STORAGE_KEY in ctx
@@ -238,11 +255,11 @@ async def test_session_per_service_shares_one_storage_across_resources(resources
     _maker, threads, messages = resources
     ctx: dict[Any, Any] = {}
     async with threads.get_service(ctx) as thread_service:
-        thread = await thread_service.create(Thread.get_dto_type()(title="t"))
+        thread = await thread_service.create(_dto_type(Thread)(title="t"))
         async with messages.get_service(ctx) as message_service:
             # The second service adopted the first's session.
             assert message_service._session is thread_service._session
-            await message_service.create(Message.get_dto_type()(thread_id=thread.id, body="hello"))
+            await message_service.create(_dto_type(Message)(thread_id=thread.id, body="hello"))
     async with messages.get_service() as fresh:
         assert await fresh.count() == 1
 
@@ -251,7 +268,7 @@ async def test_exception_in_owned_storage_rolls_back(resources):
     _maker, threads, _messages = resources
     with pytest.raises(RuntimeError):
         async with threads.get_service() as service:
-            await service.create(Thread.get_dto_type()(title="rolled-back"))
+            await service.create(_dto_type(Thread)(title="rolled-back"))
             raise RuntimeError("boom")
     async with threads.get_service() as fresh:
         assert await fresh.count() == 0
@@ -346,12 +363,16 @@ async def test_manifest_exits_resources_in_reverse(resources):
 
 async def test_service_dependency_yields_entered_service(resources):
     _maker, threads, _messages = resources
+    dependency = _service_dependency(threads)
+
+    class _State:
+        pass
 
     class FakeRequest:
-        class state:  # noqa: N801
-            pass
+        def __init__(self) -> None:
+            self.state = _State()
 
-    agen = threads.get_service_dependency(FakeRequest())  # type: ignore[arg-type]
+    agen = dependency(FakeRequest())  # type: ignore[arg-type]
     service = await agen.__anext__()
     assert service.entered is True
     await agen.aclose()
@@ -361,7 +382,7 @@ async def test_get_service_without_ctx_creates_a_private_context(resources):
     _maker, threads, _messages = resources
     service = threads.get_service()
     async with service as entered:
-        await entered.create(Thread.get_dto_type()(title="private"))
+        await entered.create(_dto_type(Thread)(title="private"))
     async with threads.get_service() as fresh:
         assert await fresh.count() == 1
 
@@ -376,7 +397,6 @@ async def test_resource_double_entry_raises(resources):
 def test_get_dto_and_rest_models(resources):
     _maker, threads, _messages = resources
     assert threads.get_id_field() == "id"
-    assert threads.get_search_filter_type() is None
     assert isinstance(threads.get_cache_strategy(), ETagCacheStrategy)
     assert issubclass(threads.get_dto_type(), BaseModel)
     assert set(vars(threads.get_rest_models())) == {
@@ -394,9 +414,11 @@ def test_resource_path_override():
     assert resource.get_resource_path() == "custom/threads"
 
 
-class ByCode(DTO, id_field_name="code"):
-    code: str
-    name: str
+class ByCode(CoreBase):
+    __tablename__ = "by_code"
+
+    code: Mapped[str] = mapped_column(String(2), primary_key=True)
+    name: Mapped[str] = mapped_column(String(50))
 
 
 @pytest_asyncio.fixture
@@ -429,13 +451,13 @@ def test_non_integer_identifier_is_a_plain_primary_key(code_resource):
 async def test_crud_with_a_custom_identifier(code_resource):
     resource, _maker = code_resource
     async with resource.get_service() as service:
-        created = await service.create(ByCode.get_dto_type()(code="US", name="United States"))
+        created = await service.create(_dto_type(ByCode)(code="US", name="United States"))
         assert (created.code, created.name) == ("US", "United States")
 
         read = await service.read("US")
         assert read.name == "United States"
 
-        updated = await service.update("US", ByCode.get_dto_type()(name="USA"))
+        updated = await service.update("US", _dto_type(ByCode)(name="USA"))
         assert updated.name == "USA"
         # The identifier is never overwritten by an update payload.
         assert updated.code == "US"

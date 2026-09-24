@@ -15,9 +15,10 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import String
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.service import ServiceError
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
@@ -25,9 +26,19 @@ from resourcey.v2.sql import cursor as cursor_module
 from resourcey.v2.sql.resource import SqlResource
 
 
-class Item(DTO):
-    id: int
-    label: str
+class PaginationBase(DeclarativeBase):
+    pass
+
+
+class Item(PaginationBase):
+    __tablename__ = "items"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(50))
+
+
+def _dto_type() -> type:
+    return SqlResource(Item, session_factory=async_sessionmaker()).get_dto_type()
 
 
 def _encryption() -> EncryptionService:
@@ -47,7 +58,7 @@ async def resource() -> AsyncIterator[SqlResource[Any]]:
         await conn.run_sync(res.metadata.create_all)
     async with res.get_service() as service:
         for i in range(7):
-            await service.create(Item.get_dto_type()(label=f"item-{i}"))
+            await service.create(_dto_type()(label=f"item-{i}"))
     yield res
     await engine.dispose()
 
@@ -129,7 +140,7 @@ async def test_cursor_pagination_requires_an_encryption_service():
     async with engine.begin() as conn:
         await conn.run_sync(res.metadata.create_all)
     async with res.get_service() as service:
-        await service.create(Item.get_dto_type()(label="x"))
+        await service.create(_dto_type()(label="x"))
         page = await service.search(limit=1)
         assert page.next_cursor is None
         # A cursor cannot be encoded, so asking for the next page fails clearly.

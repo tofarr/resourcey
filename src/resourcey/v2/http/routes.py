@@ -33,7 +33,7 @@ This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, MutableMapping, Sequence
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, cast
@@ -115,19 +115,35 @@ def register_routes(
 
 
 # ---------------------------------------------------------------------------
-# Service dependency (get_service_dependency -> FastAPI dependency)
+# Service dependency (get_service -> FastAPI dependency)
 # ---------------------------------------------------------------------------
 
 
 def _service_dependency(resource: Resource[Any]) -> Callable[..., Any]:
-    """Resolve the service dependency for ``resource``.
+    """Resolve the per-request service dependency for ``resource``.
 
-    ``v2`` has no ``DependencyBuilder`` yet (issue #86), so this reads the
-    resource's own :meth:`~resourcey.v2.core.resource.Resource.get_service_dependency`.
-    Keeping it behind one function means the builder, when it lands, changes
-    only this.
+    ``v2`` has no ``DependencyBuilder`` yet (issue #86), so this builds the
+    FastAPI dependency directly: it resolves the request-scoped ``ctx`` (so
+    every resource in one request shares storage), builds the service, and
+    enters it for the caller. Keeping it behind one function means the builder,
+    when it lands, changes only this.
     """
-    return resource.get_service_dependency
+
+    async def dependency(request: Request) -> AsyncIterator[Service[Any]]:
+        service = resource.get_service(_request_ctx(request))
+        async with service:
+            yield service
+
+    return dependency
+
+
+def _request_ctx(request: Request) -> MutableMapping[Any, Any]:
+    """The call-scoped context for ``request`` (created on first use)."""
+    ctx = getattr(request.state, "_v2_ctx", None)
+    if ctx is None:
+        ctx = {}
+        request.state._v2_ctx = ctx
+    return cast("MutableMapping[Any, Any]", ctx)
 
 
 # ---------------------------------------------------------------------------
