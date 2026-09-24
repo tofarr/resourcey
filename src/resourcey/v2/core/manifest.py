@@ -9,7 +9,11 @@ Construction validates the action declarations of every resource up front: a
 resource whose :meth:`~resourcey.v2.core.resource.Resource.get_supported_actions`
 contains a non-:class:`~resourcey.v2.core.service.Action` member (a typo in a
 dynamically built set) fails loudly at startup instead of silently dropping a
-route.
+route. It then calls :meth:`~resourcey.v2.core.resource.Resource.on_register`
+(sync) on each resource, handing it the manifest so it can resolve sibling
+resources *lazily, later* (e.g. to verify foreign keys when a request needs it)
+— never from within the hook itself, since registration ordering is not a
+contract.
 
 This module is part of the ``v2/core`` bottom layer: it imports no other
 ``resourcey`` module.
@@ -35,6 +39,8 @@ class Manifest:
         self._entered = False
         for resource in self.resources:
             assert_real_actions(type(resource).__name__, resource.get_supported_actions())
+        for resource in self.resources:
+            resource.on_register(self)
 
     # -- lookup ---------------------------------------------------------
 

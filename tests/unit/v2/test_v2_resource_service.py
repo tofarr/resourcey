@@ -316,6 +316,16 @@ async def test_manifest_lifecycle_and_lookup(resources):
     assert manifest.entered is False
 
 
+async def test_manifest_registers_each_resource_with_a_manifest_reference(resources):
+    _maker, threads, messages = resources
+    assert threads.get_manifest() is None
+    manifest: Manifest = Manifest(resources=[threads, messages])
+    assert threads.get_manifest() is manifest
+    assert messages.get_manifest() is manifest
+    # Siblings resolve lazily, after registration, from the stored reference.
+    assert threads.get_manifest().get_resource("messages") is messages
+
+
 async def test_manifest_double_entry_raises(resources):
     _maker, threads, messages = resources
     manifest: Manifest = Manifest(resources=[threads, messages])
