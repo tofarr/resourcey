@@ -240,19 +240,49 @@ Where the port differs from `v1`: `get_rest_models()` replaces the
 create/update/read model getters, so each action maps explicitly to its shape
 (`create` → `create_response`, so a one-time-reveal field survives); services
 return DTO instances, so the response is **projected** onto the REST model
-(dropping `MISSING`) in the transport; and `v1`'s sort / filter / cache surface
-is out of scope (#79 and the cache follow-up), so search is `limit` + `cursor`
-only. There is no `DependencyBuilder` yet, so the service dependency is read
-directly behind one private helper (`_service_dependency`) that #86 replaces.
-The error envelope maps only what `v2` has now — `NotFoundError`→404,
-`IntegrityError`→409, `ServiceError`→500, pydantic→422 (kept by FastAPI) — and
-#83 extends the same function.
+(dropping `MISSING`) in the transport; and `v1`'s sort / filter surface is out
+of scope (#79), so search is `limit` + `cursor` only. Caching is back (issue
+#92) — see the `v2/cache` section below. There is no `DependencyBuilder` yet, so
+the service dependency is read directly behind one private helper
+(`_service_dependency`) that #86 replaces. The error envelope maps only what
+`v2` has now — `NotFoundError`→404, `IntegrityError`→409, `ServiceError`→500,
+pydantic→422 (kept by FastAPI) — and #83 extends the same function.
+
+### `v2/cache` — the migrated cache surface (issue #92)
+
+`src/resourcey/v2/cache/` mirrors the old `resourcey.cache` layout (no
+`__init__.py`):
+
+* `cache_header.py` — `CacheHeader` (the `etag` / `updated_at` / `expire_at`
+  value object and the `is_modified` matrix). HTTP-agnostic.
+* `cache_strategy.py` — the concrete `CacheStrategy` base plus
+  `ETagCacheStrategy` / `LastModifiedCacheStrategy` / `OptimisticCacheStrategy`.
+  The concrete base is a `DiscriminatedUnionMixin` **and** extends
+  `resourcey.v2.core.service.CacheStrategy` (the placeholder `v2/core` names),
+  so a strategy satisfies the core-level seam while its behaviour lives in
+  `cache`. `get_cache_header(items, *, context=...)` hashes the read-model
+  projection; `count_cache_header(count, filters)` handles the bare-integer
+  `count` route (a count-derived ETag; never last-modified).
+* `cache_defaults.py` — `default_cache_strategy(rest_models)`: last-modified
+  when the read model carries `updated_at`, else ETag.
+
+The wiring: `Resource.get_cache_strategy()` returns `None` in `v2/core` (which
+stays dependency-free); `SqlResource` overrides it to resolve the default
+**per instance** (one `SqlResource` class serves many DTOs, so a class-level
+cache would leak between them) and caches it on the instance. A developer
+overrides the same hook to change the policy. `v2/http/routes.py` reads the
+exposed resource's strategy once, passes it to every route builder, and each
+handler emits `ETag` / `Last-Modified` / `Cache-Control` / `Expires` and
+short-circuits a conditional `GET`/`HEAD` to `304 Not Modified`; a validator
+with no freshness window forces revalidation with `Cache-Control: no-cache`.
+Only the projected REST representation is hashed, so the ETag validates exactly
+the bytes sent.
 
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/encryption`, `v2/util`, `v2/config`, and `v2/http` are
-**parallel** to the existing packages — nothing existing is removed by them and
-they are not a refactor. The old `v1` packages/modules (and the old
+`v2/core`, `v2/sql`, `v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and
+`v2/http` are **parallel** to the existing packages — nothing existing is
+removed by them and they are not a refactor. The old `v1` packages/modules (and the old
 `resourcey.encryption`) stay in place until a follow-up removal. A test asserts
 that no module under `v2/` makes a **runtime** import of any `resourcey` code
 *outside* `v2/` (a static AST walk covering every v2 layer in one rule),

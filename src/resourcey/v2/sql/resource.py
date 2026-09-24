@@ -46,6 +46,7 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, registry
 
+from resourcey.v2.cache.cache_defaults import default_cache_strategy
 from resourcey.v2.core.dto import (
     DEFAULT_ID_FIELD_NAME,
     DTO,
@@ -54,6 +55,7 @@ from resourcey.v2.core.dto import (
     _strip_annotated,
 )
 from resourcey.v2.core.resource import Resource, _camel_to_kebab, _pluralize
+from resourcey.v2.core.service import CacheStrategy as CoreCacheStrategy
 from resourcey.v2.core.service import Service, ServiceError
 from resourcey.v2.sql.service import SqlService
 from resourcey.v2.sql.sqlalchemy_2_dto import recorded_model
@@ -105,6 +107,11 @@ class SqlResource(Resource[T]):
         encryption_service: The service used to encrypt/decrypt pagination
             cursors; when omitted, cursors are unsupported.
     """
+
+    # Cache policy, resolved lazily by :meth:`get_cache_strategy` (per instance,
+    # since one SqlResource class serves many DTOs). ``None`` means "not yet
+    # resolved"; a resolved value is a concrete strategy.
+    _v2_cache_strategy: CoreCacheStrategy | None = None
 
     def __init__(
         self,
@@ -163,6 +170,19 @@ class SqlResource(Resource[T]):
     def build_service(self, ctx: MutableMapping[Any, Any]) -> Service[T]:
         """Build a :class:`SqlService` over ``ctx`` and the injected session factory."""
         return SqlService(self, ctx, self._session_factory)
+
+    def get_cache_strategy(self) -> CoreCacheStrategy:
+        """The default strategy: last-modified when ``updated_at`` is readable, else ETag.
+
+        Resolved from the derived read model and cached on the *instance*, so a
+        resource gets a stable strategy object across calls. (``v2`` serves many
+        DTOs from the one ``SqlResource`` class, so a class-level cache would
+        hand one DTO's strategy to another.) A developer overrides this to
+        change the policy (e.g. an ``OptimisticCacheStrategy(expire_in=60)``).
+        """
+        if self._v2_cache_strategy is None:
+            self._v2_cache_strategy = default_cache_strategy(self.get_rest_models())
+        return self._v2_cache_strategy
 
 
 # ---------------------------------------------------------------------------

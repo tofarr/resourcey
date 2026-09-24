@@ -71,13 +71,21 @@ class NotFoundError(Exception):
 class CacheStrategy:
     """A cache policy placeholder: the ``v2`` core names the concept only.
 
-    Concrete strategies live in ``resourcey.cache``; ``v2/core`` deliberately
+    Concrete strategies live in ``resourcey.v2.cache``; ``v2/core`` deliberately
     does not depend on them. A migrated resource supplies its own strategy and
-    the transport layer interprets it.
+    the transport layer interprets it. The two methods below are the whole
+    transport-facing contract a concrete strategy must satisfy: a header for a
+    list of read models, and one for a bare count. Both return ``None`` here
+    (no caching), and both are typed ``Any`` so ``core`` stays free of the
+    concrete ``CacheHeader`` type.
     """
 
-    def cache_header(self, items: list[Any]) -> Any:  # pragma: no cover - trivial
-        """Compute a transport-specific cache header for ``items`` (default: none)."""
+    def get_cache_header(self, models: list[Any], *, context: dict[str, Any] | None = None) -> Any:
+        """Compute a transport-specific cache header for ``models`` (default: none)."""
+        return None
+
+    def count_cache_header(self, count: int, filters: Any = None) -> Any:
+        """Compute a cache header for a bare ``count`` result (default: none)."""
         return None
 
 
