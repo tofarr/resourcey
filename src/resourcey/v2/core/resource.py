@@ -94,7 +94,14 @@ class Resource(Generic[T]):
         return None
 
     def get_cache_strategy(self) -> CacheStrategy | None:
-        """The cache strategy for this resource, or ``None`` (no caching) by default."""
+        """The cache strategy for this resource, or ``None`` for no caching.
+
+        ``v2/core`` itself stays dependency-free: the base returns ``None``.
+        :class:`~resourcey.v2.sql.resource.SqlResource` overrides this to pick a
+        concrete strategy (last-modified when the read model carries
+        ``updated_at``, else ETag), and a developer overrides it to change the
+        policy — the single seam for cache policy.
+        """
         return None
 
     def get_resource_path(self) -> str:

@@ -17,6 +17,7 @@ import pytest_asyncio
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from resourcey.v2.cache.cache_strategy import ETagCacheStrategy
 from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
@@ -366,7 +367,7 @@ def test_get_dto_and_rest_models(resources):
     _maker, threads, _messages = resources
     assert threads.get_id_field() == "id"
     assert threads.get_search_filter_type() is None
-    assert threads.get_cache_strategy() is None
+    assert isinstance(threads.get_cache_strategy(), ETagCacheStrategy)
     assert issubclass(threads.get_dto_type(), BaseModel)
     assert set(vars(threads.get_rest_models())) == {
         "create_request",

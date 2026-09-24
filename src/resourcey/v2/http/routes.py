@@ -21,8 +21,12 @@ Where the ``v2`` seams differ from ``v1``:
   ``create_response``, so the one-time-reveal field survives).
 * services return DTO instances, so every response is **projected** onto the
   REST model here (:func:`_project`), dropping the ``MISSING`` sentinel.
-* ``v1``'s sort / filter / cache surface is out of scope (issue #79 and the
-  cache follow-up), so search is ``limit`` + ``cursor`` only.
+* ``v1``'s sort / filter surface is out of scope (issue #79), so search is
+  ``limit`` + ``cursor`` only.
+* caching is back (issue #92): the exposed resource's
+  :meth:`~resourcey.v2.core.resource.Resource.get_cache_strategy` drives
+  ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires`` headers, and a
+  conditional ``GET`` short-circuits to ``304 Not Modified``.
 
 This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``.
 """
@@ -30,13 +34,17 @@ This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, cast
 
-from fastapi import APIRouter, Depends, FastAPI, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, create_model
 from sqlalchemy.exc import IntegrityError
 
+from resourcey.v2.cache.cache_header import CacheHeader
 from resourcey.v2.core.dto import MISSING, RestModels
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, NotFoundError, Service, ServiceError
@@ -80,24 +88,25 @@ def register_routes(
     id_type = _id_python_type(models, id_field)
     service_dep = _service_dependency(exposed)
     supported = exposed.get_supported_actions()
+    strategy = exposed.get_cache_strategy()
 
     # Static sub-paths (search / count / batch-read / batch-edit) are registered
     # before the ``{id}`` routes, otherwise ``batch-read`` would be captured as
     # an id value by the ``/{resource}/{id}`` route.
     if Action.SEARCH in supported:
-        _add_search_route(router, path, models, service_dep)
+        _add_search_route(router, path, models, service_dep, strategy)
     if Action.COUNT in supported:
-        _add_count_route(router, path, service_dep)
+        _add_count_route(router, path, service_dep, strategy)
     if Action.BATCH_READ in supported:
-        _add_batch_read_route(router, path, models, id_type, service_dep)
+        _add_batch_read_route(router, path, models, id_type, service_dep, strategy)
     if Action.BATCH_EDIT in supported:
-        _add_batch_edit_route(router, path, models, id_field, id_type, service_dep)
+        _add_batch_edit_route(router, path, models, id_field, id_type, service_dep, strategy)
     if Action.CREATE in supported:
-        _add_create_route(router, path, models, service_dep)
+        _add_create_route(router, path, models, service_dep, strategy)
     if Action.READ in supported:
-        _add_read_route(router, path, models, id_type, service_dep)
+        _add_read_route(router, path, models, id_type, service_dep, strategy)
     if Action.UPDATE in supported:
-        _add_update_route(router, path, models, id_type, service_dep)
+        _add_update_route(router, path, models, id_type, service_dep, strategy)
     if Action.DELETE in supported:
         _add_delete_route(router, path, id_type, service_dep)
 
@@ -126,34 +135,65 @@ def _service_dependency(resource: Resource[Any]) -> Callable[..., Any]:
 # ---------------------------------------------------------------------------
 
 
-def _add_create_route(router: APIRouter, path: str, models: RestModels, service_dep: Any) -> None:
-    async def handler(payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
+def _add_create_route(
+    router: APIRouter,
+    path: str,
+    models: RestModels,
+    service_dep: Any,
+    strategy: Any,
+) -> None:
+    async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
         created = await service.create(payload)
-        return _project(created, models.create_response)
+        projected = _project(created, models.create_response)
+        header = _header_for(strategy, [projected])
+        return _cached_json_response(request, _dump(projected), header, status.HTTP_201_CREATED)
 
-    handler.__annotations__ = {"payload": models.create_request, "service": Service}
+    handler.__annotations__ = {
+        "request": Request,
+        "payload": models.create_request,
+        "service": Service,
+    }
     _route(router, path, ["POST"], handler, status_code=status.HTTP_201_CREATED)
 
 
 def _add_read_route(
-    router: APIRouter, path: str, models: RestModels, id_type: Any, service_dep: Any
+    router: APIRouter,
+    path: str,
+    models: RestModels,
+    id_type: Any,
+    service_dep: Any,
+    strategy: Any,
 ) -> None:
-    async def handler(id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+    async def handler(request, id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.read(id)
-        return _project(found, models.read_response)
+        projected = _project(found, models.read_response)
+        header = _header_for(strategy, [projected])
+        return _cached_json_response(request, _dump(projected), header)
 
-    handler.__annotations__ = {"id": id_type, "service": Service}
+    handler.__annotations__ = {"request": Request, "id": id_type, "service": Service}
     _route(router, f"{path}/{{id}}", ["GET"], handler)
 
 
 def _add_update_route(
-    router: APIRouter, path: str, models: RestModels, id_type: Any, service_dep: Any
+    router: APIRouter,
+    path: str,
+    models: RestModels,
+    id_type: Any,
+    service_dep: Any,
+    strategy: Any,
 ) -> None:
-    async def handler(id, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+    async def handler(request, id, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         updated = await service.update(id, payload)
-        return _project(updated, models.update_response)
+        projected = _project(updated, models.update_response)
+        header = _header_for(strategy, [projected])
+        return _cached_json_response(request, _dump(projected), header)
 
-    handler.__annotations__ = {"id": id_type, "payload": models.update_request, "service": Service}
+    handler.__annotations__ = {
+        "request": Request,
+        "id": id_type,
+        "payload": models.update_request,
+        "service": Service,
+    }
     _route(router, f"{path}/{{id}}", ["PATCH"], handler)
 
 
@@ -166,7 +206,13 @@ def _add_delete_route(router: APIRouter, path: str, id_type: Any, service_dep: A
     _route(router, f"{path}/{{id}}", ["DELETE"], handler, status_code=status.HTTP_204_NO_CONTENT)
 
 
-def _add_search_route(router: APIRouter, path: str, models: RestModels, service_dep: Any) -> None:
+def _add_search_route(
+    router: APIRouter,
+    path: str,
+    models: RestModels,
+    service_dep: Any,
+    strategy: Any,
+) -> None:
     """Register ``GET /{resource}`` — cursor-paginated search (no sort/filter yet).
 
     ``limit`` and ``cursor`` are the only query parameters: ordering is fixed to
@@ -174,35 +220,60 @@ def _add_search_route(router: APIRouter, path: str, models: RestModels, service_
     """
 
     async def handler(  # type: ignore[no-untyped-def]
+        request,
         limit=20,
         cursor=None,
         service=Depends(service_dep),  # noqa: B008
     ):
         page = await service.search(limit=limit, cursor=cursor)
-        return _page_body(page, models.search_response)
+        body, items = _page_body(page, models.search_response)
+        header = _header_for(strategy, items)
+        return _cached_json_response(request, body, header)
 
-    handler.__annotations__ = {"limit": int, "cursor": str | None, "service": Service}
+    handler.__annotations__ = {
+        "request": Request,
+        "limit": int,
+        "cursor": str | None,
+        "service": Service,
+    }
     _route(router, path, ["GET"], handler)
 
 
-def _add_count_route(router: APIRouter, path: str, service_dep: Any) -> None:
+def _add_count_route(
+    router: APIRouter,
+    path: str,
+    service_dep: Any,
+    strategy: Any,
+) -> None:
     """Register ``GET /{resource}/count`` — the matching row count."""
 
-    async def handler(service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
-        return await service.count()
+    async def handler(request, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
+        total = await service.count()
+        header: CacheHeader | None = None
+        if strategy is not None:
+            candidate = strategy.count_cache_header(total)
+            header = candidate if candidate.has_any() else None
+        return _cached_json_response(request, total, header)
 
-    handler.__annotations__ = {"service": Service}
+    handler.__annotations__ = {"request": Request, "service": Service}
     _route(router, f"{path}/count", ["GET"], handler)
 
 
 def _add_batch_read_route(
-    router: APIRouter, path: str, models: RestModels, id_type: Any, service_dep: Any
+    router: APIRouter,
+    path: str,
+    models: RestModels,
+    id_type: Any,
+    service_dep: Any,
+    strategy: Any,
 ) -> None:
-    async def handler(id=Query(default=[]), service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+    async def handler(request, id=Query(default=[]), service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.batch_read(list(id))
-        return [_project(item, models.search_response) for item in found]
+        items = [_project(item, models.search_response) for item in found]
+        header = _header_for(strategy, items)
+        return _cached_json_response(request, _dump(items), header)
 
-    handler.__annotations__ = {"id": list[id_type], "service": Service}
+    handler.__annotations__ = {"request": Request, "id": list[id_type], "service": Service}
     _route(router, f"{path}/batch-read", ["GET"], handler)
 
 
@@ -213,18 +284,25 @@ def _add_batch_edit_route(
     id_field: str,
     id_type: Any,
     service_dep: Any,
+    strategy: Any,
 ) -> None:
     item_model = _batch_edit_item_model(models.update_request, id_field, id_type)
 
-    async def handler(payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
+    async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
         tuples = [
             (getattr(item, id_field), _item_to_update_model(item, models.update_request, id_field))
             for item in payload
         ]
         edited = await service.batch_edit(tuples)
-        return [_project(item, models.update_response) for item in edited]
+        items = [_project(item, models.update_response) for item in edited]
+        header = _header_for(strategy, items)
+        return _cached_json_response(request, _dump(items), header)
 
-    handler.__annotations__ = {"payload": list[item_model], "service": Service}  # type: ignore[valid-type]
+    handler.__annotations__ = {
+        "request": Request,
+        "payload": list[item_model],  # type: ignore[valid-type]
+        "service": Service,
+    }
     _route(router, f"{path}/batch-edit", ["POST"], handler)
 
 
@@ -251,26 +329,146 @@ def _route(
     router.add_api_route(path, handler, methods=methods, response_model=None, **kwargs)
 
 
-def _project(instance: Any, model: type[BaseModel]) -> dict[str, Any] | None:
+def _project(instance: Any, model: type[BaseModel]) -> BaseModel | None:
     """Project a DTO instance onto a derived REST model (dropping ``MISSING``).
 
     The DTO is the internal type; the wire body is the projection. Fields the
     service left ``MISSING`` are omitted so the REST model's own defaults apply.
     ``None`` (a ``batch_read`` / ``batch_edit`` miss) projects to ``None``.
+
+    Returns the validated model instance (not a dict) so the cache strategy can
+    hash exactly the representation that will be serialised.
     """
     if instance is None:
         return None
     values = {name: value for name, value in vars(instance).items() if value is not MISSING}
-    return model.model_validate(values).model_dump(mode="json")
+    return model.model_validate(values)
 
 
-def _page_body(page: Any, search_response: type[BaseModel]) -> dict[str, Any]:
-    """Serialise a :class:`~resourcey.v2.core.service.Page` with projected items."""
+def _dump(projected: Any) -> Any:
+    """Serialise a projected model / list / scalar to a JSON-ready value."""
+    if isinstance(projected, BaseModel):
+        return projected.model_dump(mode="json")
+    if isinstance(projected, list):
+        return [_dump(item) for item in projected]
+    return projected
+
+
+def _page_body(page: Any, search_response: type[BaseModel]) -> tuple[dict[str, Any], list[Any]]:
+    """Serialise a :class:`~resourcey.v2.core.service.Page`; return body + projected items.
+
+    The projected items are returned alongside the body so the cache strategy
+    hashes the same representations the response carries.
+    """
+    items = [_project(item, search_response) for item in page.items]
     return {
-        "items": [_project(item, search_response) for item in page.items],
+        "items": [_dump(item) for item in items],
         "limit": page.limit,
         "next_cursor": page.next_cursor,
-    }
+    }, items
+
+
+# ---------------------------------------------------------------------------
+# HTTP caching (ETag / Last-Modified / Cache-Control + 304 short-circuit)
+# ---------------------------------------------------------------------------
+
+
+def _header_for(strategy: Any, items: list[Any]) -> CacheHeader | None:
+    """Compute the cache header for ``items`` via the resource's strategy.
+
+    ``None`` when the resource declares no strategy or the strategy yields
+    nothing (no validators and no freshness), so the response is uncached.
+    """
+    if strategy is None:
+        return None
+    header = strategy.get_cache_header(items)
+    return header if header.has_any() else None
+
+
+def _http_date(value: datetime) -> str:
+    """Format a datetime as an RFC 7231 IMF-fixdate (GMT)."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return format_datetime(value.astimezone(UTC), usegmt=True)
+
+
+def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
+    """Build the ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires``
+    response headers from a :class:`CacheHeader`'s non-``None`` fields."""
+    has_validator = header.etag is not None or header.updated_at is not None
+    headers: dict[str, str] = {}
+    if header.etag is not None:
+        headers["ETag"] = header.etag
+    if header.updated_at is not None:
+        headers["Last-Modified"] = _http_date(header.updated_at)
+    if header.expire_at is not None:
+        # max-age is the remaining freshness window (the strategy's expire_in,
+        # computed moments ago). Rounding preserves the integer seconds clients
+        # expect in Cache-Control.
+        now = datetime.now(UTC)
+        max_age = max(0, int((header.expire_at - now).total_seconds()))
+        headers["Cache-Control"] = f"max-age={max_age}"
+        headers["Expires"] = _http_date(header.expire_at)
+    elif has_validator:
+        # Validators with no freshness window: force revalidation on every use.
+        # Without a Cache-Control directive a browser falls back to heuristic
+        # freshness and serves from cache without ever echoing the validator
+        # back, so the conditional-request path (and 304s) never fires.
+        headers["Cache-Control"] = "no-cache"
+    return headers
+
+
+def _client_cache_header(request: Request) -> CacheHeader:
+    """Map a request's ``If-None-Match`` / ``If-Modified-Since`` into a
+    :class:`CacheHeader` (the client's validators). ``expire_at`` is not a
+    client validator, so it is always ``None`` here."""
+    etag = request.headers.get("if-none-match")
+    if_modified_since = request.headers.get("if-modified-since")
+    updated_at: datetime | None = None
+    if if_modified_since:
+        try:
+            parsed = parsedate_to_datetime(if_modified_since)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            updated_at = parsed
+    return CacheHeader(etag=etag, updated_at=updated_at)
+
+
+def _cached_json_response(
+    request: Request,
+    body: Any,
+    header: CacheHeader | None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    """Serialise ``body`` as JSON, applying cache headers and conditional
+    ``304`` short-circuiting.
+
+    When ``header`` is ``None`` (the strategy yielded nothing) this is a plain
+    JSON response. Otherwise the validator + freshness headers are set, and if
+    the request is a safe method (``GET`` / ``HEAD`` - RFC 7232 restricts
+    ``304 Not Modified`` to safe methods) and the client's conditional request
+    headers prove the copy is current (``header.is_modified(client)`` is
+    ``False``) a ``304 Not Modified`` with an empty body (but the validator +
+    ``Cache-Control`` headers) is returned. Unsafe methods (``POST`` / ``PATCH``
+    / ``DELETE``) still emit the headers on the response but always send the
+    body - they cannot short-circuit to ``304``.
+    """
+    if header is None:
+        return _json_response(body, status_code)
+    if request.method in ("GET", "HEAD") and not header.is_modified(_client_cache_header(request)):
+        return Response(
+            status_code=status.HTTP_304_NOT_MODIFIED,
+            headers=_cache_response_headers(header),
+        )
+    response = _json_response(body, status_code)
+    response.headers.update(_cache_response_headers(header))
+    return response
+
+
+def _json_response(body: Any, status_code: int = status.HTTP_200_OK) -> JSONResponse:
+    """Serialise an already-dumped body as a JSON response."""
+    return JSONResponse(content=jsonable_encoder(body), status_code=status_code)
 
 
 def _id_python_type(models: RestModels, id_field: str) -> Any:

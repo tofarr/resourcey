@@ -126,6 +126,17 @@ def test_the_http_files_exist_without_an_init():
     assert not (http / "__init__.py").exists()
 
 
+def test_the_cache_files_exist_without_an_init():
+    cache = V2_DIR / "cache"
+    names = {p.name for p in sorted(cache.glob("*.py"))}
+    assert names == {
+        "cache_defaults.py",
+        "cache_header.py",
+        "cache_strategy.py",
+    }
+    assert not (cache / "__init__.py").exists()
+
+
 def _imports_openhands(path: pathlib.Path) -> bool:
     """Whether ``path`` imports the ``openhands`` package at runtime.
 
