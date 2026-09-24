@@ -13,9 +13,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
+import pytest
 import pytest_asyncio
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Request
 from httpx import ASGITransport, AsyncClient
+from pydantic import Field
 from sqlalchemy import Integer, String
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -23,8 +25,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.core.dto import DtoField
 from resourcey.v2.core.manifest import Manifest
+from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, NotFoundError, ServiceError
 from resourcey.v2.http.app import add_to_app, create_app
+from resourcey.v2.http.dependency_builder import (
+    DefaultDependencyBuilder,
+    DependencyBuilder,
+    request_ctx,
+)
 from resourcey.v2.http.routes import register_error_handlers, register_routes
 from resourcey.v2.sql.resource import SqlResource
 
@@ -539,3 +547,164 @@ async def test_create_app_cors_preflight_allows_origin():
             headers={"Origin": "https://example.com", "Access-Control-Request-Method": "GET"},
         )
         assert response.headers["access-control-allow-origin"] == "https://example.com"
+
+
+# ---------------------------------------------------------------------------
+# The dependency-builder seam (issue #86)
+# ---------------------------------------------------------------------------
+
+
+class WrappedService:
+    """A trivial service decorator: delegates everything to the wrapped service."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+class RecordingBuilder(DependencyBuilder):
+    """Records the resources it is asked about and wraps the service it yields."""
+
+    seen: list[Any] = Field(default_factory=list)
+
+    def get_service_dependency(self, resource: Resource[Any]) -> Any:
+        self.seen.append(resource)
+        inner_dependency = DefaultDependencyBuilder().get_service_dependency(resource)
+
+        async def dependency(request: Request) -> Any:
+            async for service in inner_dependency(request):
+                yield WrappedService(service)
+
+        return dependency
+
+
+async def test_decorating_builder_is_consulted_once_at_registration_with_the_exposed_resource():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    threads = SqlResource(Thread, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(threads.metadata.create_all)
+
+    builder = RecordingBuilder()
+    manifest: Manifest = Manifest(resources=[threads])
+    app = create_app(manifest, dependency_builder=builder)
+    # Consulted once at registration, before any request.
+    assert builder.seen == [threads]
+
+    async with (
+        manifest,
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        created = await client.post("/threads", json={"title": "t"})
+        assert created.status_code == 201
+        # The wrapped service is what the handler used: the write landed.
+        assert (await client.get("/threads/count")).json() == 1
+    # Still exactly one consultation (registration); the returned callable runs
+    # per request without re-consulting the builder.
+    assert builder.seen == [threads]
+    await engine.dispose()
+
+
+async def test_builder_dependency_may_declare_arbitrary_fastapi_parameters():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    threads = SqlResource(Thread, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(threads.metadata.create_all)
+
+    calls: list[str] = []
+
+    async def auth() -> str:
+        calls.append("auth")
+        return "principal"
+
+    class AuthComposingBuilder(DependencyBuilder):
+        def get_service_dependency(self, resource: Resource[Any]) -> Any:
+            inner = DefaultDependencyBuilder().get_service_dependency(resource)
+
+            async def dependency(request: Request, principal: str = Depends(auth)) -> Any:
+                assert principal == "principal"
+                async for service in inner(request):  # type: ignore[attr-defined]
+                    yield service
+
+            return dependency
+
+    manifest: Manifest = Manifest(resources=[threads])
+    app = create_app(manifest, dependency_builder=AuthComposingBuilder())
+
+    async with (
+        manifest,
+        AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
+    ):
+        assert (await client.post("/threads", json={"title": "t"})).status_code == 201
+    # The auth dependency ran (FastAPI wired it from the builder's signature).
+    assert calls == ["auth"]
+    await engine.dispose()
+
+
+def test_builder_that_raises_fails_at_registration():
+    class ExplodingBuilder(DependencyBuilder):
+        def get_service_dependency(self, resource: Resource[Any]) -> Any:
+            raise RuntimeError("misconfigured")
+
+    threads = SqlResource(Thread, session_factory=_dummy_maker())
+    with pytest.raises(RuntimeError, match="misconfigured"):
+        register_routes(FastAPI(), threads, dependency_builder=ExplodingBuilder())
+
+
+def test_builder_returning_a_non_callable_fails_at_registration():
+    class BadBuilder(DependencyBuilder):
+        def get_service_dependency(self, resource: Resource[Any]) -> Any:
+            return None
+
+    threads = SqlResource(Thread, session_factory=_dummy_maker())
+    with pytest.raises(TypeError, match="non-callable"):
+        register_routes(FastAPI(), threads, dependency_builder=BadBuilder())
+
+
+def test_builder_cannot_change_the_route_set():
+    threads = SqlResource(Thread, session_factory=_dummy_maker())
+    plain = FastAPI()
+    register_routes(plain, threads)
+    wrapped = FastAPI()
+    register_routes(wrapped, threads, dependency_builder=RecordingBuilder())
+    assert _route_pairs(plain) == _route_pairs(wrapped)
+
+    # A hidden resource still mounts no routes, whatever the builder.
+    hidden = HiddenResource(Hidden, session_factory=_dummy_maker())
+    router = register_routes(FastAPI(), hidden, dependency_builder=RecordingBuilder())
+    assert router.routes == []
+
+
+class ExposingResource(SqlResource[Any]):
+    """Exposes another resource (a projection): the inner drives the routes."""
+
+    def __init__(self, *, model: Any, session_factory: Any, exposed_resource: Any) -> None:
+        super().__init__(model, session_factory=session_factory)
+        self._exposed = exposed_resource
+
+    def get_exposed_resource(self) -> Any:
+        return self._exposed
+
+
+def test_builder_sees_the_exposed_resource_for_a_projection():
+    inner = SqlResource(Thread, session_factory=_dummy_maker())
+    outer = ExposingResource(model=Message, session_factory=_dummy_maker(), exposed_resource=inner)
+
+    builder = RecordingBuilder()
+    register_routes(FastAPI(), outer, dependency_builder=builder)
+    # The builder is resolved on the exposed resource, not the outer wrapper.
+    assert builder.seen == [inner]
+
+
+def test_request_ctx_shares_one_mapping_per_request():
+    class FakeRequest:
+        def __init__(self) -> None:
+            self.state = type("State", (), {})()
+
+    request = FakeRequest()
+    first = request_ctx(request)  # type: ignore[arg-type]
+    second = request_ctx(request)  # type: ignore[arg-type]
+    assert first is second

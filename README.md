@@ -213,8 +213,11 @@ session-per-operation both live:
 can pre-seed storage (the escape hatch) and every resource in the call adopts
 it. `AppContext` (app-scoped) stays a separate concept. HTTP construction
 (`create_app`) is deliberately **not** part of `v2/core` — it belongs to the
-transport layer. A test asserts no module under `v2/core` makes a runtime
-import of any other `resourcey` package, which pins it as the bottom layer.
+transport layer, where the per-request service dependency is built through a
+configurable `DependencyBuilder` (its default opens the resource's own service
+over the request-scoped `ctx`). `v2/util` is the bottom layer: an isolation
+test pins the layer ranks `util < core < {sql, http, config, cache,
+encryption}`, so no module imports a higher layer at runtime.
 
 ## Stack
 
