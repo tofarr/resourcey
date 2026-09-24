@@ -120,11 +120,56 @@ The four files:
   (`in_create_request`, `in_create_response`, `in_update_request`,
   `in_update_response`, `in_read_response`, `in_search_response` — all default
   `True`, superseding the older `creatable` / `updatable` / `readable` triple).
-  `DtoField` also carries a logical default (`logical_default_value` /
-  `logical_default_value_factory`), whose precedence is *client value →
-  logical default → `MISSING`*. `DTO.__init_subclass__` applies the `id` /
-  timestamp conventions and wraps every field as `ann | Missing` defaulting to
-  `MISSING`, so an omitted field is distinguishable from an explicit `None`.
+  Tag a field with `Annotated[T, DtoField(...)]` — the canonical Pydantic v2
+  mechanism, and the one `v1` already uses for `ResourceyField`; it keeps the
+  real field type (the assignment form `key: str = DtoField(...)` is a type
+  error under `mypy --strict`), and no explicit `| Missing` is needed because
+  the generator widens every field itself:
+
+  ```python
+  class MyStoredKey(DTO):
+      id: Annotated[
+          UUID,
+          DtoField(
+              in_create_request=False, in_update_request=False, default_factory_for_create=uuid4
+          ),
+      ]
+      key: Annotated[str, DtoField(in_read_response=False)]
+      description: Annotated[str | None, DtoField(default_for_create=None)]
+      created_at: Annotated[
+          datetime,
+          DtoField(
+              in_create_request=False, in_update_request=False, default_factory_for_create=utc_now
+          ),
+      ]
+      updated_at: Annotated[
+          datetime,
+          DtoField(
+              in_create_request=False,
+              in_update_request=False,
+              default_factory_for_create=utc_now,
+              default_factory_for_update=utc_now,
+          ),
+      ]
+  ```
+
+  `DtoField` carries **operation-scoped** defaults (`default_for_create` /
+  `default_factory_for_create` and `default_for_update` /
+  `default_factory_for_update`), whose precedence is *client value → default
+  for that operation → `MISSING`*. Create and update do not want the same
+  default: an omitted update field with no update default is *left unchanged*
+  (PATCH semantics), while an `in_update_request=False` field is always omitted
+  and so always takes its update default (the "always overwrite" case — how
+  `updated_at` is re-set on every update while `created_at` is written once).
+  Optionality is never inferred from the annotation: a nullable field with no
+  create default is required on create. `DTO.__init_subclass__` applies the
+  `id` / timestamp conventions and wraps every field as `ann | Missing`
+  defaulting to `MISSING`, so an omitted field is distinguishable from an
+  explicit `None`. The create request carries concrete defaults; the update
+  request keeps the `MISSING` sentinel on the wire boundary so an omitted field
+  is distinguishable from an explicit `null`, and the route converts a request
+  into a DTO through the single sanctioned hop (`request_to_dto`, i.e.
+  `model_dump(exclude_unset=True)` + `model_validate`).
   `Missing` is a usable annotation type (it carries a Pydantic core schema and
   serializes to `null`), so `UUID | Missing` validates. The six REST models are
   field-selection projections of the DTO — never hand-written — and the

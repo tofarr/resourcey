@@ -145,7 +145,7 @@ async def test_crud_and_count_and_search(resources):
         fetched = await service.read(created.id)
         assert fetched.title == "hello"
 
-        updated = await service.update(created.id, _dto_type(Thread)(title="bye"))
+        updated = await service.update(_dto_type(Thread)(id=created.id, title="bye"))
         assert updated.title == "bye"
 
         assert await service.count() == 1
@@ -167,9 +167,16 @@ async def test_update_and_delete_absent_raise(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
         with pytest.raises(NotFoundError):
-            await service.update(999, _dto_type(Thread)(title="x"))
+            await service.update(_dto_type(Thread)(id=999, title="x"))
         with pytest.raises(NotFoundError):
             await service.delete(999)
+
+
+async def test_update_requires_an_id_on_the_payload(resources):
+    _maker, threads, _messages = resources
+    async with threads.get_service() as service:
+        with pytest.raises(ServiceError, match="identifier"):
+            await service.update(_dto_type(Thread)(title="x"))
 
 
 async def test_batch_read_and_batch_edit(resources):
@@ -182,7 +189,10 @@ async def test_batch_read_and_batch_edit(resources):
         assert (await service.batch_read([a.id, 999]))[1] is None
 
         edited = await service.batch_edit(
-            [(a.id, _dto_type(Thread)(title="a2")), (999, _dto_type(Thread)(title="x"))]
+            [
+                _dto_type(Thread)(id=a.id, title="a2"),
+                _dto_type(Thread)(id=999, title="x"),
+            ]
         )
         assert edited[0] is not None and edited[0].title == "a2"
         assert edited[1] is None
@@ -457,7 +467,7 @@ async def test_crud_with_a_custom_identifier(code_resource):
         read = await service.read("US")
         assert read.name == "United States"
 
-        updated = await service.update("US", _dto_type(ByCode)(name="USA"))
+        updated = await service.update(_dto_type(ByCode)(code="US", name="USA"))
         assert updated.name == "USA"
         # The identifier is never overwritten by an update payload.
         assert updated.code == "US"
@@ -506,7 +516,7 @@ async def test_base_service_actions_are_raising_safety_nets():
         with pytest.raises(NotImplementedError):
             await base.read(1)
         with pytest.raises(NotImplementedError):
-            await base.update(1, None)
+            await base.update(None)
         with pytest.raises(NotImplementedError):
             await base.delete(1)
         with pytest.raises(NotImplementedError):

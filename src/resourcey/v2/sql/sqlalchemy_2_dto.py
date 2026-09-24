@@ -5,7 +5,8 @@ model they already work with and the framework infers the DTO from it.
 :func:`sqlalchemy_2_dto` maps each mapped column back to the corresponding
 Python annotation, makes the primary key the DTO identifier
 (``id_field_name``), widens nullability to ``ann | None``, and re-expresses
-client-side defaults as logical defaults / ``in_create_request=False``.
+client-side defaults as operation-scoped defaults /
+``in_create_request=False``.
 
 A column may override the inferred projection by placing a
 :class:`~resourcey.v2.core.dto.DtoField` in its ``info`` mapping under the
@@ -107,25 +108,46 @@ def _field_declarations(mapper: Mapper[Any]) -> dict[str, tuple[Any, DtoField]]:
 def _dto_field_for_column(column: Any, mapper: Mapper[Any]) -> DtoField:
     """The ``DtoField`` for a column: the explicit one in ``info``, else inferred.
 
-    A client-side default is re-expressed as the field's logical default and
-    the field drops out of create requests; a server-side default or an
-    auto-increment primary key does the same, minus a logical default (the
-    database supplies the value).
+    A client-side ``default`` becomes the create default and the field drops out
+    of create requests (the application supplies it); a client-side ``onupdate``
+    becomes the update default (so an update omitted by the client re-applies
+    it). A server-side default or an auto-increment primary key drops the field
+    from create requests *without* a default (the database supplies the value);
+    a nullable column with no default gets ``default_for_create=None``, which
+    preserves ORM ergonomics after optionality stopped coming from the
+    annotation.
     """
     explicit = column.info.get(DTO_FIELD_INFO_KEY)
     if isinstance(explicit, DtoField):
         return explicit
-    default = column.default
-    if default is not None:
-        if getattr(default, "is_callable", False):
-            # SQLAlchemy wraps a callable default in an ``(ctx)``-taking adapter;
-            # unwrap to the author's callable so the DTO factory is arity-correct.
-            factory = getattr(default.arg, "__wrapped__", default.arg)
-            return DtoField(in_create_request=False, logical_default_value_factory=factory)
-        return DtoField(in_create_request=False, logical_default_value=default.arg)
+    create_overrides = _default_overrides(column.default, "create")
+    update_overrides = _default_overrides(column.onupdate, "update")
+    if create_overrides:
+        # A create default means the application supplies the value, so the field
+        # is not client-suppliable (though it is still filled on create).
+        return DtoField(in_create_request=False, **create_overrides, **update_overrides)
     if column.server_default is not None or _is_auto_increment(column, mapper):
-        return DtoField(in_create_request=False)
-    return DtoField()
+        # The database supplies the value: drop from create with no default.
+        return DtoField(in_create_request=False, **update_overrides)
+    if column.nullable:
+        # Optionality no longer comes from the annotation, so a nullable column
+        # with no default keeps ORM ergonomics via an explicit ``None`` default.
+        return DtoField(default_for_create=None, **update_overrides)
+    return DtoField(**update_overrides)
+
+
+def _default_overrides(default: Any, operation: str) -> dict[str, Any]:
+    """Map a SQLAlchemy default to a ``default_for_*`` / ``default_factory_for_*`` pair."""
+    if default is None:
+        return {}
+    value_key = f"default_for_{operation}"
+    factory_key = f"default_factory_for_{operation}"
+    if getattr(default, "is_callable", False):
+        # SQLAlchemy wraps a callable default in an ``(ctx)``-taking adapter;
+        # unwrap to the author's callable so the DTO factory is arity-correct.
+        factory = getattr(default.arg, "__wrapped__", default.arg)
+        return {factory_key: factory}
+    return {value_key: default.arg}
 
 
 def _is_auto_increment(column: Any, mapper: Mapper[Any]) -> bool:

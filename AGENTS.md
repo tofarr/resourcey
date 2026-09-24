@@ -128,10 +128,21 @@ Four files, no `__init__.py`:
 
 * `dto.py` — `DTO` is a plain declaration class (not a Pydantic model). Fields
   carry ordinary Pydantic annotations plus a `DtoField` describing how each
-  projects into the six REST shapes via six `in_*` flags; `DtoField` also
-  carries a logical default with precedence *client value → logical default →
-  `MISSING`*. `DTO.__init_subclass__` applies the `id`/timestamp conventions
-  and wraps every field `ann | Missing = MISSING`. `Missing` is a usable
+  projects into the six REST shapes via six `in_*` flags; tag a field with
+  `Annotated[T, DtoField(...)]` (the assignment form is a `mypy --strict`
+  error). `DtoField` carries **operation-scoped** defaults
+  (`default_for_create` / `default_factory_for_create` and
+  `default_for_update` / `default_factory_for_update`) with precedence
+  *client value → default for that operation → `MISSING`*; an omitted update
+  field with no update default is left unchanged (PATCH), an
+  `in_update_request=False` field always takes its update default. Optionality
+  is never inferred from the annotation. `DTO.__init_subclass__` applies the
+  `id`/timestamp conventions (`created_at` write-once, `updated_at` re-set on
+  every update) and wraps every field `ann | Missing = MISSING`. The create
+  request carries concrete defaults; the update request keeps the `MISSING`
+  sentinel on the wire boundary, and the route converts request→DTO through the
+  single sanctioned hop `request_to_dto` (`model_dump(exclude_unset=True)` +
+  `model_validate`). `Missing` is a usable
   annotation type (core schema + serializes to `null`), unlike the legacy
   `resourcey.resource.missing.MISSING`. The six REST models are field-selection
   **projections** of the DTO, never hand-written. Both `DTO` and `DtoField`
@@ -199,7 +210,10 @@ a developer can drop straight back to SQLAlchemy.
 * `sqlalchemy_2_dto.py` — `sqlalchemy_2_dto(model)` infers a DTO declaration
   from an ORM model: column types map back to Python annotations, the primary
   key becomes `id_field_name`, nullability becomes `ann | None`, and
-  client-side defaults become logical defaults / `in_create_request=False`. A
+  client-side `default` / `onupdate` become the create / update defaults with
+  `in_create_request=False`; a server-side default or autoincrement key drops
+  from create with no default (the database supplies it), and a nullable column
+  with no default gets `default_for_create=None`. A
   column may override the inferred projection by placing a `DtoField` in its
   `info` under the `dto_field` key (`DTO_FIELD_INFO_KEY`); otherwise the
   projection is inferred from the column's generation behaviour. **Plain

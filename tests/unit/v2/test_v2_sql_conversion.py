@@ -164,23 +164,49 @@ def test_nullability_becomes_an_optional_annotation():
     assert type(None) not in getattr(fields["name"], "__args__", ())
 
 
-def test_client_side_defaults_become_logical_defaults():
+def test_client_side_defaults_become_create_defaults():
     dto = sqlalchemy_2_dto(Widget)
     fields = dto.get_fields()
-    assert fields["score"].logical_default_value == 0.0
+    assert fields["score"].default_for_create == 0.0
     assert fields["score"].in_create_request is False
     assert fields["enabled"].in_create_request is False
-    # A callable default becomes a logical-default factory (unwrapped from the
+    # A callable default becomes a create-default factory (unwrapped from the
     # SQLAlchemy ``(ctx)`` adapter so it takes no arguments).
-    assert isinstance(fields["created_at"].logical_default_value_factory(), datetime)
-    assert isinstance(fields["ref"].logical_default_value_factory(), UUID)
+    assert isinstance(fields["created_at"].default_factory_for_create(), datetime)
+    assert isinstance(fields["ref"].default_factory_for_create(), UUID)
+    # No update default without an ``onupdate``.
+    assert fields["score"].has_default_for("update") is False
 
 
-def test_server_default_drops_from_create_without_a_logical_default():
+def test_onupdate_becomes_the_update_default():
+    class WithOnUpdate(AdoptedBase):
+        __tablename__ = "with_onupdate"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        touched: Mapped[datetime] = mapped_column(
+            DateTime(timezone=True), default=datetime.now, onupdate=datetime.now
+        )
+
+    field = sqlalchemy_2_dto(WithOnUpdate).get_fields()["touched"]
+    assert field.has_default_for("create") is True
+    assert field.has_default_for("update") is True
+
+
+def test_server_default_drops_from_create_without_a_default():
     dto = sqlalchemy_2_dto(Widget)
     field = dto.get_fields()["source"]
     assert field.in_create_request is False
-    assert field.has_logical_default is False
+    assert field.has_default_for("create") is False
+
+
+def test_nullable_column_without_a_default_gets_a_none_create_default():
+    class Nullable(AdoptedBase):
+        __tablename__ = "nullable_defaults"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        note: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    field = sqlalchemy_2_dto(Nullable).get_fields()["note"]
+    assert field.default_for_create is None
+    assert field.in_create_request is True
 
 
 def test_a_natural_key_primary_key_stays_client_supplied():
@@ -325,7 +351,7 @@ async def test_model_crud_round_trip(widget_resources):
         assert fetched.name == "w"
         assert fetched.id is fetched.id
 
-        updated = await service.update(created.id, dto(name="w2"))
+        updated = await service.update(dto(id=created.id, name="w2"))
         assert updated.name == "w2"
         assert updated.kind is Kind.ALPHA
 
@@ -382,5 +408,138 @@ async def test_renamed_identifier_crud():
             ]
             page = await service.search(limit=5)
             assert [item.code for item in page.items] == ["US"]
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Operation-scoped defaults: timestamps + PATCH semantics
+# ---------------------------------------------------------------------------
+
+
+class Post(AdoptedBase):
+    __tablename__ = "posts"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(50))
+    description: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # ``created_at`` / ``updated_at`` exercise the timestamp convention; the
+    # latter is re-set on every update, the former written once.
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.now)
+    # A column carrying an ``onupdate``: the mapping makes it an update default.
+    touched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=datetime.now, onupdate=datetime.now
+    )
+
+
+@pytest_asyncio.fixture
+async def post_resources() -> AsyncIterator[tuple[SqlResource[Any], AsyncSession]]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(Post, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(AdoptedBase.metadata.create_all)
+    async with maker() as session:
+        yield resource, session
+    await engine.dispose()
+
+
+async def test_omitted_update_field_is_preserved_and_explicit_null_clears_it(post_resources):
+    """PATCH semantics: omission leaves the stored value; an explicit null clears it."""
+    resource, session = post_resources
+    dto = resource.get_dto_type()
+    async with resource.get_service(resource_ctx(session)) as service:
+        created = await service.create(dto(code="c", description="original"))
+
+        # Omit description -> the stored value must survive.
+        updated = await service.update(dto(id=created.id, code="c"))
+        assert updated.description == "original"
+
+        # Explicitly null -> cleared.
+        cleared = await service.update(dto(id=created.id, description=None))
+        assert cleared.description is None
+
+
+async def test_update_bumps_updated_but_not_created_timestamps(post_resources):
+    resource, session = post_resources
+    dto = resource.get_dto_type()
+    async with resource.get_service(resource_ctx(session)) as service:
+        created = await service.create(dto(code="c", description="d"))
+        assert created.created_at is not None
+        assert created.touched_at is not None
+
+        updated = await service.update(dto(id=created.id, code="c2"))
+        # created_at is write-once...
+        assert updated.created_at == created.created_at
+        # ...while the onupdate timestamp is re-applied.
+        assert updated.touched_at >= created.touched_at
+
+
+async def test_empty_patch_touches_the_row(post_resources):
+    """An always-omitted field's update default always fires, so PATCH {} writes."""
+    resource, session = post_resources
+    dto = resource.get_dto_type()
+    async with resource.get_service(resource_ctx(session)) as service:
+        created = await service.create(dto(code="c"))
+        touched = await service.update(dto(id=created.id))
+        assert touched.code == "c"
+        assert touched.touched_at >= created.touched_at
+
+
+async def test_create_defaults_fill_omitted_fields(post_resources):
+    resource, session = post_resources
+    dto = resource.get_dto_type()
+    async with resource.get_service(resource_ctx(session)) as service:
+        created = await service.create(dto(code="c"))
+        # description is nullable with no client default: the DB/ORM default
+        # (None) applies; the create-default factory fills the timestamps.
+        assert created.description is None
+        assert created.created_at is not None
+
+
+async def test_app_generated_identifier_factory_is_honoured():
+    """A column with a client-side default factory supplies its own value on insert."""
+    from sqlalchemy import Uuid
+
+    class WithGeneratedId(AdoptedBase):
+        __tablename__ = "with_generated_id"
+        id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+        name: Mapped[str] = mapped_column(String(50))
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(WithGeneratedId, session_factory=maker)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(AdoptedBase.metadata.create_all)
+        dto = resource.get_dto_type()
+        async with maker() as session, resource.get_service(resource_ctx(session)) as service:
+            generated = uuid4()
+            created = await service.create(dto(id=generated, name="n"))
+            assert created.id == generated
+
+            # An app-declared id factory is honoured even when nothing is supplied
+            # (the unconditional id-skip was removed); the DB is never asked.
+            auto = await service.create(dto(name="auto"))
+            assert isinstance(auto.id, UUID)
+    finally:
+        await engine.dispose()
+
+
+async def test_db_generated_identifier_is_never_passed_on_insert():
+    """A server-generated key (no create default) lets the database supply it."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(Widget, session_factory=maker)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(AdoptedBase.metadata.create_all)
+        dto = resource.get_dto_type()
+        async with maker() as session, resource.get_service(resource_ctx(session)) as service:
+            created = await service.create(dto(name="w", kind=Kind.ALPHA, payload={}))
+            assert created.id is not None
+            # source has a server_default and no create default: the default fires.
+            assert created.source == "app"
     finally:
         await engine.dispose()

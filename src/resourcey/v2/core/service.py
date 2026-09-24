@@ -151,15 +151,16 @@ class Service(Generic[T]):
     # Standard actions (raising defaults — override the supported ones)
     # ------------------------------------------------------------------
 
-    async def create(self, payload: Any) -> Any:
+    async def create(self, payload: T) -> T:
         self._require_entered()
         raise NotImplementedError
 
-    async def read(self, id: Any) -> Any:  # noqa: A002
+    async def read(self, id: Any) -> T:  # noqa: A002
         self._require_entered()
         raise NotImplementedError
 
-    async def update(self, id: Any, payload: Any) -> Any:  # noqa: A002
+    async def update(self, payload: T) -> T:
+        """Apply an update DTO (which carries its own identifier); return the DTO."""
         self._require_entered()
         raise NotImplementedError
 
@@ -175,7 +176,7 @@ class Service(Generic[T]):
         sort: str | None = None,
         desc: bool = False,
         filters: Any = None,
-    ) -> Page[Any]:
+    ) -> Page[T]:
         self._require_entered()
         raise NotImplementedError
 
@@ -183,11 +184,12 @@ class Service(Generic[T]):
         self._require_entered()
         raise NotImplementedError
 
-    async def batch_read(self, ids: list[Any]) -> list[Any]:
+    async def batch_read(self, ids: list[Any]) -> list[T | None]:
         self._require_entered()
         raise NotImplementedError
 
-    async def batch_edit(self, edits: list[tuple[Any, Any]]) -> list[Any]:
+    async def batch_edit(self, edits: list[T]) -> list[T | None]:
+        """Apply a list of update DTOs, each carrying its own identifier."""
         self._require_entered()
         raise NotImplementedError
 
