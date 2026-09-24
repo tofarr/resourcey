@@ -268,6 +268,20 @@ copies, not moves — v1 `resourcey/util/` is untouched until it is removed.
 `v2/util` depends on `v2/core` for the `Missing` sentinel (below); the
 dependency runs one way and `v2/core` imports no `v2/util`.
 
+`src/resourcey/v2/util/singleton.py` (issue #95) is a second, non-vendored
+leaf: a small `Singleton` mixin for the process-wide pieces the framework
+keeps accruing (encryption service, dependency builders, caches). Constructing
+a subclass twice returns the same instance, and each concrete class's `__init__`
+runs **exactly once** on first construction, so the first construction wins —
+later calls with other arguments do not reset it. Each concrete subclass caches
+independently, and it composes with both Pydantic `BaseModel` and
+`DiscriminatedUnionMixin` because it stores the instance and the initialized
+flag on the class's own `__dict__` (never a field) and only guards a class's
+*own* `__init__` — it never injects one, which would reroute pydantic's
+validation. `clear_singleton_cache()` mirrors
+`BaseConfig.clear_instance_cache()` and clears only the class it is called on.
+It imports only the standard library.
+
 **One sentinel.** `Missing` / `MISSING` from `v2/core/dto.py` is the only
 definition in `v2`; `v2/util/env_parser.py` imports it and drops its own
 `MissingType`. A test pins `env_parser.MISSING is dto.MISSING` so a future
