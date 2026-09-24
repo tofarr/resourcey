@@ -162,7 +162,14 @@ Four files, no `__init__.py`:
   in `ctx` reuses it and neither commits nor closes it*.
 * `manifest.py` — `Manifest` owns the resource set and lifecycle, and asserts
   at construction that every `get_supported_actions()` names only real
-  `Action` members (a typo would otherwise silently drop a route).
+  `Action` members (a typo would otherwise silently drop a route). Construction
+  also calls `resource.on_register(self)` on every resource (declaration order),
+  handing each a reference to the manifest; `Resource.on_register(manifest)` is
+  **sync** (never a coroutine) and only retains the reference, which
+  `Resource.get_manifest()` reads back (`None` until registered). Sibling
+  resources are resolved *lazily, later* through that reference (e.g. to verify
+  foreign keys) — never from inside `on_register`, since registration ordering
+  is not a contract.
 
 HTTP construction (`create_app`) is **not** part of `v2/core` — it belongs to
 the transport layer.

@@ -42,13 +42,16 @@ from __future__ import annotations
 
 import re
 from collections.abc import AsyncIterator, MutableMapping
-from typing import Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
 from fastapi import Request
 from pydantic import BaseModel
 
 from resourcey.v2.core.dto import DTO, RestModels
 from resourcey.v2.core.service import Action, CacheStrategy, Service, ServiceError
+
+if TYPE_CHECKING:
+    from resourcey.v2.core.manifest import Manifest
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -72,6 +75,7 @@ class Resource(Generic[T]):
         self._dto = dto
         self._path = path
         self._entered = False
+        self._manifest: Manifest | None = None
 
     # ------------------------------------------------------------------
     # DTO / schema surface
@@ -163,6 +167,34 @@ class Resource(Generic[T]):
         service = self.get_service(_request_ctx(request))
         async with service:
             yield service
+
+    # ------------------------------------------------------------------
+    # Registration
+    # ------------------------------------------------------------------
+
+    def on_register(self, manifest: Manifest) -> None:
+        """Receive a reference to the :class:`~resourcey.v2.core.manifest.Manifest` that owns this resource.
+
+        A **sync** notification (never a coroutine) called once by the manifest
+        at construction, in declaration order. The base implementation simply
+        records the reference, which :meth:`get_manifest` reads back; an
+        override typically does the same (call ``super()``) and nothing else.
+
+        Do **not** resolve sibling resources here: registration is not an
+        ordering contract, so a lookup at this point would depend on where the
+        manifest's iteration happens to be. Resolve siblings lazily, later,
+        through :meth:`get_manifest` — e.g. when a request needs to verify a
+        foreign key::
+
+            manifest = self.get_manifest()
+            if manifest is not None:
+                threads = manifest.get_resource("threads")
+        """
+        self._manifest = manifest
+
+    def get_manifest(self) -> Manifest | None:
+        """The manifest that registered this resource, or ``None`` if unregistered."""
+        return self._manifest
 
     # ------------------------------------------------------------------
     # Lifecycle
