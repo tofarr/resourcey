@@ -36,7 +36,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable, MutableMapping, Sequence
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
@@ -45,9 +45,11 @@ from pydantic import BaseModel, create_model
 from sqlalchemy.exc import IntegrityError
 
 from resourcey.v2.cache.cache_header import CacheHeader
-from resourcey.v2.core.dto import MISSING, RestModels
+from resourcey.v2.core.dto import MISSING, RestModels, request_to_dto
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, NotFoundError, Service, ServiceError
+
+T = TypeVar("T", bound=BaseModel)
 
 
 def register_routes(
@@ -84,6 +86,7 @@ def register_routes(
     router = APIRouter(tags=list(tags) if tags else [type(exposed).__name__])
     path = "/" + exposed.get_resource_path().lstrip("/")
     models = exposed.get_rest_models()
+    dto_model = exposed.get_dto_type()
     id_field = exposed.get_id_field()
     id_type = _id_python_type(models, id_field)
     service_dep = _service_dependency(exposed)
@@ -100,13 +103,15 @@ def register_routes(
     if Action.BATCH_READ in supported:
         _add_batch_read_route(router, path, models, id_type, service_dep, strategy)
     if Action.BATCH_EDIT in supported:
-        _add_batch_edit_route(router, path, models, id_field, id_type, service_dep, strategy)
+        _add_batch_edit_route(
+            router, path, models, dto_model, id_field, id_type, service_dep, strategy
+        )
     if Action.CREATE in supported:
-        _add_create_route(router, path, models, service_dep, strategy)
+        _add_create_route(router, path, models, dto_model, service_dep, strategy)
     if Action.READ in supported:
         _add_read_route(router, path, models, id_type, service_dep, strategy)
     if Action.UPDATE in supported:
-        _add_update_route(router, path, models, id_type, service_dep, strategy)
+        _add_update_route(router, path, models, dto_model, id_field, id_type, service_dep, strategy)
     if Action.DELETE in supported:
         _add_delete_route(router, path, id_type, service_dep)
 
@@ -119,17 +124,18 @@ def register_routes(
 # ---------------------------------------------------------------------------
 
 
-def _service_dependency(resource: Resource[Any]) -> Callable[..., Any]:
+def _service_dependency(resource: Resource[T]) -> Callable[..., AsyncIterator[Service[T]]]:
     """Resolve the per-request service dependency for ``resource``.
 
     ``v2`` has no ``DependencyBuilder`` yet (issue #86), so this builds the
     FastAPI dependency directly: it resolves the request-scoped ``ctx`` (so
     every resource in one request shares storage), builds the service, and
     enters it for the caller. Keeping it behind one function means the builder,
-    when it lands, changes only this.
+    when it lands, changes only this. It is generic over the DTO type, so a
+    route's injected ``service`` is typed against the resource's DTO.
     """
 
-    async def dependency(request: Request) -> AsyncIterator[Service[Any]]:
+    async def dependency(request: Request) -> AsyncIterator[Service[T]]:
         service = resource.get_service(_request_ctx(request))
         async with service:
             yield service
@@ -155,11 +161,12 @@ def _add_create_route(
     router: APIRouter,
     path: str,
     models: RestModels,
+    dto_model: type[BaseModel],
     service_dep: Any,
     strategy: Any,
 ) -> None:
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
-        created = await service.create(payload)
+        created = await service.create(request_to_dto(dto_model, payload))
         projected = _project(created, models.create_response)
         header = _header_for(strategy, [projected])
         return _cached_json_response(request, _dump(projected), header, status.HTTP_201_CREATED)
@@ -194,12 +201,14 @@ def _add_update_route(
     router: APIRouter,
     path: str,
     models: RestModels,
+    dto_model: type[BaseModel],
+    id_field: str,
     id_type: Any,
     service_dep: Any,
     strategy: Any,
 ) -> None:
     async def handler(request, id, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
-        updated = await service.update(id, payload)
+        updated = await service.update(_update_dto(dto_model, id_field, id, payload))
         projected = _project(updated, models.update_response)
         header = _header_for(strategy, [projected])
         return _cached_json_response(request, _dump(projected), header)
@@ -297,6 +306,7 @@ def _add_batch_edit_route(
     router: APIRouter,
     path: str,
     models: RestModels,
+    dto_model: type[BaseModel],
     id_field: str,
     id_type: Any,
     service_dep: Any,
@@ -305,11 +315,8 @@ def _add_batch_edit_route(
     item_model = _batch_edit_item_model(models.update_request, id_field, id_type)
 
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
-        tuples = [
-            (getattr(item, id_field), _item_to_update_model(item, models.update_request, id_field))
-            for item in payload
-        ]
-        edited = await service.batch_edit(tuples)
+        edits = [_item_to_update_dto(item, dto_model) for item in payload]
+        edited = await service.batch_edit(edits)
         items = [_project(item, models.update_response) for item in edited]
         header = _header_for(strategy, items)
         return _cached_json_response(request, _dump(items), header)
@@ -512,16 +519,23 @@ def _batch_edit_item_model(
     return cast("type[BaseModel]", model)
 
 
-def _item_to_update_model(
-    item: BaseModel, update_request: type[BaseModel], id_field: str
+def _update_dto(
+    dto_model: type[BaseModel], id_field: str, id_value: Any, payload: BaseModel
 ) -> BaseModel:
-    """Project a batch-edit item into an update-request instance (dropping the id).
+    """Build the update DTO from the request body, injecting the path identifier.
 
-    Only fields the client explicitly supplied (``exclude_unset``) are carried
-    across, preserving PATCH semantics.
+    ``request_to_dto`` is the single sanctioned request->DTO hop (``exclude_unset``);
+    the id is set here so the DTO carries its own identifier and the service takes
+    just the DTO.
     """
-    data = {k: v for k, v in item.model_dump(exclude_unset=True).items() if k != id_field}
-    return update_request.model_validate(data)
+    dto = request_to_dto(dto_model, payload)
+    setattr(dto, id_field, id_value)
+    return dto
+
+
+def _item_to_update_dto(item: BaseModel, dto_model: type[BaseModel]) -> BaseModel:
+    """Build a batch-edit DTO from an item that already carries its own id."""
+    return request_to_dto(dto_model, item)
 
 
 def _normalize_prefix(prefix: str) -> str:

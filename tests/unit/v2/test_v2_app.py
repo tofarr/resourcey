@@ -247,6 +247,43 @@ async def test_custom_identifier_over_http(code_client: AsyncClient):
     assert (await code_client.get("/countries/US")).status_code == 404
 
 
+class Article(AppBase):
+    __tablename__ = "articles"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(100))
+    summary: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+@pytest_asyncio.fixture
+async def article_client() -> AsyncIterator[AsyncClient]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    articles = SqlResource(Article, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(articles.metadata.create_all)
+
+    manifest: Manifest = Manifest(resources=[articles])
+    async for c in _make_client(manifest, create_app(manifest)):
+        yield c
+    await engine.dispose()
+
+
+async def test_patch_omission_preserves_and_explicit_null_clears(article_client: AsyncClient):
+    created = (await article_client.post("/articles", json={"title": "t", "summary": "s"})).json()
+    assert created["summary"] == "s"
+
+    # Omitting summary leaves the stored value alone...
+    preserved = await article_client.patch(f"/articles/{created['id']}", json={"title": "t2"})
+    assert preserved.status_code == 200
+    assert preserved.json()["summary"] == "s"
+
+    # ...while an explicit null clears it.
+    cleared = await article_client.patch(f"/articles/{created['id']}", json={"summary": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["summary"] is None
+
+
 async def test_add_to_app_mounts_prefix_without_wiring_lifespan():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)

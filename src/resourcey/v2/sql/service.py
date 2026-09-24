@@ -90,11 +90,11 @@ class SqlService(Service[T]):
     # ------------------------------------------------------------------
 
     async def create(self, payload: T) -> T:
-        """Insert a DTO, filling omitted fields from logical defaults; return the DTO."""
+        """Insert a DTO, filling omitted fields from create defaults; return the DTO."""
         session = self._active_session()
         table = self._resource.table
         id_field = self._resource.get_id_field()
-        data = self._with_logical_defaults(_payload_values(payload))
+        data = self._with_defaults(_payload_values(payload), "create")
         insert_data = self._to_columns(data)
         result = await session.execute(table.insert().values(**insert_data))
         if id_field not in data:
@@ -114,20 +114,30 @@ class SqlService(Service[T]):
             raise NotFoundError(id)
         return self._to_dto(found)
 
-    async def update(self, id: Any, payload: T) -> T:  # noqa: A002
-        """Apply the supplied (non-``MISSING``) fields of ``payload``; return the DTO."""
+    async def update(self, payload: T) -> T:
+        """Apply an update DTO (whose ``id`` field names the row); return the DTO.
+
+        Supplied (non-``MISSING``) fields are written; omitted fields with an
+        update default take it, and an omitted field with no update default is
+        left unchanged (PATCH semantics). The id is never written.
+        """
         session = self._active_session()
         table = self._resource.table
         id_field = self._resource.get_id_field()
         id_column = self._resource.id_column
-        data = {k: v for k, v in _payload_values(payload).items() if k != id_field}
-        existing = (await session.execute(_by_id(id_column, id))).mappings().first()
+        values = _payload_values(payload)
+        id_value = values.get(id_field)
+        if id_value is MISSING or id_value is None:
+            raise ServiceError("update requires the identifier on the payload")
+        data = {k: v for k, v in values.items() if k != id_field}
+        data = self._with_defaults(data, "update")
+        existing = (await session.execute(_by_id(id_column, id_value))).mappings().first()
         if existing is None:
-            raise NotFoundError(id)
+            raise NotFoundError(id_value)
         if data:
             columns = self._to_columns(data)
-            await session.execute(update(table).where(id_column == id).values(**columns))
-        return await self.read(id)
+            await session.execute(update(table).where(id_column == id_value).values(**columns))
+        return await self.read(id_value)
 
     async def delete(self, id: Any) -> None:  # noqa: A002
         """Delete by id; raise :class:`NotFoundError` if absent."""
@@ -194,12 +204,12 @@ class SqlService(Service[T]):
         by_id = {row[id_column.name]: self._to_dto(row) for row in rows}
         return [by_id.get(i) for i in ids]
 
-    async def batch_edit(self, edits: list[tuple[Any, T]]) -> list[T | None]:
-        """Apply each ``(id, payload)`` edit; results align positionally with ``edits``."""
+    async def batch_edit(self, edits: list[T]) -> list[T | None]:
+        """Apply each update DTO (carrying its own id); results align with ``edits``."""
         results: list[T | None] = []
-        for edit_id, payload in edits:
+        for payload in edits:
             try:
-                results.append(await self.update(edit_id, payload))
+                results.append(await self.update(payload))
             except NotFoundError:
                 results.append(None)
         return results
@@ -227,13 +237,19 @@ class SqlService(Service[T]):
     # Projection helpers
     # ------------------------------------------------------------------
 
-    def _with_logical_defaults(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Fill omitted non-id fields from the DTO's logical defaults."""
-        id_field = self._resource.get_id_field()
+    def _with_defaults(self, data: dict[str, Any], operation: str) -> dict[str, Any]:
+        """Fill omitted fields from the DTO's defaults for ``operation``.
+
+        A field the database owns has no create default, so nothing is passed
+        and the database generates it; a field with a factory default is filled
+        by the application. An omitted field with no default for the operation
+        is left untouched (so an update with no update default preserves the
+        stored value).
+        """
         for name, (_ann, config) in self._resource._dto.__dto_fields__.items():
-            if name in data or name == id_field:
+            if name in data:
                 continue
-            default = config.resolve_default()
+            default = config.resolve_default(operation)
             if default is not MISSING:
                 data[name] = default
         return data

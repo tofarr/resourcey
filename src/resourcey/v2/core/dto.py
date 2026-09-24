@@ -14,12 +14,19 @@ Three things are generated from a declaration, at subclass-creation time:
   distinguishable from an explicitly supplied ``None``;
 * the **REST models** — six field-selection views (create/update request +
   response, read response, search response) built from the :class:`DtoField`
-  ``in_*`` flags;
-* the resolved **logical defaults** — the value used when a client omits a
-  field, with precedence *client value -> logical default ->* ``MISSING``.
+  ``in_*`` flags. A create request carries concrete defaults; an update request
+  keeps the :data:`MISSING` sentinel on the wire boundary so PATCH can tell
+  "omitted" from "explicitly ``null``";
+* the resolved **operation-scoped defaults** — the value used when a client
+  omits a field, with precedence *client value -> default for that operation
+  ->* ``MISSING``. Create applies ``default_for_create`` /
+  ``default_factory_for_create``; update applies ``default_for_update`` /
+  ``default_factory_for_update``; a field with no default for the operation is
+  left untouched.
 
-Conventions (``id`` is not client-supplied; ``created_at`` / ``updated_at``
-are not client-supplied and get a logical default factory) are applied in
+Conventions (``id`` is not client-supplied; ``created_at`` is created once and
+never touched on update; ``updated_at`` is set on create *and* re-set on every
+update) are applied in
 :meth:`DTO.__init_subclass__` because ``__set_name__`` does not fire for
 ``Annotated`` metadata.
 
@@ -116,7 +123,7 @@ MISSING: Missing = Missing()
 
 @dataclass(frozen=True)
 class DtoField:
-    """How a DTO field projects into the six REST shapes, plus its logical default.
+    """How a DTO field projects into the six REST shapes, plus its defaults.
 
     Every ``in_*`` flag defaults to ``True``. They supersede the older
     ``creatable`` / ``updatable`` / ``readable`` triple: ``in_read_response``
@@ -125,9 +132,14 @@ class DtoField:
     express a one-time-reveal field (present in the create response and
     nowhere else).
 
-    ``logical_default_value`` / ``logical_default_value_factory`` are the
-    values used when the client omits the field (distinct from ``MISSING``);
-    precedence is client value -> logical default -> ``MISSING``.
+    ``default_for_create`` / ``default_factory_for_create`` and
+    ``default_for_update`` / ``default_factory_for_update`` are the values used
+    when the client omits the field, scoped to the operation (distinct from
+    ``MISSING``); precedence is client value -> default for that operation ->
+    ``MISSING``. A create and an update do not want the same default: an
+    omitted update field with no update default is *left unchanged*, while an
+    ``in_update_request=False`` field is always omitted and so always takes its
+    update default (the "always overwrite" case).
 
     ``metadata`` is free-form: a general-purpose store for extra data a
     downstream layer wants to attach to the field (a UI label, a column hint,
@@ -141,25 +153,30 @@ class DtoField:
     in_update_response: bool = True
     in_read_response: bool = True
     in_search_response: bool = True
-    logical_default_value: Any = _UNSET
-    logical_default_value_factory: Callable[[], Any] | None = None
+    default_for_create: Any = _UNSET
+    default_factory_for_create: Callable[[], Any] | None = None
+    default_for_update: Any = _UNSET
+    default_factory_for_update: Callable[[], Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
-    @property
-    def has_logical_default(self) -> bool:
-        """Whether a logical default (value or factory) was declared."""
-        return (
-            self.logical_default_value is not _UNSET
-            or self.logical_default_value_factory is not None
-        )
+    def has_default_for(self, operation: str) -> bool:
+        """Whether a default (value or factory) was declared for ``operation``."""
+        value, factory = self._default_parts(operation)
+        return value is not _UNSET or factory is not None
 
-    def resolve_default(self) -> Any:
-        """The logical default for an omitted field, or ``MISSING`` if none."""
-        if self.logical_default_value is not _UNSET:
-            return self.logical_default_value
-        if self.logical_default_value_factory is not None:
-            return self.logical_default_value_factory()
+    def resolve_default(self, operation: str = "create") -> Any:
+        """The default for an omitted field in ``operation``, or ``MISSING`` if none."""
+        value, factory = self._default_parts(operation)
+        if value is not _UNSET:
+            return value
+        if factory is not None:
+            return factory()
         return MISSING
+
+    def _default_parts(self, operation: str) -> tuple[Any, Callable[[], Any] | None]:
+        if operation == "update":
+            return self.default_for_update, self.default_factory_for_update
+        return self.default_for_create, self.default_factory_for_create
 
     def with_overrides(self, **overrides: Any) -> DtoField:
         """A copy of this field with the given flags replaced (convention helper)."""
@@ -167,7 +184,7 @@ class DtoField:
 
 
 def utc_now() -> datetime:
-    """Logical default factory for the ``created_at`` / ``updated_at`` conventions."""
+    """Default factory for the ``created_at`` / ``updated_at`` conventions."""
     return datetime.now(UTC)
 
 
@@ -196,17 +213,28 @@ class RestModels:
 class DTO:
     """Base class for a DTO declaration.
 
-    Subclass it and annotate fields; tag a field by assigning a
-    :class:`DtoField` as its class-attribute value, or just leave it bare and
-    let the conventions apply::
+    Subclass it and annotate fields; tag a field with
+    ``Annotated[T, DtoField(...)]``, or leave it bare and let the conventions
+    apply::
 
         class MyStoredKey(DTO, metadata={"table": "stored_keys"}):
-            id: UUID
-            key: str = DtoField(in_read_response=False, metadata={"label": "Key"})
-            description: str | None = DtoField(logical_default_value=None)
-            created_at: datetime = DtoField(
-                in_create_request=False, logical_default_value_factory=utc_now
-            )
+            id: Annotated[UUID, DtoField(in_create_request=False, in_update_request=False,
+                                         default_factory_for_create=uuid4)]
+            key: Annotated[str, DtoField(in_read_response=False, metadata={"label": "Key"})]
+            description: Annotated[str | None, DtoField(default_for_create=None)]
+            created_at: Annotated[datetime, DtoField(in_create_request=False,
+                                                     in_update_request=False,
+                                                     default_factory_for_create=utc_now)]
+            updated_at: Annotated[datetime, DtoField(in_create_request=False,
+                                                     in_update_request=False,
+                                                     default_factory_for_create=utc_now,
+                                                     default_factory_for_update=utc_now)]
+
+    ``Annotated`` is the canonical Pydantic v2 mechanism (and the one ``v1``
+    already uses for ``ResourceyField``). It keeps the real field type, unlike
+    the assignment form (``key: str = DtoField(...)``), which is a type error
+    under ``mypy --strict``. No explicit ``| Missing`` is needed: the generator
+    widens every field itself.
 
     ``metadata`` is free-form extra data, inherited and merged down the MRO; a
     subclass may pass ``metadata=`` as a class keyword or declare a ``metadata``
@@ -274,24 +302,26 @@ class DTO:
         return cls.__rest_models__
 
     @classmethod
-    def get_logical_default(cls, name: str) -> Any:
-        """The logical default for ``name`` (value or factory result), else ``MISSING``."""
-        return cls.__dto_fields__[name][1].resolve_default()
+    def get_default(cls, name: str, operation: str = "create") -> Any:
+        """The default for ``name`` in ``operation`` (value or factory result), else ``MISSING``."""
+        return cls.__dto_fields__[name][1].resolve_default(operation)
 
     # -- construction ---------------------------------------------------
 
     @classmethod
     def new(cls, **values: Any) -> BaseModel:
-        """Build a DTO instance applying the logical-default precedence.
+        """Build a DTO instance applying the create-default precedence.
 
         A client-supplied value (anything but ``MISSING``) wins, then the
-        logical default, then ``MISSING``. An explicit ``None`` is a supplied
-        value and survives alongside the sentinel.
+        create default, then ``MISSING``. An explicit ``None`` is a supplied
+        value and survives alongside the sentinel. An optional annotation is
+        *not* a default: only ``default_for_create`` /
+        ``default_factory_for_create`` fill an omitted field.
         """
         data: dict[str, Any] = {}
         for name, (_ann, config) in cls.__dto_fields__.items():
             value = values.get(name, MISSING)
-            data[name] = config.resolve_default() if value is MISSING else value
+            data[name] = config.resolve_default("create") if value is MISSING else value
         return cls.__dto_model__(**data)
 
 
@@ -372,16 +402,21 @@ def _collect_dto_fields(cls: type[DTO]) -> dict[str, tuple[Any, DtoField]]:
 
 
 def _config_from(value: Any, annotation: Any) -> DtoField:
-    """Build the ``DtoField`` for a field from its class attribute / annotation."""
-    if isinstance(value, DtoField):
-        return value
+    """Build the ``DtoField`` for a field from its class attribute / annotation.
+
+    An ``Annotated[T, DtoField(...)]`` metadata entry wins; otherwise a
+    ``DtoField`` class attribute, a bare class default (shorthand for a create
+    default), or a bare field with the conventions only.
+    """
     for meta in _annotated_metadata(annotation):
         if isinstance(meta, DtoField):
             return meta
+    if isinstance(value, DtoField):
+        return value
     if value is _NO_DEFAULT:
         return DtoField()
-    # A bare default value is shorthand for a logical default.
-    return DtoField(logical_default_value=value)
+    # A bare default value is shorthand for a create default.
+    return DtoField(default_for_create=value)
 
 
 def _apply_conventions(name: str, id_field_name: str, config: DtoField) -> DtoField:
@@ -396,9 +431,14 @@ def _apply_conventions(name: str, id_field_name: str, config: DtoField) -> DtoFi
             overrides["in_create_request"] = False
         return config.with_overrides(**overrides)
     if name in ("created_at", "updated_at"):
+        # Neither is client input. ``created_at`` is written once (no update
+        # default, so an omitted update leaves it alone); ``updated_at`` is
+        # re-set on every update, so it carries an update default too.
         config = config.with_overrides(in_create_request=False, in_update_request=False)
-        if not config.has_logical_default:
-            config = config.with_overrides(logical_default_value_factory=utc_now)
+        if not config.has_default_for("create"):
+            config = config.with_overrides(default_factory_for_create=utc_now)
+        if name == "updated_at" and not config.has_default_for("update"):
+            config = config.with_overrides(default_factory_for_update=utc_now)
     return config
 
 
@@ -439,20 +479,6 @@ def _strip_annotated(annotation: Any) -> Any:
     return annotation
 
 
-def _is_optional(annotation: Any) -> bool:
-    """Whether ``annotation`` is a union containing ``NoneType``."""
-    if _is_union(annotation):
-        return type(None) in get_args(annotation)
-    return annotation is type(None)
-
-
-def _widen_optional(annotation: Any) -> Any:
-    """``annotation`` with ``None`` added to its union if not already present."""
-    if _is_optional(annotation):
-        return annotation
-    return annotation | None
-
-
 def _with_missing(annotation: Any) -> Any:
     """``annotation | Missing`` — how every field of the generated DTO type is typed."""
     if annotation is None:
@@ -482,11 +508,11 @@ def _build_dto_model(name: str, fields: Mapping[str, tuple[Any, DtoField]]) -> t
 def _build_rest_models(name: str, fields: Mapping[str, tuple[Any, DtoField]]) -> RestModels:
     """Build the six REST models as field-selection views of the DTO."""
     return RestModels(
-        create_request=_build_request_model(f"{name}CreateRequest", fields, "in_create_request"),
+        create_request=_build_create_request_model(f"{name}CreateRequest", fields),
         create_response=_build_response_model(
             f"{name}CreateResponse", fields, "in_create_response"
         ),
-        update_request=_build_request_model(f"{name}UpdateRequest", fields, "in_update_request"),
+        update_request=_build_update_request_model(f"{name}UpdateRequest", fields),
         update_response=_build_response_model(
             f"{name}UpdateResponse", fields, "in_update_response"
         ),
@@ -509,25 +535,60 @@ def _build_response_model(
     return create_model(name, **model_fields)
 
 
-def _build_request_model(
-    name: str, fields: Mapping[str, tuple[Any, DtoField]], flag: str
+def _build_create_request_model(
+    name: str, fields: Mapping[str, tuple[Any, DtoField]]
 ) -> type[BaseModel]:
-    """A request model: the flagged fields as plain concrete fields with real defaults.
+    """A create request: the ``in_create_request`` fields with their create defaults.
 
-    A field with a logical default (or an optional type) is optional with a
-    real default; otherwise it stays required. The wire format never has to
-    carry a sentinel — ``MISSING`` is internal to the DTO.
+    Optionality comes *only* from a declared ``default_for_create`` /
+    ``default_factory_for_create`` (or the field being excluded): a nullable
+    annotation with no create default is required, so a PATCH can always tell
+    "not specified" from "set to ``null``". A factory default becomes Pydantic's
+    ``default_factory`` (so it is actually used) rather than a concrete ``None``.
     """
     model_fields: dict[str, Any] = {}
     for field_name, (annotation, config) in fields.items():
-        if not getattr(config, flag):
+        if not config.in_create_request:
             continue
         concrete = _strip_annotated(annotation)
-        if config.has_logical_default or _is_optional(concrete):
-            default = (
-                config.logical_default_value if config.logical_default_value is not _UNSET else None
+        if config.default_factory_for_create is not None:
+            model_fields[field_name] = (
+                concrete,
+                Field(default_factory=config.default_factory_for_create),
             )
-            model_fields[field_name] = (_widen_optional(concrete), default)
+        elif config.default_for_create is not _UNSET:
+            model_fields[field_name] = (concrete, config.default_for_create)
         else:
             model_fields[field_name] = (concrete, ...)
     return create_model(name, **model_fields)
+
+
+def _build_update_request_model(
+    name: str, fields: Mapping[str, tuple[Any, DtoField]]
+) -> type[BaseModel]:
+    """An update request: the ``in_update_request`` fields, every one optional.
+
+    Each field defaults to the :data:`MISSING` sentinel so a PATCH that omits it
+    is distinguishable from one that sends an explicit ``None`` — the sentinel
+    lives on the wire boundary here, unlike the create request's concrete
+    defaults. A non-nullable field still rejects ``null``. Defaults for update
+    are applied by the service (operation-scoped), not materialised here.
+    """
+    model_fields: dict[str, Any] = {
+        field_name: (_strip_annotated(annotation), _missing_field())
+        for field_name, (annotation, config) in fields.items()
+        if config.in_update_request
+    }
+    return create_model(name, **model_fields)
+
+
+def request_to_dto(dto_model: type[BaseModel], payload: BaseModel) -> BaseModel:
+    """Convert a request model instance into a DTO instance — the sanctioned hop.
+
+    Uses ``model_dump(exclude_unset=True)`` so only client-supplied fields carry
+    over and everything else stays :data:`MISSING`. This form is load-bearing:
+    a plain ``model_dump`` raises (or leaks the sentinel) because the request
+    field is concretely typed, and ``exclude_none=True`` would drop an explicit
+    ``None`` (so a PATCH could never clear a field).
+    """
+    return dto_model.model_validate(payload.model_dump(exclude_unset=True))

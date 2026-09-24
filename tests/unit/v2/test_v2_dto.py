@@ -2,7 +2,7 @@
 
 Covers the acceptance criteria that do not need a running service: the
 declaration conventions, the ``Missing`` type, the ``DtoField`` flags and
-logical-default precedence, and the six derived REST models.
+operation-scoped default precedence, and the six derived REST models.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from pydantic import ValidationError
+from pydantic_core import PydanticSerializationError
 
 from resourcey.v2.core.dto import (
     DTO,
@@ -20,15 +21,23 @@ from resourcey.v2.core.dto import (
     DtoField,
     Missing,
     RestModels,
+    request_to_dto,
     utc_now,
 )
 
 
 class MyStoredKey(DTO):
-    id: UUID
-    key: str = DtoField(in_read_response=False, in_search_response=False, in_update_response=False)
-    description: str | None = DtoField(logical_default_value=None)
-    created_at: datetime = DtoField(in_create_request=False, logical_default_value_factory=utc_now)
+    id: Annotated[UUID, DtoField(in_create_request=False, in_update_request=False)]
+    key: Annotated[
+        str, DtoField(in_read_response=False, in_search_response=False, in_update_response=False)
+    ]
+    description: Annotated[str | None, DtoField(default_for_create=None)]
+    created_at: Annotated[
+        datetime,
+        DtoField(
+            in_create_request=False, in_update_request=False, default_factory_for_create=utc_now
+        ),
+    ]
 
 
 def test_missing_is_singleton_and_type_usable():
@@ -93,17 +102,18 @@ def test_dto_field_flags_default_to_true():
     assert flags.in_update_response is True
     assert flags.in_read_response is True
     assert flags.in_search_response is True
-    assert flags.has_logical_default is False
+    assert flags.has_default_for("create") is False
+    assert flags.has_default_for("update") is False
 
 
-def test_logical_default_precedence_client_then_default_then_missing():
+def test_default_precedence_client_then_default_then_missing():
     # explicit client value wins
     assert MyStoredKey.new(key="k", description="given").description == "given"
     # explicit None is a supplied value and survives
     assert MyStoredKey.new(key="k", description=None).description is None
-    # omitted field takes the logical default
+    # omitted field takes the create default
     assert MyStoredKey.new(key="k").description is None
-    # omitted field with no logical default stays MISSING
+    # omitted field with no create default stays MISSING
     assert MyStoredKey.new(key="k").id is MISSING
     # a factory default is resolved
     assert MyStoredKey.new(key="k").created_at is not MISSING
@@ -115,19 +125,35 @@ def test_id_convention_not_in_create_or_update_requests():
     assert "id" not in models.update_request.model_fields
 
 
-def test_timestamp_convention_gets_a_logical_default_factory():
+def test_timestamp_convention_gets_create_and_update_defaults():
     fields = MyStoredKey.get_fields()
     assert fields["created_at"].in_create_request is False
-    assert fields["created_at"].logical_default_value_factory is utc_now
+    assert fields["created_at"].default_factory_for_create is utc_now
+    # created_at is never touched on update...
+    assert fields["created_at"].has_default_for("update") is False
+
+    class WithUpdate(MyStoredKey):
+        updated_at: Annotated[
+            datetime,
+            DtoField(in_create_request=False, in_update_request=False),
+        ]
+
+    fields = WithUpdate.get_fields()
+    assert fields["updated_at"].default_factory_for_create is utc_now
+    # ...while updated_at is re-set on every update.
+    assert fields["updated_at"].default_factory_for_update is utc_now
 
 
-def test_bare_default_value_is_a_logical_default():
+def test_bare_default_value_is_a_create_default():
     class M(DTO):
         id: int
         label: str = "hello"
 
     assert M.new().label == "hello"
     assert M.get_rest_models().create_request().label == "hello"
+    # It is a create default only: an update omission leaves the field alone.
+    assert M.get_rest_models().update_request(label="x").label == "x"
+    assert M.get_rest_models().update_request().label is MISSING
 
 
 def test_dto_field_via_annotated_metadata():
@@ -184,13 +210,65 @@ def test_one_time_reveal_is_expressible():
     assert "key" not in models.update_response.model_fields
 
 
-def test_request_models_use_concrete_fields_with_real_defaults():
-    # The wire format never represents a sentinel: an omitted description is
-    # simply absent (defaulted to None), and id is not a request field at all.
+def test_create_request_uses_concrete_defaults_and_requires_optionals_without_one():
+    # Create optionality comes only from a declared create default: description
+    # has one (None), key does not so it is required, and id is not a field at all.
     models = MyStoredKey.get_rest_models()
     req = models.create_request(key="k")
     assert req.description is None
     assert "id" not in type(req).model_fields
+    with pytest.raises(ValidationError):
+        models.create_request()
+
+
+_token_calls: list[int] = []
+
+
+def make_token() -> str:
+    _token_calls.append(1)
+    return f"tok-{len(_token_calls)}"
+
+
+def test_create_request_carries_a_factory_default_as_default_factory():
+    class M(DTO):
+        id: int
+        token: Annotated[str, DtoField(default_factory_for_create=make_token)]
+
+    field = M.get_rest_models().create_request.model_fields["token"]
+    assert field.default_factory is make_token
+    # The factory is actually used (not silently replaced by None).
+    assert M.get_rest_models().create_request().token == "tok-1"
+    assert M.new().token == "tok-2"
+
+
+def test_update_request_keeps_patch_semantics_with_the_sentinel():
+    class M(DTO):
+        id: int
+        description: Annotated[str | None, DtoField(default_for_create=None)]
+        code: str
+
+    req = M.get_rest_models().update_request
+    omitted = req(code="x")
+    assert omitted.description is MISSING
+    explicit_null = req(code="x", description=None)
+    assert explicit_null.description is None
+    # every update field is optional (PATCH), so an empty body validates
+    assert req().code is MISSING
+    # a non-nullable field still rejects null
+    with pytest.raises(ValidationError):
+        req(code=None)
+
+
+def test_update_request_never_uses_the_annotation_for_optionality():
+    # A nullable field with no create default is *required* on create, so a PATCH
+    # can always tell "not specified" from "set to null".
+    class M(DTO):
+        id: int
+        note: str | None
+
+    with pytest.raises(ValidationError):
+        M.get_rest_models().create_request()
+    assert M.get_rest_models().update_request().note is MISSING
 
 
 def test_response_models_are_required():
@@ -199,11 +277,48 @@ def test_response_models_are_required():
         models.read_response()
 
 
-def test_get_logical_default_returns_value_or_factory_result():
-    assert MyStoredKey.get_logical_default("description") is None
-    assert isinstance(MyStoredKey.get_logical_default("created_at"), datetime)
-    assert MyStoredKey.get_logical_default("key") is MISSING
-    assert MyStoredKey.get_logical_default("id") is MISSING
+def test_get_default_returns_value_or_factory_result_per_operation():
+    assert MyStoredKey.get_default("description") is None
+    assert isinstance(MyStoredKey.get_default("created_at"), datetime)
+    assert MyStoredKey.get_default("key") is MISSING
+    assert MyStoredKey.get_default("id") is MISSING
+    assert MyStoredKey.get_default("created_at", "update") is MISSING
+
+
+def test_request_to_dto_is_the_sanctioned_hop():
+    payload = MyStoredKey.get_rest_models().update_request(key="k")
+    dto = request_to_dto(MyStoredKey.get_dto_type(), payload)
+    assert dto.key == "k"
+    # untouched fields stay MISSING rather than becoming None
+    assert dto.description is MISSING
+    assert dto.created_at is MISSING
+
+    cleared = request_to_dto(
+        MyStoredKey.get_dto_type(),
+        MyStoredKey.get_rest_models().update_request(key="k", description=None),
+    )
+    assert cleared.description is None
+
+
+def test_raw_dump_of_a_partially_set_update_payload_is_unusable():
+    """The ``exclude_unset`` hop is load-bearing, not stylistic (#101).
+
+    A raw JSON dump raises on the sentinel; only ``exclude_unset=True`` carries
+    just the client-supplied fields.
+    """
+
+    class M(DTO):
+        id: int
+        code: str
+        note: str | None
+
+    payload = M.get_rest_models().update_request(code="x")
+    with pytest.raises(PydanticSerializationError):
+        payload.model_dump(mode="json")
+    assert payload.model_dump(exclude_unset=True) == {"code": "x"}
+    # The sanctioned hop drops the untouched field entirely.
+    dto = request_to_dto(M.get_dto_type(), payload)
+    assert dto.note is MISSING
 
 
 def test_new_and_get_fields_cover_to_dto_paths():
