@@ -64,7 +64,7 @@ class HiddenResource(Resource[Any]):
         return None
 
 
-async def _make_client(manifest: Manifest[Any], app: FastAPI) -> AsyncIterator[AsyncClient]:
+async def _make_client(manifest: Manifest, app: FastAPI) -> AsyncIterator[AsyncClient]:
     async with manifest:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -81,7 +81,7 @@ async def client() -> AsyncIterator[AsyncClient]:
         await conn.run_sync(threads.metadata.create_all)
         await conn.run_sync(messages.metadata.create_all)
 
-    manifest: Manifest[Any] = Manifest(resources=[threads, messages])
+    manifest: Manifest = Manifest(resources=[threads, messages])
     async for c in _make_client(manifest, create_app(manifest)):
         yield c
     await engine.dispose()
@@ -165,7 +165,7 @@ async def test_create_response_carries_a_one_time_reveal_field():
     async with engine.begin() as conn:
         await conn.run_sync(keys.metadata.create_all)
 
-    manifest: Manifest[Any] = Manifest(resources=[keys])
+    manifest: Manifest = Manifest(resources=[keys])
     async for client in _make_client(manifest, create_app(manifest)):
         created = await client.post("/stored-keys", json={"name": "k", "secret": "s3cr3t"})
         assert created.status_code == 201
@@ -181,7 +181,7 @@ async def test_create_response_carries_a_one_time_reveal_field():
 
 async def test_hidden_resource_mounts_no_routes():
     hidden = HiddenResource(Hidden)
-    manifest: Manifest[Any] = Manifest(resources=[hidden])
+    manifest: Manifest = Manifest(resources=[hidden])
     async for client in _make_client(manifest, create_app(manifest)):
         assert (await client.get("/hiddens")).status_code == 404
         assert (await client.post("/hiddens", json={"value": "v"})).status_code == 404
@@ -200,7 +200,7 @@ async def code_client() -> AsyncIterator[AsyncClient]:
     async with engine.begin() as conn:
         await conn.run_sync(countries.metadata.create_all)
 
-    manifest: Manifest[Any] = Manifest(resources=[countries])
+    manifest: Manifest = Manifest(resources=[countries])
     async for c in _make_client(manifest, create_app(manifest)):
         yield c
     await engine.dispose()
@@ -231,7 +231,7 @@ async def test_add_to_app_mounts_prefix_without_wiring_lifespan():
     async with engine.begin() as conn:
         await conn.run_sync(threads.metadata.create_all)
 
-    manifest: Manifest[Any] = Manifest(resources=[threads])
+    manifest: Manifest = Manifest(resources=[threads])
     app = FastAPI()
     add_to_app(manifest, app, prefix="/api/v1")
     # add_to_app must not install the manifest as the app's lifespan: running the
@@ -302,7 +302,7 @@ async def test_register_routes_accepts_an_api_router():
     app.include_router(target)
     register_error_handlers(app)
 
-    manifest: Manifest[Any] = Manifest(resources=[threads])
+    manifest: Manifest = Manifest(resources=[threads])
     async with (
         manifest,
         AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client,
@@ -346,7 +346,7 @@ async def test_route_escape_hatch_preserves_a_developer_route():
     async with engine.begin() as conn:
         await conn.run_sync(threads.metadata.create_all)
 
-    manifest: Manifest[Any] = Manifest(resources=[threads])
+    manifest: Manifest = Manifest(resources=[threads])
     app = FastAPI()
     custom = APIRouter()
 
@@ -374,7 +374,7 @@ async def test_search_ignores_unknown_query_params():
     async with engine.begin() as conn:
         await conn.run_sync(threads.metadata.create_all)
 
-    manifest: Manifest[Any] = Manifest(resources=[threads])
+    manifest: Manifest = Manifest(resources=[threads])
     async for client in _make_client(manifest, create_app(manifest)):
         await client.post("/threads", json={"title": "a"})
         page = await client.get("/threads", params={"limit": 1, "bogus": "x"})
