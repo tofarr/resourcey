@@ -16,52 +16,74 @@ from typing import Any
 import pytest_asyncio
 from fastapi import APIRouter, FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import Integer, String
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from resourcey.v2.core.dto import DTO, DtoField
+from resourcey.v2.core.dto import DtoField
 from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, NotFoundError, ServiceError
 from resourcey.v2.http.app import add_to_app, create_app
 from resourcey.v2.http.routes import register_error_handlers, register_routes
 from resourcey.v2.sql.resource import SqlResource
 
 
-class Thread(DTO):
-    id: int
-    title: str
+class AppBase(DeclarativeBase):
+    pass
 
 
-class Message(DTO):
-    id: int
-    thread_id: int
-    body: str
+class Thread(AppBase):
+    __tablename__ = "threads"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(100))
 
 
-class StoredKey(DTO):
-    """A one-time-reveal DTO: ``secret`` is in the create response and nowhere else."""
+class Message(AppBase):
+    __tablename__ = "messages"
 
-    id: int
-    name: str
-    secret: str = DtoField(
-        in_read_response=False,
-        in_update_response=False,
-        in_search_response=False,
-        in_update_request=False,
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    thread_id: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(String(200))
+
+
+class StoredKey(AppBase):
+    """A one-time-reveal model: ``secret`` is in the create response and nowhere else."""
+
+    __tablename__ = "stored_keys"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(50))
+    secret: Mapped[str] = mapped_column(
+        String(50),
+        info={
+            "dto_field": DtoField(
+                in_read_response=False,
+                in_update_response=False,
+                in_search_response=False,
+                in_update_request=False,
+            )
+        },
     )
 
 
-class Hidden(DTO):
-    id: int
-    value: str
+class Hidden(AppBase):
+    __tablename__ = "hidden"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    value: Mapped[str] = mapped_column(String(50))
 
 
-class HiddenResource(Resource[Any]):
+class HiddenResource(SqlResource[Any]):
     """A resource the outside world never sees (``get_exposed_resource() is None``)."""
 
     def get_exposed_resource(self) -> None:
         return None
+
+
+def _dummy_maker() -> async_sessionmaker[AsyncSession]:
+    return async_sessionmaker(create_async_engine("sqlite+aiosqlite:///:memory:"))
 
 
 async def _make_client(manifest: Manifest, app: FastAPI) -> AsyncIterator[AsyncClient]:
@@ -78,8 +100,7 @@ async def client() -> AsyncIterator[AsyncClient]:
     threads = SqlResource(Thread, session_factory=maker)
     messages = SqlResource(Message, session_factory=maker)
     async with engine.begin() as conn:
-        await conn.run_sync(threads.metadata.create_all)
-        await conn.run_sync(messages.metadata.create_all)
+        await conn.run_sync(AppBase.metadata.create_all)
 
     manifest: Manifest = Manifest(resources=[threads, messages])
     async for c in _make_client(manifest, create_app(manifest)):
@@ -180,16 +201,18 @@ async def test_create_response_carries_a_one_time_reveal_field():
 
 
 async def test_hidden_resource_mounts_no_routes():
-    hidden = HiddenResource(Hidden)
+    hidden = HiddenResource(Hidden, session_factory=_dummy_maker())
     manifest: Manifest = Manifest(resources=[hidden])
     async for client in _make_client(manifest, create_app(manifest)):
         assert (await client.get("/hiddens")).status_code == 404
         assert (await client.post("/hiddens", json={"value": "v"})).status_code == 404
 
 
-class Country(DTO, id_field_name="code"):
-    code: str
-    name: str
+class Country(AppBase):
+    __tablename__ = "countries"
+
+    code: Mapped[str] = mapped_column(String(2), primary_key=True)
+    name: Mapped[str] = mapped_column(String(50))
 
 
 @pytest_asyncio.fixture
@@ -312,7 +335,7 @@ async def test_register_routes_accepts_an_api_router():
 
 
 async def test_register_routes_hidden_resource_returns_an_empty_router():
-    hidden = HiddenResource(Hidden)
+    hidden = HiddenResource(Hidden, session_factory=_dummy_maker())
     app = FastAPI()
     router = register_routes(app, hidden)
     assert router.routes == []

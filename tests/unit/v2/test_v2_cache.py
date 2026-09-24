@@ -18,7 +18,9 @@ import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel
+from sqlalchemy import DateTime, String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.cache.cache_defaults import default_cache_strategy
 from resourcey.v2.cache.cache_header import CacheHeader
@@ -28,7 +30,6 @@ from resourcey.v2.cache.cache_strategy import (
     LastModifiedCacheStrategy,
     OptimisticCacheStrategy,
 )
-from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.sql.resource import SqlResource
 
@@ -180,24 +181,40 @@ def test_strategy_round_trips_as_a_discriminated_union():
 # ---------------------------------------------------------------------------
 
 
-class NoUpdated(DTO):
-    id: int
-    label: str
+class CacheBase(DeclarativeBase):
+    pass
 
 
-class HasUpdated(DTO):
-    id: int
-    label: str
-    updated_at: datetime
+class NoUpdated(CacheBase):
+    __tablename__ = "no_updated"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(50))
+
+
+class HasUpdated(CacheBase):
+    __tablename__ = "has_updated"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(50))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 def test_default_is_etag_without_updated_at():
-    assert isinstance(default_cache_strategy(NoUpdated.get_rest_models()), ETagCacheStrategy)
+    assert isinstance(
+        default_cache_strategy(
+            SqlResource(NoUpdated, session_factory=_factory()).get_rest_models()
+        ),
+        ETagCacheStrategy,
+    )
 
 
 def test_default_is_last_modified_with_updated_at():
     assert isinstance(
-        default_cache_strategy(HasUpdated.get_rest_models()), LastModifiedCacheStrategy
+        default_cache_strategy(
+            SqlResource(HasUpdated, session_factory=_factory()).get_rest_models()
+        ),
+        LastModifiedCacheStrategy,
     )
 
 

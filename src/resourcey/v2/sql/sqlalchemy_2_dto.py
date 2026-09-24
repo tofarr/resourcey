@@ -1,19 +1,24 @@
-"""Adopt an existing SQLAlchemy ORM model as a ``v2`` DTO (issue #78).
+"""Infer a ``v2`` DTO declaration from a SQLAlchemy ORM model (issue #78/#89).
 
-:func:`sqlalchemy_2_dto` converts an ORM model into a
-:class:`~resourcey.v2.core.dto.DTO` declaration: each mapped column's
-SQLAlchemy type maps back to the corresponding Python annotation, the primary
-key becomes the DTO identifier (``id_field_name``), nullability becomes
-``ann | None``, and server-generated defaults become ``in_create_request=False``
-/ logical defaults.
+This is the new direction of the SQL workflow: a developer defines the ORM
+model they already work with and the framework infers the DTO from it.
+:func:`sqlalchemy_2_dto` maps each mapped column back to the corresponding
+Python annotation, makes the primary key the DTO identifier
+(``id_field_name``), widens nullability to ``ann | None``, and re-expresses
+client-side defaults as logical defaults / ``in_create_request=False``.
 
-The produced DTO carries the **original model** in its ``metadata`` under
-:data:`MODEL_METADATA_KEY` — the free-form store on ``DTO`` that ``v2/core``
-never reads. That is the handoff to the backend: a
-:class:`~resourcey.v2.sql.resource.SqlResource` built from the DTO adopts the
-recorded model; with no recorded model it generates one from the DTO.
+A column may override the inferred projection by placing a
+:class:`~resourcey.v2.core.dto.DtoField` in its ``info`` mapping under the
+``dto_field`` key::
 
-**Scope: plain columns only.** Every column converts as an ordinary scalar
+    key: Mapped[str] = mapped_column(
+        String, info={"dto_field": DtoField(in_read_response=False)}
+    )
+
+When no ``dto_field`` is supplied the projection is inferred from the column's
+generation behaviour (see :func:`_dto_field_for_column`).
+
+**Scope: plain columns only.** Every column projects as an ordinary scalar
 field (a foreign-key column such as ``thread_id`` becomes a plain ``int`` field
 and round-trips as a value). SQLAlchemy ``relationship()``s are **not**
 projected and are a documented limitation; nested / relationship projection is
@@ -50,18 +55,18 @@ from sqlalchemy.orm import Mapper
 
 from resourcey.v2.core.dto import DTO, DtoField
 
-# The namespaced metadata key under which the source ORM model is recorded.
-# A string keeps ``DTO.metadata``'s ``dict[str, Any]`` contract (a sentinel
-# would not) and the ``v2.sql`` namespace rules out collision with user keys.
-MODEL_METADATA_KEY = "v2.sql.model"
+# The ``Column.info`` key under which a developer supplies an explicit
+# ``DtoField`` for a column; absent it, the projection is inferred.
+DTO_FIELD_INFO_KEY = "dto_field"
 
 
 def sqlalchemy_2_dto(model: type[Any], *, name: str | None = None) -> type[DTO]:
-    """Convert an ORM model into a DTO declaration that records the model.
+    """Infer a DTO declaration from an ORM model.
 
     The DTO's fields mirror the model's mapped columns (attribute order), with
-    the primary key as the DTO identifier. The original model is stored in
-    ``DTO.metadata`` under :data:`MODEL_METADATA_KEY` so a backend can adopt it.
+    the primary key as the DTO identifier. A column carrying a ``DtoField`` in
+    ``column.info["dto_field"]`` uses it verbatim; otherwise the field is
+    inferred from the column type and generation behaviour.
 
     Args:
         model: A mapped SQLAlchemy declarative class.
@@ -79,18 +84,7 @@ def sqlalchemy_2_dto(model: type[Any], *, name: str | None = None) -> type[DTO]:
         (DTO,),
         namespace,
         id_field_name=_primary_key_attr(mapper),
-        metadata={MODEL_METADATA_KEY: model},
     )
-
-
-def recorded_model(dto: type[DTO]) -> type[Any] | None:
-    """The ORM model recorded in ``dto``'s metadata, or ``None``.
-
-    ``DTO.metadata`` merges down the MRO, so a DTO subclass inherits its
-    parent's recorded model — desirable for an adopted model.
-    """
-    recorded = dto.metadata.get(MODEL_METADATA_KEY)
-    return recorded if isinstance(recorded, type) else None
 
 
 # ---------------------------------------------------------------------------
@@ -111,13 +105,16 @@ def _field_declarations(mapper: Mapper[Any]) -> dict[str, tuple[Any, DtoField]]:
 
 
 def _dto_field_for_column(column: Any, mapper: Mapper[Any]) -> DtoField:
-    """The ``DtoField`` flags/defaults implied by a column's generation behaviour.
+    """The ``DtoField`` for a column: the explicit one in ``info``, else inferred.
 
     A client-side default is re-expressed as the field's logical default and
     the field drops out of create requests; a server-side default or an
     auto-increment primary key does the same, minus a logical default (the
     database supplies the value).
     """
+    explicit = column.info.get(DTO_FIELD_INFO_KEY)
+    if isinstance(explicit, DtoField):
+        return explicit
     default = column.default
     if default is not None:
         if getattr(default, "is_callable", False):

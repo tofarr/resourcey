@@ -1,8 +1,10 @@
-"""Tests for ``sqlalchemy_2_dto`` and the ``v2`` SQL backend (issue #78).
+"""Tests for ``sqlalchemy_2_dto`` — inferring a ``v2`` DTO from an ORM model.
 
-Covers both conversion directions (ORM model -> DTO and DTO -> table), the
-metadata handoff, model adoption vs. generation, the ``SqlResource`` session
-maker requirement, cursor pagination, and the migration round trip.
+The SQL workflow is model-first (issue #89): a developer defines the SQLAlchemy
+model and :class:`~resourcey.v2.sql.resource.SqlResource` infers the DTO from
+it. These tests cover the inference (column types, nullability, defaults, the
+primary key, explicit ``DtoField`` overrides via ``column.info``), and the
+resulting resource round-tripping the standard actions.
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from enum import StrEnum
 from typing import Any
 from uuid import UUID, uuid4
 
-import pytest
 import pytest_asyncio
 from sqlalchemy import (
     JSON,
@@ -37,16 +38,11 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from resourcey.v2.core.dto import DTO
-from resourcey.v2.core.service import ServiceError
+from resourcey.v2.core.dto import DtoField
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
-from resourcey.v2.sql.resource import SqlResource, V2Base
-from resourcey.v2.sql.sqlalchemy_2_dto import (
-    MODEL_METADATA_KEY,
-    recorded_model,
-    sqlalchemy_2_dto,
-)
+from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
 
 
 class Kind(StrEnum):
@@ -57,11 +53,6 @@ class Kind(StrEnum):
 class Choice(StrEnum):
     A = "a"
     B = "b"
-
-
-class WithEnum(DTO):
-    id: int
-    choice: Choice
 
 
 class AdoptedBase(DeclarativeBase):
@@ -94,20 +85,22 @@ def _encryption() -> EncryptionService:
     )
 
 
+def _encryption() -> EncryptionService:
+    return EncryptionService(
+        EncryptionKeysConfig(
+            encryption_key=EncryptionKeyConfig(id="test", value="test-secret-key-for-cursors")
+        )
+    )
+
+
 def _maker() -> async_sessionmaker[AsyncSession]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     return async_sessionmaker(engine, expire_on_commit=False)
 
 
 # ---------------------------------------------------------------------------
-# sqlalchemy_2_dto — model -> DTO
+# sqlalchemy_2_dto — model -> DTO inference
 # ---------------------------------------------------------------------------
-
-
-def test_conversion_records_the_model_in_metadata():
-    dto = sqlalchemy_2_dto(Widget)
-    assert dto.metadata[MODEL_METADATA_KEY] is Widget
-    assert recorded_model(dto) is Widget
 
 
 def test_conversion_uses_the_model_name_by_default_and_allows_an_override():
@@ -202,13 +195,29 @@ def test_a_natural_key_primary_key_stays_client_supplied():
     assert dto.get_fields()["code"].in_update_request is False
 
 
-def test_a_recorded_model_is_inherited_by_a_dto_subclass():
-    adopted = sqlalchemy_2_dto(Widget)
+def test_an_explicit_dto_field_in_column_info_wins():
+    class WithOverride(AdoptedBase):
+        __tablename__ = "with_override"
+        id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+        secret: Mapped[str] = mapped_column(
+            String(50),
+            info={
+                "dto_field": DtoField(
+                    in_read_response=False,
+                    in_update_response=False,
+                    in_search_response=False,
+                    in_update_request=False,
+                )
+            },
+        )
 
-    class Extended(adopted):  # type: ignore[misc, valid-type]
-        extra: str
-
-    assert recorded_model(Extended) is Widget
+    dto = sqlalchemy_2_dto(WithOverride)
+    field = dto.get_fields()["secret"]
+    assert field.in_read_response is False
+    assert field.in_search_response is False
+    # The create response still reveals it (a one-time-reveal field).
+    assert field.in_create_response is True
+    assert "secret" not in dto.get_rest_models().read_response.model_fields
 
 
 def test_relationships_are_not_projected():
@@ -231,125 +240,79 @@ def test_relationships_are_not_projected():
     assert list(dto.get_fields()) == ["id", "parent_id"]
 
 
-# ---------------------------------------------------------------------------
-# DTO -> table (generation) round trip
-# ---------------------------------------------------------------------------
+def test_enum_column_maps_to_its_python_enum():
+    class WithEnum(AdoptedBase):
+        __tablename__ = "with_enum"
+        id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+        choice: Mapped[Choice] = mapped_column(SqlEnum(Choice))
 
-
-def test_dto_to_table_generation_matches_the_original_columns():
-    dto = sqlalchemy_2_dto(Widget)
-    resource = SqlResource(dto, session_factory=_maker(), base=V2Base)
-    generated = resource.table
-    original = Widget.__table__
-    assert [c.name for c in generated.columns] == [c.name for c in original.columns]
-    assert generated.primary_key.columns.keys() == ["id"]
-    # Nullability round-trips.
-    assert generated.c["nickname"].nullable is True
-    assert generated.c["name"].nullable is False
-
-
-def test_dto_to_model_round_trip_through_the_orm_model():
-    class Plain(DTO):
-        id: int
-        label: str
-        weight: float | None
-
-    resource = SqlResource(Plain, session_factory=_maker(), base=V2Base)
-    assert [c.name for c in resource.table.columns] == ["id", "label", "weight"]
-    assert resource.table.c["id"].primary_key is True
-    assert resource.table.c["id"].autoincrement is True
-    # Nullability follows the annotation: ``label`` is required, ``weight`` optional.
-    assert resource.table.c["label"].nullable is False
-    assert resource.table.c["weight"].nullable is True
-
-
-def test_unsupported_field_annotation_raises():
-    class Odd(DTO):
-        id: int
-        blob: complex
-
-    with pytest.raises(ServiceError, match="No SQL column type"):
-        SqlResource(Odd, session_factory=_maker(), base=V2Base)
-
-
-def test_enum_field_maps_to_a_string_column():
-    resource = SqlResource(WithEnum, session_factory=_maker(), base=V2Base)
-    assert isinstance(resource.table.c["choice"].type, String)
+    dto = sqlalchemy_2_dto(WithEnum)
+    assert dto.__dto_fields__["choice"][0] == Choice
 
 
 # ---------------------------------------------------------------------------
-# Adoption vs. generation
+# SqlResource over the model
 # ---------------------------------------------------------------------------
 
 
-def test_resource_adopts_the_model_recorded_in_the_dto():
-    dto = sqlalchemy_2_dto(Widget)
-    resource = SqlResource(dto, session_factory=_maker())
+def test_resource_serves_the_model_it_is_given():
+    resource = SqlResource(Widget, session_factory=_maker())
     assert resource.model is Widget
     assert resource.table is Widget.__table__
+    assert resource.metadata is AdoptedBase.metadata
 
 
-def test_resource_generates_a_model_when_none_is_recorded():
-    class Plain(DTO):
-        id: int
-        label: str
-
-    resource = SqlResource(Plain, session_factory=_maker(), base=V2Base)
-    assert resource.model is not Plain
-    assert resource.model.__table__ is resource.table
-    assert resource.model.__table__.name == "plains"
+def test_resource_id_column_resolves_the_mapper_attribute():
+    resource = SqlResource(Widget, session_factory=_maker())
+    assert resource.id_column is resource.table.c["id"]
+    assert inspect(resource.model).local_table is resource.table
 
 
-def test_generated_models_land_on_the_injected_base():
-    class MyBase(DeclarativeBase):
-        pass
+def test_a_renamed_identifier_attribute_resolves_to_its_column():
+    class Renamed(AdoptedBase):
+        __tablename__ = "renamed_countries"
+        code: Mapped[str] = mapped_column("country_code", String(2), primary_key=True)
+        name: Mapped[str] = mapped_column("country_name", String(50))
 
-    class Plain(DTO):
-        id: int
-        label: str
-
-    resource = SqlResource(Plain, session_factory=_maker(), base=MyBase)
-    assert "plains" in MyBase.metadata.tables
-    assert resource.metadata is MyBase.metadata
+    resource = SqlResource(Renamed, session_factory=_maker())
+    assert resource.id_column is resource.table.c["country_code"]
+    assert inspect(resource.model).local_table is resource.table
 
 
-def test_two_resources_for_the_same_dto_share_one_table():
-    class Plain(DTO):
-        id: int
-        label: str
+def test_required_field_is_not_null():
+    class Required(AdoptedBase):
+        __tablename__ = "required"
+        id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+        label: Mapped[str] = mapped_column(String(50))
+        note: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
-    maker = _maker()
-    a = SqlResource(Plain, session_factory=maker, base=V2Base)
-    b = SqlResource(Plain, session_factory=maker, base=V2Base)
-    assert a.table is b.table
-    assert a.model is b.model
+    resource = SqlResource(Required, session_factory=_maker())
+    assert resource.table.c["label"].nullable is False
+    assert resource.table.c["note"].nullable is True
 
 
 # ---------------------------------------------------------------------------
-# Round-trip over the generated model
+# Round-trip over the model
 # ---------------------------------------------------------------------------
 
 
 @pytest_asyncio.fixture
 async def widget_resources() -> AsyncIterator[tuple[SqlResource[Any], AsyncSession]]:
-    """An adopted-model resource plus a session over a fresh in-memory SQLite."""
+    """A resource over the model plus a session over a fresh in-memory SQLite."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
-    dto = sqlalchemy_2_dto(Widget)
-    resource = SqlResource(dto, session_factory=maker, encryption_service=_encryption())
+    resource = SqlResource(Widget, session_factory=maker, encryption_service=_encryption())
     async with engine.begin() as conn:
-        # ``resource.metadata`` must carry the adopted table, or this is a no-op.
-        await conn.run_sync(resource.metadata.create_all)
+        await conn.run_sync(AdoptedBase.metadata.create_all)
     async with maker() as session:
         yield resource, session
     await engine.dispose()
 
 
-async def test_adopted_model_crud_round_trip(widget_resources):
+async def test_model_crud_round_trip(widget_resources):
     resource, session = widget_resources
     dto = resource.get_dto_type()
-    ctx: dict[Any, Any] = {**resource_ctx(session)}
-    async with resource.get_service(ctx) as service:
+    async with resource.get_service({**resource_ctx(session)}) as service:
         created = await service.create(
             dto(name="w", kind=Kind.ALPHA, payload={"x": 1}, nickname=None)
         )
@@ -377,7 +340,7 @@ def resource_ctx(session: AsyncSession) -> dict[Any, Any]:
     return {STORAGE_KEY: session}
 
 
-async def test_adopted_model_values_bind_to_the_right_columns(widget_resources):
+async def test_model_values_bind_to_the_right_columns(widget_resources):
     resource, session = widget_resources
     dto = resource.get_dto_type()
     ref = uuid4()
@@ -393,73 +356,7 @@ async def test_adopted_model_values_bind_to_the_right_columns(widget_resources):
     assert row["nickname"] == "nick"
 
 
-# ---------------------------------------------------------------------------
-# Session maker requirement
-# ---------------------------------------------------------------------------
-
-
-def test_session_factory_is_required():
-    class Plain(DTO):
-        id: int
-
-    with pytest.raises(TypeError):
-        SqlResource(Plain)  # type: ignore[call-arg]
-
-
-def test_metadata_property_exposes_the_base_metadata():
-    class Plain(DTO):
-        id: int
-
-    resource = SqlResource(Plain, session_factory=_maker())
-    assert resource.metadata is V2Base.metadata
-    assert inspect(resource.model).local_table is resource.table
-
-
-def test_adopted_model_metadata_is_the_models_own_metadata():
-    """An adopted model's table lives on its own base, not ``V2Base``."""
-    resource = SqlResource(sqlalchemy_2_dto(Widget), session_factory=_maker())
-    assert resource.metadata is AdoptedBase.metadata
-    assert "widgets" in resource.metadata.tables
-
-
-def test_required_field_generates_a_not_null_column():
-    class Required(DTO):
-        id: int
-        label: str
-        note: str | None = None
-
-    resource = SqlResource(Required, session_factory=_maker())
-    assert resource.table.c["label"].nullable is False
-    assert resource.table.c["note"].nullable is True
-
-
-def test_generated_uuid_identifier_is_defaulted():
-    """A non-integer conventional id is generated, not left NULL."""
-
-    class Keyed(DTO):
-        id: UUID
-        name: str
-
-    resource = SqlResource(Keyed, session_factory=_maker())
-    column = resource.table.c["id"]
-    assert column.primary_key is True
-    assert column.default is not None
-
-
-def test_adopted_model_with_a_renamed_identifier_attribute():
-    """The PK attribute name and its column name may differ."""
-
-    class Renamed(AdoptedBase):
-        __tablename__ = "renamed_countries"
-        code: Mapped[str] = mapped_column("country_code", String(2), primary_key=True)
-        name: Mapped[str] = mapped_column("country_name", String(50))
-
-    resource = SqlResource(sqlalchemy_2_dto(Renamed), session_factory=_maker())
-    assert resource.id_column is resource.table.c["country_code"]
-    assert inspect(resource.model).local_table is resource.table
-
-
-async def test_adopted_model_with_a_renamed_identifier_crud():
+async def test_renamed_identifier_crud():
     class RenamedCrud(AdoptedBase):
         __tablename__ = "renamed_countries_crud"
         code: Mapped[str] = mapped_column("country_code", String(3), primary_key=True)
@@ -467,10 +364,10 @@ async def test_adopted_model_with_a_renamed_identifier_crud():
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
-    resource = SqlResource(sqlalchemy_2_dto(RenamedCrud), session_factory=maker)
+    resource = SqlResource(RenamedCrud, session_factory=maker)
     try:
         async with engine.begin() as conn:
-            await conn.run_sync(resource.metadata.create_all)
+            await conn.run_sync(AdoptedBase.metadata.create_all)
         dto = resource.get_dto_type()
         async with (
             maker() as session,
