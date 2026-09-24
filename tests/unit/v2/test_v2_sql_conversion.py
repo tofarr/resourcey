@@ -31,6 +31,7 @@ from sqlalchemy import (
     Uuid,
     inspect,
     select,
+    text,
 )
 from sqlalchemy import (
     Enum as SqlEnum,
@@ -541,5 +542,98 @@ async def test_db_generated_identifier_is_never_passed_on_insert():
             assert created.id is not None
             # source has a server_default and no create default: the default fires.
             assert created.source == "app"
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Generated logical defaults (issue #94)
+# ---------------------------------------------------------------------------
+
+
+class UuidNode(AdoptedBase):
+    """A UUID primary key with no column-level default: the convention generates it."""
+
+    __tablename__ = "uuid_nodes"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    label: Mapped[str] = mapped_column(String(50))
+
+
+def test_uuid_primary_key_gets_a_generated_factory():
+    field = sqlalchemy_2_dto(UuidNode).get_fields()["id"]
+    assert field.default_factory_for_create is uuid4
+    assert field.in_create_request is False
+
+
+def test_uuid_column_default_wins_over_the_convention():
+    """An explicit ``mapped_column(default=...)`` takes precedence (expressed intent)."""
+
+    def custom_id() -> UUID:
+        return UUID("00000000-0000-0000-0000-000000000001")
+
+    class WithIdDefault(AdoptedBase):
+        __tablename__ = "uuid_id_defaults"
+        id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=custom_id)
+        label: Mapped[str] = mapped_column(String(50))
+
+    field = sqlalchemy_2_dto(WithIdDefault).get_fields()["id"]
+    # The column's own factory is used, not the convention's bare ``uuid4``.
+    assert field.default_factory_for_create is custom_id
+    assert field.default_factory_for_create is not uuid4
+    assert field.in_create_request is False
+
+
+def test_uuid_server_default_wins_over_the_convention():
+    class WithServerDefault(AdoptedBase):
+        __tablename__ = "uuid_server_defaults"
+        id: Mapped[UUID] = mapped_column(
+            Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+        )
+        label: Mapped[str] = mapped_column(String(50))
+
+    field = sqlalchemy_2_dto(WithServerDefault).get_fields()["id"]
+    # The database supplies the id: no application factory is generated.
+    assert field.has_default_for("create") is False
+    assert field.in_create_request is False
+
+
+def test_explicit_dto_field_on_the_primary_key_wins_over_conventions():
+    class ExplicitKey(AdoptedBase):
+        __tablename__ = "explicit_keys"
+        id: Mapped[UUID] = mapped_column(
+            Uuid, primary_key=True, info={"dto_field": DtoField(in_create_request=True)}
+        )
+        label: Mapped[str] = mapped_column(String(50))
+
+    field = sqlalchemy_2_dto(ExplicitKey).get_fields()["id"]
+    assert field.in_create_request is True
+    assert field.has_default_for("create") is False
+
+
+def test_uuid_natural_key_stays_client_supplied():
+    class Country(AdoptedBase):
+        __tablename__ = "uuid_countries"
+        code: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+        name: Mapped[str] = mapped_column(String(50))
+
+    dto = sqlalchemy_2_dto(Country)
+    field = dto.get_fields()["code"]
+    assert dto.id_field_name == "code"
+    assert field.in_create_request is True
+    assert field.has_default_for("create") is False
+
+
+async def test_generated_uuid_id_is_used_on_insert():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(UuidNode, session_factory=maker)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(AdoptedBase.metadata.create_all)
+        dto = resource.get_dto_type()
+        async with maker() as session, resource.get_service(resource_ctx(session)) as service:
+            created = await service.create(dto(label="n"))
+            assert isinstance(created.id, UUID)
     finally:
         await engine.dispose()
