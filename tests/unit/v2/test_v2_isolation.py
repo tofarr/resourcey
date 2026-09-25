@@ -189,6 +189,7 @@ def test_the_sql_files_exist_without_an_init():
     names = {p.name for p in sorted(sql.glob("*.py"))}
     assert names == {
         "cursor.py",
+        "filter_converter.py",
         "resource.py",
         "service.py",
         "sqlalchemy_2_dto.py",
@@ -218,6 +219,7 @@ def test_the_util_files_exist_without_an_init():
         "import_paths.py",
         "missing.py",
         "models.py",
+        "search_filter.py",
         "singleton.py",
     }
     assert not (util / "__init__.py").exists()
