@@ -22,7 +22,11 @@ from sqlalchemy import DateTime, String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from resourcey.v2.cache.cache_defaults import default_cache_strategy
+from resourcey.v2.cache.cache_defaults import (
+    DEFAULT_READ_ONLY_EXPIRE_IN,
+    DefaultCacheStrategyMixin,
+    default_cache_strategy,
+)
 from resourcey.v2.cache.cache_header import CacheHeader
 from resourcey.v2.cache.cache_strategy import (
     CacheStrategy,
@@ -30,7 +34,9 @@ from resourcey.v2.cache.cache_strategy import (
     LastModifiedCacheStrategy,
     OptimisticCacheStrategy,
 )
+from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
+from resourcey.v2.core.service import Action
 from resourcey.v2.sql.resource import SqlResource
 
 
@@ -200,22 +206,43 @@ class HasUpdated(CacheBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ReadOnly(SqlResource[Any]):
+    """A resource narrowed to the read subset, for the read-only default."""
+
+    def get_supported_actions(self) -> frozenset[Action]:
+        return frozenset({Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ})
+
+
 def test_default_is_etag_without_updated_at():
+    resource = SqlResource(NoUpdated, session_factory=_factory())
     assert isinstance(
-        default_cache_strategy(
-            SqlResource(NoUpdated, session_factory=_factory()).get_rest_models()
-        ),
+        default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions()),
         ETagCacheStrategy,
     )
 
 
 def test_default_is_last_modified_with_updated_at():
+    resource = SqlResource(HasUpdated, session_factory=_factory())
     assert isinstance(
-        default_cache_strategy(
-            SqlResource(HasUpdated, session_factory=_factory()).get_rest_models()
-        ),
+        default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions()),
         LastModifiedCacheStrategy,
     )
+
+
+def test_default_is_optimistic_for_read_only():
+    # A read-only surface cannot change, so it gets a freshness window rather
+    # than a validator.
+    resource = ReadOnly(NoUpdated, session_factory=_factory())
+    strategy = default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions())
+    assert isinstance(strategy, OptimisticCacheStrategy)
+    assert strategy.expire_in == DEFAULT_READ_ONLY_EXPIRE_IN
+
+
+def test_read_only_wins_over_updated_at():
+    # Even with an ``updated_at`` field, a read-only resource is optimistic.
+    resource = ReadOnly(HasUpdated, session_factory=_factory())
+    strategy = default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions())
+    assert isinstance(strategy, OptimisticCacheStrategy)
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +265,13 @@ def test_sql_resource_strategy_is_stable_per_instance():
     assert resource.get_cache_strategy() is resource.get_cache_strategy()
 
 
+def test_sql_resource_read_only_defaults_to_optimistic():
+    resource = ReadOnly(HasUpdated, session_factory=_factory())
+    strategy = resource.get_cache_strategy()
+    assert isinstance(strategy, OptimisticCacheStrategy)
+    assert strategy.expire_in == DEFAULT_READ_ONLY_EXPIRE_IN
+
+
 def test_sql_resource_override_seam():
     class Optimistic(SqlResource[Any]):
         def get_cache_strategy(self) -> CacheStrategy[Any]:
@@ -247,6 +281,32 @@ def test_sql_resource_override_seam():
     strategy = resource.get_cache_strategy()
     assert isinstance(strategy, OptimisticCacheStrategy)
     assert strategy.expire_in == 42
+
+
+def test_mixin_is_reusable_outside_sql():
+    # The default policy lives in a storage-agnostic mixin, so a non-SQL backend
+    # inherits it by supplying only the DTO/rest-models and action surface.
+    class Tiny(DefaultCacheStrategyMixin):
+        def __init__(self, dto: type[DTO], actions: frozenset[Action]) -> None:
+            self._dto = dto
+            self._actions = actions
+
+        def get_rest_models(self) -> Any:
+            return self._dto.get_rest_models()
+
+        def get_supported_actions(self) -> frozenset[Action]:
+            return self._actions
+
+    class WithUpdated(DTO):
+        id: int
+        label: str
+        updated_at: datetime
+
+    read_actions = frozenset({Action.READ, Action.SEARCH, Action.COUNT})
+    assert isinstance(
+        Tiny(WithUpdated, frozenset(Action)).get_cache_strategy(), LastModifiedCacheStrategy
+    )
+    assert isinstance(Tiny(WithUpdated, read_actions).get_cache_strategy(), OptimisticCacheStrategy)
 
 
 def test_two_dtos_from_the_same_class_get_distinct_strategies():
@@ -413,6 +473,31 @@ async def test_expiring_strategy_emits_cache_control_and_expires():
         read = await client.get(f"/items/{rid}")
         assert read.headers["cache-control"].startswith("max-age=")
         assert "expires" in read.headers
+    await engine.dispose()
+
+
+async def test_read_only_resource_emits_freshness_only():
+    # A read-only resource defaults to optimistic caching: no validators, just a
+    # freshness window. It has no write route, so seed a row directly.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = ReadOnly(HasUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+    async with maker() as session:
+        session.add(HasUpdated(label="x", updated_at=datetime.now(UTC)))
+        await session.commit()
+
+    from resourcey.v2.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        search = await client.get("/items")
+        assert search.status_code == 200
+        assert "etag" not in search.headers
+        assert "last-modified" not in search.headers
+        assert search.headers["cache-control"].startswith("max-age=")
+        assert "expires" in search.headers
     await engine.dispose()
 
 

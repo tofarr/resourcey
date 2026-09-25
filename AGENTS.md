@@ -384,18 +384,27 @@ agrees" property the all-or-nothing policy rests on. The flat unrolling means
   `cache`. `get_cache_header(items, *, context=...)` hashes the read-model
   projection; `count_cache_header(count, filters)` handles the bare-integer
   `count` route (a count-derived ETag; never last-modified).
-* `cache_defaults.py` — `default_cache_strategy(rest_models)`: last-modified
-  when the read model carries `updated_at`, else ETag.
+* `cache_defaults.py` — the storage-agnostic default policy.
+  `default_cache_strategy(rest_models, supported_actions)` selects, in order: a
+  **read-only** resource (one advertising none of the write actions) →
+  `OptimisticCacheStrategy(expire_in=DEFAULT_READ_ONLY_EXPIRE_IN)` (600s), since
+  a surface that cannot change gains nothing from a validator; else
+  last-modified when the read model carries `updated_at`; else ETag.
+  `is_read_only(actions)` is the write-action test. `DefaultCacheStrategyMixin`
+  packages the default `get_cache_strategy()` — including the per-instance
+  caching — so any backend inherits the policy by supplying only
+  `get_rest_models()` and `get_supported_actions()` rather than copying it.
 
 The wiring: `Resource.get_cache_strategy()` returns `None` in `v2/core` (which
-stays dependency-free); `SqlResource` overrides it to resolve the default
-**per instance** (one `SqlResource` class serves many DTOs, so a class-level
-cache would leak between them) and caches it on the instance. A developer
-overrides the same hook to change the policy. `v2/http/routes.py` reads the
-exposed resource's strategy once, passes it to every route builder, and each
-handler emits `ETag` / `Last-Modified` / `Cache-Control` / `Expires` and
-short-circuits a conditional `GET`/`HEAD` to `304 Not Modified`; a validator
-with no freshness window forces revalidation with `Cache-Control: no-cache`.
+stays dependency-free); `SqlResource` mixes in `DefaultCacheStrategyMixin` and
+so resolves the default **per instance** (one `SqlResource` class serves many
+DTOs, so a class-level cache would leak between them) and caches it on the
+instance. A developer overrides the same hook to change the policy.
+`v2/http/routes.py` reads the exposed resource's strategy once, passes it to
+every route builder, and each handler emits `ETag` / `Last-Modified` /
+`Cache-Control` / `Expires` and short-circuits a conditional `GET`/`HEAD` to
+`304 Not Modified`; a validator with no freshness window forces revalidation
+with `Cache-Control: no-cache`. `specs/cache_defaults.qnt` pins the selection.
 Only the projected REST representation is hashed, so the ETag validates exactly
 the bytes sent.
 
