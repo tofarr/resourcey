@@ -1,15 +1,15 @@
-"""End-to-end REST API tests for the MongoDB message-board example.
+"""End-to-end REST API tests for the v2 MongoDB message-board example.
 
 Each test runs against an **isolated embedded MongoDB database** — a unique
-database name per test on the in-process mongomock server (no external
-MongoDB required, no shared state between tests). MongoDB resources have no
-Alembic migrations; the schema is created implicitly on first write, so the
-suite verifies the full request → router → service → motor/mongomock stack
-without any migration step.
+database name per test on the in-process mongomock server (no external MongoDB
+required, no shared state between tests). MongoDB resources have no Alembic
+migrations; the schema is created implicitly on first write, so the suite
+verifies the full request → router → service → motor/mongomock stack without any
+migration step.
 
-The app is assembled with a fresh ``ResourceManifest`` pointed at the isolated
-database, entered via its async lifecycle (so the Mongo client is built from
-the real config path), and exercised through httpx's ASGI transport.
+The app is assembled with a fresh ``MongoClientManager`` pointed at the isolated
+database, entered via the manifest's async lifecycle (so the client is built
+through the real config path), and exercised through httpx's ASGI transport.
 """
 
 from __future__ import annotations
@@ -19,26 +19,22 @@ from collections.abc import AsyncIterator
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from message_board.message import Message
-from message_board.thread import Thread
 
-from resourcey.config.config_framework import DbConfig, FrameworkConfig
-from resourcey.config.config_runtime import clear_config_cache, set_config
-from resourcey.manifest import ResourceManifest
+from message_board.app import build_app
+from resourcey.v2.mongo.mongo_client import MongoClientManager
+from resourcey.v2.mongo.mongo_config import MongoConfig, MongoConnectionConfig
 
 
 @pytest_asyncio.fixture
 async def client() -> AsyncIterator[AsyncClient]:
     """A fully wired REST client backed by an isolated embedded Mongo database."""
     database = f"e2e_{uuid.uuid4().hex}"
-    config = FrameworkConfig(
-        database=DbConfig(url=f"embedded://{database}"),
-        manifest="message_board.app:manifest",
+    manager = MongoClientManager(
+        MongoConfig(
+            mongo_connections=[MongoConnectionConfig(name="main", url=f"embedded://{database}")]
+        )
     )
-    set_config(config)
-
-    manifest = ResourceManifest(resources=(Thread(), Message()))
-    app = manifest.create_app()
+    manifest, app = build_app(client_manager=manager)
     await manifest.__aenter__()
     try:
         transport = ASGITransport(app=app)
@@ -46,7 +42,6 @@ async def client() -> AsyncIterator[AsyncClient]:
             yield c
     finally:
         await manifest.__aexit__(None, None, None)
-        clear_config_cache()
 
 
 async def _make_thread(client: AsyncClient, title: str = "T") -> dict[str, object]:

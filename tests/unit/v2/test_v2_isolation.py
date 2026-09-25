@@ -11,7 +11,7 @@ inside a ``TYPE_CHECKING`` guard.
 
 It also pins the **layer ranks** inside ``v2``:
 
-    util < core < {sql, http, config, cache, encryption}
+    util < core < {sql, mongo, http, config, cache, encryption}
 
 no module may import a strictly-higher project layer at runtime. This subsumes
 both "``util`` imports nothing project-level" (it is the bottom layer) and
@@ -39,6 +39,7 @@ _LAYER_RANK = {
     "config": 2,
     "encryption": 2,
     "http": 2,
+    "mongo": 2,
     "sql": 2,
 }
 
@@ -155,7 +156,7 @@ def test_v2_imports_flow_upward_only():
         if imports:
             violations[str(path.relative_to(V2_DIR))] = imports
     assert violations == {}, (
-        "v2 layers are ranked util < core < {sql, http, config, cache, encryption}; "
+        "v2 layers are ranked util < core < {sql, mongo, http, config, cache, encryption}; "
         f"these modules import a strictly-higher layer: {violations}"
     )
 
@@ -226,6 +227,7 @@ def test_the_util_files_exist_without_an_init():
     util = V2_DIR / "util"
     names = {p.name for p in sorted(util.glob("*.py"))}
     assert names == {
+        "cursor.py",
         "env_parser.py",
         "import_paths.py",
         "missing.py",
@@ -236,6 +238,46 @@ def test_the_util_files_exist_without_an_init():
         "sort_order.py",
     }
     assert not (util / "__init__.py").exists()
+
+
+def test_the_mongo_files_exist_without_an_init():
+    mongo = V2_DIR / "mongo"
+    names = {p.name for p in sorted(mongo.glob("*.py"))}
+    assert names == {
+        "embedded.py",
+        "mongo_client.py",
+        "mongo_config.py",
+        "mongo_filter_converter.py",
+        "mongo_resource.py",
+        "mongo_service.py",
+        "mongo_sort_converter.py",
+    }
+    assert not (mongo / "__init__.py").exists()
+
+
+def _imports_module(path: pathlib.Path, module: str) -> bool:
+    """Whether ``path`` imports ``module`` (or a submodule) at runtime."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            continue
+        if any(name == module or name.startswith(module + ".") for name in names):
+            return True
+    return False
+
+
+def test_v2_mongo_never_imports_sqlalchemy():
+    """``v2/mongo`` is the non-SQL proof: it must not drag SQLAlchemy into its path."""
+    offenders = [
+        str(p.relative_to(V2_DIR))
+        for p in sorted((V2_DIR / "mongo").rglob("*.py"))
+        if _imports_module(p, "sqlalchemy")
+    ]
+    assert offenders == []
 
 
 def test_the_cache_files_exist_without_an_init():

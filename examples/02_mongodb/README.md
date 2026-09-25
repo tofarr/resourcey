@@ -25,18 +25,26 @@ zero external dependencies:
 # Inside the resourcey repo, `uv sync` builds the parent checkout (your branch);
 # a copied-out example falls back to main — run `uv sync --no-sources` there.
 uv sync
-uv run resourcey migrate upgrade
-uv run uvicorn message_board.app:app --reload --port 8082
+uv run uvicorn message_board.app:app --env-file .env --port 8082
 ```
 
 The app listens on **port 8082**.
 
-To use a real MongoDB server instead, set `RESOURCEY_DATABASE_URL` (the database
-name is the URL path):
+Note the `--env-file .env`: `v2` does no `.env` loading of its own, so the
+process environment must be populated by the caller. There is **no migration
+step** — MongoDB resources have no Alembic migrations; the schema is created
+implicitly on first write (see "Manual migration on read" below).
+
+To use a real MongoDB server instead, set `APP_MONGO_CONNECTIONS_0_URL` (the
+database name is the URL path):
 
 ```bash
-RESOURCEY_DATABASE_URL=mongodb://localhost:27017/message_board uv run uvicorn message_board.app:app --reload --port 8082
+APP_MONGO_CONNECTIONS_0_URL=mongodb://localhost:27017/message_board \
+  uv run uvicorn message_board.app:app --env-file .env --port 8082
 ```
+
+`uv sync` installs `resourcey[mongodb]` (motor); the embedded path needs only
+`mongomock`.
 
 ## Resources
 
@@ -66,8 +74,8 @@ MongoDB resources do **not** use Alembic migrations. Instead, a resource can
 override `migrate_document()` — a hook invoked on every read — to lazily
 upgrade a document to the current shape. The versioning scheme is
 application-defined (e.g. a `schema_version` field on each document). See
-[`message_board/thread.py`](message_board/thread.py) for the resource
-declaration; the default `migrate_document` is a no-op.
+[`message_board/thread.py`](message_board/thread.py) for the DTO declaration
+served by `MongoResource`; the default `migrate_document` is a no-op.
 
 ## Tests
 
