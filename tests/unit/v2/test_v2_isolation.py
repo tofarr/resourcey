@@ -192,6 +192,7 @@ def test_the_sql_files_exist_without_an_init():
         "filter_converter.py",
         "resource.py",
         "service.py",
+        "sort_converter.py",
         "sqlalchemy_2_dto.py",
     }
     assert not (sql / "__init__.py").exists()
@@ -221,6 +222,7 @@ def test_the_util_files_exist_without_an_init():
         "models.py",
         "search_filter.py",
         "singleton.py",
+        "sort_order.py",
     }
     assert not (util / "__init__.py").exists()
 

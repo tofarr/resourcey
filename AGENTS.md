@@ -222,8 +222,9 @@ a developer can drop straight back to SQLAlchemy.
   properties are the escape hatches back to SQLAlchemy.
 * `service.py` — `SqlService` holds the call-scoped `ctx` and the session
   factory and implements the eight actions. `search` does keyset cursor
-  pagination ordered by the identifier; `sort` / `desc` / `filters` are
-  declared but raise `NotImplementedError` until a later PR adds them together.
+  pagination ordered by the identifier, or by a validated `sort` field (with
+  the identifier as a stable tie-breaker) when one is requested; `filters` is
+  pushed into the `WHERE` clause before the page is taken.
 * `sqlalchemy_2_dto.py` — `sqlalchemy_2_dto(model)` infers a DTO declaration
   from an ORM model: column types map back to Python annotations, the primary
   key becomes `id_field_name`, nullability becomes `ann | None`, and
@@ -302,9 +303,10 @@ Where the port differs from `v1`: `get_rest_models()` replaces the
 create/update/read model getters, so each action maps explicitly to its shape
 (`create` → `create_response`, so a one-time-reveal field survives); services
 return DTO instances, so the response is **projected** onto the REST model
-(dropping `MISSING`) in the transport; and `v1`'s sort / filter surface is out
-of scope (#79), so search is `limit` + `cursor` only. Caching is back (issue
-#92) — see the `v2/cache` section below. The service dependency is built
+(dropping `MISSING`) in the transport; `v1`'s filter surface is back (issue
+#79) and its sort surface is back too (issue #97), so search is `limit` +
+`cursor` + `sort` / `desc` + the `<field>__<op>` filter params. Caching is back
+(issue #92) — see the `v2/cache` section below. The service dependency is built
 through the configured `DependencyBuilder` behind the one private helper
 (`_service_dependency`). The error envelope maps only what
 `v2` has now — `NotFoundError`→404, `IntegrityError`→409, `ServiceError`→500,
@@ -368,6 +370,66 @@ equality to the ordering operators (`IS NULL OR <complement>`); and (4) a
 positive pushdown agrees with `matches` on every row — the "convertible ⇒ SQL
 agrees" property the all-or-nothing policy rests on. The flat unrolling means
 `Or`/`Not` normalisation is not expressed.
+
+### `v2/util/sort_order.py` and `v2/sql/sort_converter.py` — sorting (issue #97)
+
+Sorting mirrors filtering, one rung lower in surface. `v2/util/sort_order.py`
+holds the storage-agnostic core: `SortOrder[T]` is a frozen, generic
+`DiscriminatedUnionMixin` whose only method is `compare(a, b) -> CompareResult`
+(`LESS` / `GREATER` / `SAME`), and the initial standard node is
+`AttrSortOrder[ObjT, ValT]` (`attribute`, `descending`) — a single attribute,
+ascending or descending, the `v1` surface. `compare` is the in-memory reference
+semantics (an in-memory backend and the spec use it) and orders by one attribute
+only; `None` sorts first so it is total on a nullable attribute. The identifier
+tie-breaker that makes *paging* total is the backend's job (an `ORDER BY` with
+the identifier appended and the matching keyset predicate), so it is not in the
+node. Multi-attribute sort is a later rung — the union makes it additive.
+
+`v2/sql/sort_converter.py` is the only v2 file importing SQLAlchemy for sorting.
+A single registry keyed on the `SortOrder` type (extensible via
+`register_sort_order`), resolved through a frozen `SqlSortContext(columns,
+id_column)` carrying only the resource's **sortable** columns — the same security
+gate as filtering, so a field projected away cannot be sorted on (its relative
+order leaks the hidden value). `apply(stmt, sort_order)` returns
+`stmt.order_by(<sort> asc/desc, id asc)`, always appending the identifier as a
+tie-breaker, with an import-time completeness assert so a new node without a
+handler fails at startup.
+
+The keyset cursor grew to the `v1` shape: `encode_cursor(..., sort_field,
+ascending, sort_key, id_value)` and `decode_cursor` returns the tuple, with
+`sort_field=None` for the default identifier-ordered case.
+`keyset_predicate(sort_column, id_column, cursor_key, cursor_id, ascending)`
+builds `(sort_key, id) > (cursor_key, cursor_id)` for ascending and the mirrored
+`(sort_key, id) < (cursor_key, cursor_id)` for descending — but it mirrors only
+the sort-key comparison, never the identifier tie-breaker (`ORDER BY key DESC,
+id ASC`), so equal keys step to a *greater* id instead of skipping the row. A
+`None` cursor key is handled with explicit NULL tests (NULLs sort first
+ascending, last descending — `SqlSortConverter` emits `NULLS FIRST` / `NULLS
+LAST`), not a `= NULL` comparison. The predicate collapses to a single id
+comparison when the sort column *is* the id column. `SqlService.search` validates
+the sort field, orders by it, and **rejects** a cursor whose `(sort_field,
+ascending)` does not match the current request (`InvalidInputError` → 400) rather
+than applying the key against the wrong column; changing the sort of a paged
+request therefore means starting a new search (no cursor), matching `v1`. A
+malformed cursor surfaces as `InvalidInputError` (400), not a 500.
+
+The sort surface: `Resource.get_sortable_fields() -> frozenset[str]` is derived
+from the read model (readable ⇒ sortable) and `Resource.get_sort_order_type()`
+returns `None` by default; `SqlResource` derives the surface from `read_response`
+so `?sort=secret` is rejected. `v2/http/routes.py` exposes typed `sort` / `desc`
+query params on search and passes them through; unknown or non-sortable fields
+return 400. `count` is order-free and unaffected. Sorting changes the order of
+the returned items and the ETag already hashes the ordered projection, so
+distinct sorts get distinct validators with no extra wiring.
+
+`specs/sorting.qnt` pins four laws (in `make specs` and CI): (1) `compare` is
+antisymmetric and transitive and equal keys fall back to the identifier (a total
+order); (2) the pushed-down keyset predicate keeps exactly the rows after the
+cursor in the ascending order; (3) descending keeps exactly the rows after the
+cursor in the *descending* order — key descending, equal keys by ascending
+identifier (the tie-breaker never mirrors); and (4) a cursor is accepted only
+under the `(sort_field, ascending)` it was built for. The single-attribute model
+is unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
 
 ### `v2/cache` — the migrated cache surface (issue #92)
 

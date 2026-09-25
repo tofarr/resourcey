@@ -40,6 +40,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.core.dto import DtoField
+from resourcey.v2.core.service import SearchSpec
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.sql.resource import SqlResource
@@ -407,7 +408,7 @@ async def test_renamed_identifier_crud():
                 created,
                 None,
             ]
-            page = await service.search(limit=5)
+            page = await service.search(spec=SearchSpec(limit=5))
             assert [item.code for item in page.items] == ["US"]
     finally:
         await engine.dispose()
@@ -612,12 +613,12 @@ def test_explicit_dto_field_on_the_primary_key_wins_over_conventions():
 
 
 def test_uuid_natural_key_stays_client_supplied():
-    class Country(AdoptedBase):
+    class UuidCountry(AdoptedBase):
         __tablename__ = "uuid_countries"
         code: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
         name: Mapped[str] = mapped_column(String(50))
 
-    dto = sqlalchemy_2_dto(Country)
+    dto = sqlalchemy_2_dto(UuidCountry)
     field = dto.get_fields()["code"]
     assert dto.id_field_name == "code"
     assert field.in_create_request is True

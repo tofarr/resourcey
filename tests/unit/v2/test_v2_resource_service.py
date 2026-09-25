@@ -21,12 +21,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.cache.cache_strategy import ETagCacheStrategy
+from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
     STORAGE_KEY,
     Action,
     NotFoundError,
+    SearchSpec,
     Service,
     ServiceError,
     assert_real_actions,
@@ -151,7 +153,7 @@ async def test_crud_and_count_and_search(resources):
         assert updated.title == "bye"
 
         assert await service.count() == 1
-        page = await service.search(limit=10)
+        page = await service.search(spec=SearchSpec(limit=10))
         assert [item.title for item in page.items] == ["bye"]
 
         await service.delete(created.id)
@@ -200,13 +202,26 @@ async def test_batch_read_and_batch_edit(resources):
         assert edited[1] is None
 
 
-async def test_search_rejects_sort_and_desc_for_now(resources):
+async def test_search_sorts_ascending_and_descending(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
-        with pytest.raises(NotImplementedError):
-            await service.search(sort="title")
-        with pytest.raises(NotImplementedError):
-            await service.search(desc=True)
+        await service.create(_dto_type(Thread)(title="b"))
+        await service.create(_dto_type(Thread)(title="a"))
+        await service.create(_dto_type(Thread)(title="c"))
+        ascending = await service.search(
+            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", False))
+        )
+        assert [item.title for item in ascending.items] == ["a", "b", "c"]
+        descending = await service.search(
+            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", True))
+        )
+        assert [item.title for item in descending.items] == ["c", "b", "a"]
+
+
+async def test_search_rejects_an_unknown_sort_field(resources):
+    _maker, threads, _messages = resources
+    with pytest.raises(InvalidInputError, match="sort field"):
+        threads.resolve_sort_order("nope", False)
 
 
 async def test_search_and_count_accept_a_filter(resources):
@@ -215,7 +230,7 @@ async def test_search_and_count_accept_a_filter(resources):
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
         filtered = build_filter([("title", "eq", "a")])
-        page = await service.search(filters=filtered)
+        page = await service.search(spec=SearchSpec(filters=filtered))
         assert [item.title for item in page.items] == ["a"]
         assert await service.count(filters=filtered) == 1
         assert await service.count() == 2
@@ -226,7 +241,7 @@ async def test_search_orders_by_id_ascending(resources):
     async with threads.get_service() as service:
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
-        page = await service.search(limit=10)
+        page = await service.search(spec=SearchSpec(limit=10))
         assert [item.title for item in page.items] == ["a", "b"]
 
 

@@ -25,7 +25,9 @@ Where the ``v2`` seams differ from ``v1``:
 * filtering is back (issue #79): search and count accept ``<field>__<op>``
   query params, validated against the exposed resource's filter surface (a
   declared :meth:`~resourcey.v2.core.resource.Resource.get_search_filter_type`,
-  else derived from the read model). Sort remains out of scope (#79).
+  else derived from the read model). Sorting is back too (issue #97): search
+  accepts ``sort`` / ``desc``, validated against the exposed resource's
+  :meth:`~resourcey.v2.core.resource.Resource.get_sortable_fields`.
 * caching is back (issue #92): the exposed resource's
   :meth:`~resourcey.v2.core.resource.Resource.get_cache_strategy` drives
   ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires`` headers, and a
@@ -52,7 +54,7 @@ from resourcey.v2.cache.cache_header import CacheHeader
 from resourcey.v2.core.dto import RestModels, request_to_dto
 from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.resource import Resource
-from resourcey.v2.core.service import Action, NotFoundError, Service, ServiceError
+from resourcey.v2.core.service import Action, NotFoundError, SearchSpec, Service, ServiceError
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
 from resourcey.v2.util.missing import MISSING
 from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
@@ -355,14 +357,22 @@ def _add_search_route(
     service_dep: Any,
     strategy: Any,
 ) -> None:
-    """Register ``GET /{resource}`` — cursor-paginated, filterable search.
+    """Register ``GET /{resource}`` — cursor-paginated, filterable, sortable search.
 
-    ``limit`` and ``cursor`` paginate; declared ``<field>__<op>`` query params
+    ``limit`` and ``cursor`` paginate; ``sort`` / ``desc`` order the page
+    (resolved by the exposed resource's
+    :meth:`~resourcey.v2.core.resource.Resource.resolve_sort_order`, an unknown
+    or non-sortable field -> ``400``); declared ``<field>__<op>`` query params
     are collected into a standard :class:`SearchFilter` and pushed down. The
-    surface (fields + operators) comes from the exposed resource's
+    filter surface (fields + operators) comes from the exposed resource's
     :meth:`~resourcey.v2.core.resource.Resource.get_filter_operators` (or a
     declared :meth:`~...get_search_filter_type`); an unknown field or operator,
     or any filter on a resource with no surface, is rejected ``400``.
+
+    The resolved ordering and filter are assembled into one
+    :class:`~resourcey.v2.core.service.SearchSpec`, so ``search`` receives a
+    single validated request object rather than loose ``sort`` / ``desc`` /
+    ``filters``.
     """
     filter_spec = _filter_surface(exposed)
     filter_dep = _filter_dependency(filter_spec)
@@ -371,11 +381,19 @@ def _add_search_route(
         request,
         limit=20,
         cursor=None,
+        sort=None,
+        desc=False,
         values=Depends(filter_dep),  # noqa: B008
         service=Depends(service_dep),  # noqa: B008
     ):
         filters = _resolve_filters(request, filter_spec, values)
-        page = await service.search(limit=limit, cursor=cursor, filters=filters)
+        spec = SearchSpec(
+            limit=limit,
+            cursor=cursor,
+            sort_order=exposed.resolve_sort_order(sort, desc),
+            filters=filters,
+        )
+        page = await service.search(spec=spec)
         body, items = _page_body(page, models.search_response)
         header = _header_for(strategy, items)
         return _cached_json_response(request, body, header)
@@ -384,6 +402,8 @@ def _add_search_route(
         "request": Request,
         "limit": int,
         "cursor": str | None,
+        "sort": str | None,
+        "desc": bool,
         "values": dict,
         "service": Service,
     }

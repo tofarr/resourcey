@@ -53,6 +53,7 @@ from pydantic import BaseModel
 from resourcey.v2.core.dto import RestModels
 from resourcey.v2.core.service import Action, CacheStrategy, Service
 from resourcey.v2.util.search_filter import SearchFilter
+from resourcey.v2.util.sort_order import SortOrder
 
 if TYPE_CHECKING:
     from resourcey.v2.core.manifest import Manifest
@@ -126,6 +127,37 @@ class Resource(ABC, Generic[T]):
         When set, the declared class's ``<attribute>__<op>`` fields *are* the
         filter surface (v1's opt-in style); when ``None`` the surface is derived
         from the read model via :meth:`get_filter_operators`.
+        """
+
+    @abstractmethod
+    def get_sortable_fields(self) -> frozenset[str]:
+        """Field names the outside world may sort on — the sort surface.
+
+        Derived from the read model by default (a field is sortable exactly when
+        it is readable), so a field projected away cannot be sorted on: the
+        relative order of a hidden value leaks it just as its value would.
+        Override to narrow or widen it.
+        """
+
+    @abstractmethod
+    def get_sort_order_type(self) -> type[SortOrder[Any]] | None:
+        """A declared :class:`SortOrder` class, or ``None`` to derive the surface.
+
+        The opt-in escape hatch, symmetric with :meth:`get_search_filter_type`:
+        when set, the declared class's shape drives translation instead of the
+        derived ``(attribute, descending)`` surface.
+        """
+
+    @abstractmethod
+    def resolve_sort_order(self, sort: str | None, desc: bool) -> Any:
+        """Validate ``sort`` / ``desc`` into the ordering a backend will use.
+
+        Returns the resolved sort order (a :class:`SortOrder`, or ``None`` for
+        the default identifier order). An unknown or non-sortable field raises
+        :class:`~resourcey.v2.core.errors.InvalidInputError`. This is where the
+        request's loose ``(sort, desc)`` becomes the *single value* a search then
+        orders, seeks, and encodes its cursor by — so those three cannot disagree.
+        Typed ``Any`` because the concrete :class:`SortOrder` lives in ``v2/util``.
         """
 
     # ------------------------------------------------------------------

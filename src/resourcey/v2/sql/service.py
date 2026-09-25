@@ -6,9 +6,12 @@ there) or opens its own session and owns it; on exit it commits and closes only
 what it opened — the storage-ownership rule from ``v2/core``.
 
 ``search`` implements keyset (seek) cursor pagination ordered by the identifier
-field. The cursor is encrypted (tamper-proof) by an injected
-:class:`~resourcey.v2.encryption.encryption_service.EncryptionService`; sorting
-and filtering are deliberately out of scope for now.
+field by default, or by a validated ``sort`` field (with the identifier as a
+stable tie-breaker) when one is requested. The cursor is encrypted
+(tamper-proof) by an injected
+:class:`~resourcey.v2.encryption.encryption_service.EncryptionService` and
+encodes the sort it was built for, so a cursor reused under a different sort is
+rejected rather than applied against the wrong column.
 
 This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``.
 """
@@ -22,10 +25,18 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from resourcey.v2.core.errors import UnsupportedFilterError
-from resourcey.v2.core.service import STORAGE_KEY, NotFoundError, Page, Service, ServiceError
+from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
+from resourcey.v2.core.service import (
+    STORAGE_KEY,
+    NotFoundError,
+    Page,
+    SearchSpec,
+    Service,
+    ServiceError,
+)
 from resourcey.v2.sql.cursor import decode_cursor, encode_cursor, keyset_predicate
 from resourcey.v2.util.missing import MISSING
+from resourcey.v2.util.sort_order import SortOrder
 
 if TYPE_CHECKING:
     from resourcey.v2.encryption.encryption_service import EncryptionService
@@ -150,39 +161,36 @@ class SqlService(Service[T]):
             raise NotFoundError(id)
         await session.execute(delete(table).where(id_column == id))
 
-    async def search(
-        self,
-        *,
-        limit: int = 20,
-        cursor: str | None = None,
-        sort: str | None = None,
-        desc: bool = False,
-        filters: Any = None,
-    ) -> Page[T]:
-        """Return up to ``limit`` rows by id, with keyset pagination via ``cursor``.
+    async def search(self, *, spec: SearchSpec | None = None) -> Page[T]:
+        """Return up to ``spec.limit`` rows, with keyset pagination via ``spec.cursor``.
 
-        Ordering is fixed to the identifier field; ``sort`` / ``desc`` remain
-        unimplemented. ``filters`` is a standard :class:`SearchFilter` tree (an
-        object filter is lowered first) and is pushed into the ``WHERE`` clause
-        before the page is taken, so a filtered keyset page stays correct.
+        ``spec.sort_order`` is the validated ordering (``None`` for the default
+        identifier order); the identifier is appended as a stable tie-breaker by
+        the sort converter. ``spec.filters`` is a standard
+        :class:`SearchFilter` tree (an object filter is lowered first) and is
+        pushed into the ``WHERE`` clause before the page is taken, so a filtered
+        keyset page stays correct. The next cursor is derived from the *same*
+        resolved ``sort_order`` the page was ordered and sought by, so it can
+        never be rejected by the predicate that follows it.
         """
-        if sort is not None or desc:
-            raise NotImplementedError("v2 SqlService.search does not support sort/desc yet")
+        spec = spec or SearchSpec()
         session = self._active_session()
         table = self._resource.table
-        id_column = self._resource.id_column
-        stmt = select(table).order_by(id_column.asc()).limit(limit + 1)
-        stmt = await self._apply_filters(stmt, session, filters)
-        if cursor is not None:
-            stmt = stmt.where(keyset_predicate(id_column, self._decode(cursor)))
+        stmt = select(table).limit(spec.limit + 1)
+        stmt = self._apply_sort(stmt, spec.sort_order)
+        stmt = await self._apply_filters(stmt, session, spec.filters)
+        if spec.cursor is not None:
+            stmt = stmt.where(self._cursor_predicate(spec.cursor, spec.sort_order))
         rows = (await session.execute(stmt)).mappings().all()
-        has_more = len(rows) > limit
-        page_rows = rows[:limit]
+        has_more = len(rows) > spec.limit
+        page_rows = rows[: spec.limit]
         next_cursor = (
-            self._next_cursor(page_rows[-1][id_column.name]) if has_more and page_rows else None
+            self._next_cursor(page_rows[-1], spec.sort_order) if has_more and page_rows else None
         )
         return Page(
-            items=[self._to_dto(row) for row in page_rows], limit=limit, next_cursor=next_cursor
+            items=[self._to_dto(row) for row in page_rows],
+            limit=spec.limit,
+            next_cursor=next_cursor,
         )
 
     async def count(self, *, filters: Any = None) -> int:
@@ -257,7 +265,7 @@ class SqlService(Service[T]):
         return results
 
     # ------------------------------------------------------------------
-    # Cursor helpers
+    # Cursor + sort helpers
     # ------------------------------------------------------------------
 
     def _encryption(self) -> EncryptionService:
@@ -269,11 +277,84 @@ class SqlService(Service[T]):
             )
         return service
 
-    def _decode(self, cursor: str) -> Any:
-        return decode_cursor(self._encryption(), cursor)
+    def _apply_sort(self, stmt: Any, sort_order: SortOrder[Any] | None) -> Any:
+        """Order ``stmt`` by ``sort_order`` (default: the identifier ascending)."""
+        if sort_order is None:
+            return stmt.order_by(self._resource.id_column.asc())
+        return self._resource.build_sort_converter().apply(stmt, sort_order)
 
-    def _next_cursor(self, id_value: Any) -> str:
-        return encode_cursor(self._encryption(), id_value)
+    def _cursor_predicate(self, cursor: str, sort_order: SortOrder[Any] | None) -> Any:
+        """The keyset ``WHERE`` clause for ``cursor``, bound to the request's sort.
+
+        A cursor built for a different ``(sort field, direction)`` is rejected
+        rather than applied against the wrong column. The sort-order fields
+        (``attribute`` / ``descending``) are read through ``getattr`` so a
+        declared non-``AttrSortOrder`` node that carries them still binds.
+        """
+        cursor_field, cursor_ascending, sort_key, id_value = self._decode(cursor)
+        attribute = getattr(sort_order, "attribute", None)
+        descending = bool(getattr(sort_order, "descending", False))
+        expected_ascending = not descending
+        if cursor_field != attribute or cursor_ascending != expected_ascending:
+            raise InvalidInputError(
+                "Cursor was built for a different sort than the current request; "
+                "start a new search without a cursor when changing sort."
+            )
+        id_column = self._resource.id_column
+        if sort_order is None:
+            return keyset_predicate(
+                sort_column=id_column,
+                id_column=id_column,
+                cursor_key=sort_key,
+                cursor_id=id_value,
+                ascending=True,
+            )
+        return keyset_predicate(
+            sort_column=self._resource.build_sort_context().column_for(cast("str", attribute)),
+            id_column=id_column,
+            cursor_key=sort_key,
+            cursor_id=id_value,
+            ascending=cursor_ascending,
+        )
+
+    def _decode(self, cursor: str) -> tuple[str | None, bool, Any, Any]:
+        """Decrypt and validate a cursor, mapping malformed input to a 400.
+
+        A garbage or tampered cursor makes ``decrypt_value`` raise ``ValueError``
+        (and a payload missing a key makes ``json`` / the tuple unpack raise); both
+        are client errors, not server faults, so they surface as
+        :class:`InvalidInputError`.
+        """
+        try:
+            return decode_cursor(self._encryption(), cursor)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise InvalidInputError(f"Invalid or tampered cursor: {exc}") from exc
+
+    def _next_cursor(self, row: Any, sort_order: SortOrder[Any] | None) -> str:
+        """Encode the cursor pointing past ``row`` under the resolved ``sort_order``.
+
+        The sort state is read from ``sort_order`` (not the raw request) so the
+        emitted cursor always matches the ordering the page was built with.
+        """
+        id_column = self._resource.id_column
+        id_value = row[id_column.name]
+        attribute = getattr(sort_order, "attribute", None)
+        sort_field = attribute if attribute is not None else None
+        ascending = not bool(getattr(sort_order, "descending", False))
+        if attribute is None:
+            sort_key = id_value
+        else:
+            # The row is keyed by *column* names; the sort field is a DTO
+            # attribute, which can differ from the column name.
+            column_name = self._resource.get_column_name(attribute)
+            sort_key = row[column_name]
+        return encode_cursor(
+            self._encryption(),
+            sort_field=sort_field,
+            ascending=ascending,
+            sort_key=sort_key,
+            id_value=id_value,
+        )
 
     # ------------------------------------------------------------------
     # Projection helpers
