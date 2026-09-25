@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.core.errors import InvalidInputError
-from resourcey.v2.core.service import SearchSpec, ServiceError
+from resourcey.v2.core.service import ServiceError
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.sql import cursor as cursor_module
@@ -51,7 +51,7 @@ def _encryption() -> EncryptionService:
 
 
 @pytest_asyncio.fixture
-async def resource() -> AsyncIterator[SqlResource[Any]]:
+async def resource() -> AsyncIterator[SqlResource[Any, Any]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     res = SqlResource(Item, session_factory=maker, encryption_service=_encryption())
@@ -64,13 +64,13 @@ async def resource() -> AsyncIterator[SqlResource[Any]]:
     await engine.dispose()
 
 
-async def _walk(resource: SqlResource[Any], limit: int) -> list[Any]:
+async def _walk(resource: SqlResource[Any, Any], limit: int) -> list[Any]:
     """Walk every page via ``next_cursor`` and return the collected ids."""
     seen: list[int] = []
     cursor: str | None = None
     async with resource.get_service() as service:
         while True:
-            page = await service.search(spec=SearchSpec(limit=limit, cursor=cursor))
+            page = await service.search(limit=limit, cursor=cursor)
             seen.extend(item.id for item in page.items)
             if page.next_cursor is None:
                 break
@@ -86,7 +86,7 @@ async def test_paging_walks_every_row_with_no_gaps_or_repeats(resource):
 
 async def test_last_page_has_no_next_cursor(resource):
     async with resource.get_service() as service:
-        page = await service.search(spec=SearchSpec(limit=10))
+        page = await service.search(limit=10)
     assert len(page.items) == 7
     assert page.next_cursor is None
 
@@ -95,8 +95,8 @@ async def test_page_does_not_overrun_when_limit_equals_remaining(resource):
     # limit == remaining count on a page: an off-by-one would wrongly advertise
     # a next page.
     async with resource.get_service() as service:
-        first = await service.search(spec=SearchSpec(limit=4))
-        second = await service.search(spec=SearchSpec(limit=3, cursor=first.next_cursor))
+        first = await service.search(limit=4)
+        second = await service.search(limit=3, cursor=first.next_cursor)
     assert (len(first.items), first.next_cursor is not None) == (4, True)
     assert (len(second.items), second.next_cursor) == (3, None)
 
@@ -106,7 +106,7 @@ async def test_next_cursor_is_opaque_and_kid_tagged(resource):
     import json
 
     async with resource.get_service() as service:
-        page = await service.search(spec=SearchSpec(limit=1))
+        page = await service.search(limit=1)
     assert page.next_cursor is not None
     assert page.next_cursor.count(".") == 4
     header_b64 = page.next_cursor.split(".")[0]
@@ -119,19 +119,19 @@ async def test_next_cursor_is_opaque_and_kid_tagged(resource):
 
 async def test_tampered_cursor_is_rejected(resource):
     async with resource.get_service() as service:
-        page = await service.search(spec=SearchSpec(limit=1))
+        page = await service.search(limit=1)
         cursor = page.next_cursor
         assert cursor is not None
         segments = cursor.split(".")
         segments[3] = ("A" if segments[3][0] != "A" else "B") + segments[3][1:]
         with pytest.raises(InvalidInputError):
-            await service.search(spec=SearchSpec(limit=1, cursor=".".join(segments)))
+            await service.search(limit=1, cursor=".".join(segments))
 
 
 async def test_garbage_cursor_is_rejected(resource):
     async with resource.get_service() as service:
         with pytest.raises(InvalidInputError):
-            await service.search(spec=SearchSpec(limit=1, cursor="not-a-cursor"))
+            await service.search(limit=1, cursor="not-a-cursor")
 
 
 async def test_cursor_pagination_requires_an_encryption_service():
@@ -142,11 +142,11 @@ async def test_cursor_pagination_requires_an_encryption_service():
         await conn.run_sync(res.metadata.create_all)
     async with res.get_service() as service:
         await service.create(_dto_type()(label="x"))
-        page = await service.search(spec=SearchSpec(limit=1))
+        page = await service.search(limit=1)
         assert page.next_cursor is None
         # A cursor cannot be encoded, so asking for the next page fails clearly.
         with pytest.raises(ServiceError, match="no EncryptionService"):
-            await service.search(spec=SearchSpec(limit=1, cursor="anything"))
+            await service.search(limit=1, cursor="anything")
     await engine.dispose()
 
 

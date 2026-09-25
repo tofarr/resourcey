@@ -34,8 +34,10 @@ class Manifest:
         resources: The resource instances, in declaration order.
     """
 
-    def __init__(self, resources: tuple[Resource[Any], ...] | list[Resource[Any]]) -> None:
-        self.resources: tuple[Resource[Any], ...] = tuple(resources)
+    def __init__(
+        self, resources: tuple[Resource[Any, Any], ...] | list[Resource[Any, Any]]
+    ) -> None:
+        self.resources: tuple[Resource[Any, Any], ...] = tuple(resources)
         self._entered = False
         for resource in self.resources:
             assert_real_actions(type(resource).__name__, resource.get_supported_actions())
@@ -48,7 +50,7 @@ class Manifest:
         """The REST path segment of each resource, in declaration order."""
         return tuple(resource.get_resource_path() for resource in self.resources)
 
-    def get_resource(self, name: str) -> Resource[Any]:
+    def get_resource(self, name: str) -> Resource[Any, Any]:
         """Return the resource whose path is ``name``; raise ``KeyError`` if absent."""
         for resource in self.resources:
             if resource.get_resource_path() == name:

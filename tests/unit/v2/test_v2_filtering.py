@@ -29,7 +29,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from resourcey.v2.core.dto import DtoField
 from resourcey.v2.core.errors import UnsupportedFilterError
 from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.service import SearchSpec
 from resourcey.v2.http.app import create_app
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.resource import SqlResource
@@ -219,7 +218,7 @@ class Thing(SqlBase):
 
 
 @pytest_asyncio.fixture
-async def sql_env() -> AsyncIterator[tuple[Any, SqlResource[Any]]]:
+async def sql_env() -> AsyncIterator[tuple[Any, SqlResource[Any, Any]]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     resource = SqlResource(Thing, session_factory=maker)
@@ -240,7 +239,7 @@ async def sql_env() -> AsyncIterator[tuple[Any, SqlResource[Any]]]:
     await engine.dispose()
 
 
-async def _ids(resource: SqlResource[Any], filter_: SearchFilter[Any]) -> list[int]:
+async def _ids(resource: SqlResource[Any, Any], filter_: SearchFilter[Any]) -> list[int]:
     from sqlalchemy import select
 
     async with resource._session_factory() as session:
@@ -402,11 +401,9 @@ class TestFilterSurfaceQueries:
     async def test_search_and_count_filter(self, sql_env) -> None:
         _maker, resource = sql_env
         async with resource.get_service() as service:
-            page = await service.search(
-                spec=SearchSpec(filters=build_filter([("name", "contains", "b")]))
-            )
+            page = await service.search(search_filter=build_filter([("name", "contains", "b")]))
             assert [item.id for item in page.items] == [2]
-            assert await service.count(filters=build_filter([("score", "ge", 10)])) == 1
+            assert await service.count(search_filter=build_filter([("score", "ge", 10)])) == 1
             assert await service.count() == 3
 
 
@@ -426,7 +423,7 @@ class Widget(ApiBase):
 
 
 @pytest_asyncio.fixture
-async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any]]]:
+async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any, Any]]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     widgets = SqlResource(Widget, session_factory=maker)
@@ -504,7 +501,7 @@ class TestFilterIterationFallback:
             # fallback is exercised by a filter referencing a relationship-like
             # attribute that has no column.
             page = await service.search(
-                spec=SearchSpec(filters=WeirdFilter(score__ge=5)),
+                search_filter=WeirdFilter(score__ge=5),
             )
             assert [item.id for item in page.items] == [1, 2]
 
@@ -512,11 +509,11 @@ class TestFilterIterationFallback:
         _maker, resource = sql_env
         resource.allow_filter_iteration = True
         async with resource.get_service() as service:
-            page = await service.search(spec=SearchSpec(filters=attr("nope", EqFilter(value=1))))
+            page = await service.search(search_filter=attr("nope", EqFilter(value=1)))
             assert page.items == []
 
     async def test_unconvertible_without_opt_in_raises(self, sql_env) -> None:
         _maker, resource = sql_env
         async with resource.get_service() as service:
             with pytest.raises(UnsupportedFilterError):
-                await service.search(spec=SearchSpec(filters=attr("nope", EqFilter(value=1))))
+                await service.search(search_filter=attr("nope", EqFilter(value=1)))

@@ -27,15 +27,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.service import (
+    DEFAULT_LIMIT,
     STORAGE_KEY,
+    Action,
+    Create,
+    Delete,
     NotFoundError,
     Page,
-    SearchSpec,
     Service,
     ServiceError,
+    Update,
 )
 from resourcey.v2.sql.cursor import decode_cursor, encode_cursor, keyset_predicate
 from resourcey.v2.util.missing import MISSING
+from resourcey.v2.util.search_filter import SearchFilter
 from resourcey.v2.util.sort_order import SortOrder
 
 if TYPE_CHECKING:
@@ -43,9 +48,10 @@ if TYPE_CHECKING:
     from resourcey.v2.sql.resource import SqlResource
 
 T = TypeVar("T", bound=BaseModel)
+K = TypeVar("K")
 
 
-class SqlService(Service[T]):
+class SqlService(Service[T, K]):
     """The standard actions over a SQL table, with keyset cursor pagination.
 
     Holds the call-scoped ``ctx`` and the session factory. On enter it adopts
@@ -56,7 +62,7 @@ class SqlService(Service[T]):
 
     def __init__(
         self,
-        resource: SqlResource[T],
+        resource: SqlResource[T, K],
         ctx: MutableMapping[Any, Any],
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -71,7 +77,7 @@ class SqlService(Service[T]):
     # Lifecycle + storage ownership
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> SqlService[T]:
+    async def __aenter__(self) -> SqlService[T, K]:
         await super().__aenter__()
         session = self._ctx.get(STORAGE_KEY)
         if session is None:
@@ -118,7 +124,7 @@ class SqlService(Service[T]):
         )
         return self._to_dto(row)
 
-    async def read(self, id: Any) -> T:  # noqa: A002
+    async def read(self, id: K) -> T:  # noqa: A002
         """Fetch one DTO by id; raise :class:`NotFoundError` if absent."""
         session = self._active_session()
         found = (await session.execute(_by_id(self._resource.id_column, id))).mappings().first()
@@ -151,7 +157,7 @@ class SqlService(Service[T]):
             await session.execute(update(table).where(id_column == id_value).values(**columns))
         return await self.read(id_value)
 
-    async def delete(self, id: Any) -> None:  # noqa: A002
+    async def delete(self, id: K) -> None:  # noqa: A002
         """Delete by id; raise :class:`NotFoundError` if absent."""
         session = self._active_session()
         table = self._resource.table
@@ -161,43 +167,48 @@ class SqlService(Service[T]):
             raise NotFoundError(id)
         await session.execute(delete(table).where(id_column == id))
 
-    async def search(self, *, spec: SearchSpec | None = None) -> Page[T]:
-        """Return up to ``spec.limit`` rows, with keyset pagination via ``spec.cursor``.
+    async def search(
+        self,
+        search_filter: SearchFilter[T] | None = None,
+        sort_order: SortOrder[T] | None = None,
+        cursor: str | None = None,
+        limit: int = DEFAULT_LIMIT,
+    ) -> Page[T]:
+        """Return up to ``limit`` rows, with keyset pagination via ``cursor``.
 
-        ``spec.sort_order`` is the validated ordering (``None`` for the default
+        ``sort_order`` is the validated ordering (``None`` for the default
         identifier order); the identifier is appended as a stable tie-breaker by
-        the sort converter. ``spec.filters`` is a standard
+        the sort converter. ``search_filter`` is a standard
         :class:`SearchFilter` tree (an object filter is lowered first) and is
         pushed into the ``WHERE`` clause before the page is taken, so a filtered
         keyset page stays correct. The next cursor is derived from the *same*
-        resolved ``sort_order`` the page was ordered and sought by, so it can
-        never be rejected by the predicate that follows it.
+        ``sort_order`` the page was ordered and sought by, so it can never be
+        rejected by the predicate that follows it.
         """
-        spec = spec or SearchSpec()
         session = self._active_session()
         table = self._resource.table
-        stmt = select(table).limit(spec.limit + 1)
-        stmt = self._apply_sort(stmt, spec.sort_order)
-        stmt = await self._apply_filters(stmt, session, spec.filters)
-        if spec.cursor is not None:
-            stmt = stmt.where(self._cursor_predicate(spec.cursor, spec.sort_order))
+        stmt = select(table).limit(limit + 1)
+        stmt = self._apply_sort(stmt, sort_order)
+        stmt = await self._apply_filters(stmt, session, search_filter)
+        if cursor is not None:
+            stmt = stmt.where(self._cursor_predicate(cursor, sort_order))
         rows = (await session.execute(stmt)).mappings().all()
-        has_more = len(rows) > spec.limit
-        page_rows = rows[: spec.limit]
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
         next_cursor = (
-            self._next_cursor(page_rows[-1], spec.sort_order) if has_more and page_rows else None
+            self._next_cursor(page_rows[-1], sort_order) if has_more and page_rows else None
         )
         return Page(
             items=[self._to_dto(row) for row in page_rows],
-            limit=spec.limit,
+            limit=limit,
             next_cursor=next_cursor,
         )
 
-    async def count(self, *, filters: Any = None) -> int:
-        """Return the number of rows matching ``filters`` (all rows when ``None``)."""
+    async def count(self, search_filter: SearchFilter[T] | None = None) -> int:
+        """Return the number of rows matching ``search_filter`` (all rows when ``None``)."""
         session = self._active_session()
         stmt = select(func.count()).select_from(self._resource.table)
-        stmt = await self._apply_filters(stmt, session, filters)
+        stmt = await self._apply_filters(stmt, session, search_filter)
         result = await session.execute(stmt)
         return int(result.scalar_one())
 
@@ -205,19 +216,21 @@ class SqlService(Service[T]):
     # Filter pushdown
     # ------------------------------------------------------------------
 
-    async def _apply_filters(self, stmt: Any, session: AsyncSession, filters: Any) -> Any:
-        """Push ``filters`` into ``stmt``'s WHERE clause (all-or-nothing).
+    async def _apply_filters(
+        self, stmt: Any, session: AsyncSession, search_filter: SearchFilter[Any] | None
+    ) -> Any:
+        """Push ``search_filter`` into ``stmt``'s WHERE clause (all-or-nothing).
 
-        ``filters`` is a standard filter tree; an object filter lowers itself
-        first, so a custom filter needs no backend handler. Conversion is
+        ``search_filter`` is a standard filter tree; an object filter lowers
+        itself first, so a custom filter needs no backend handler. Conversion is
         all-or-nothing per filter: an unconvertible node raises
         :class:`UnsupportedFilterError` unless the resource opted into the in-memory
         iteration fallback (which needs the live session), because silently
         skipping a filter could leak every row of a permission scope.
         """
-        if filters is None:
+        if search_filter is None:
             return stmt
-        standard = filters.create_standard_filter()
+        standard = search_filter.create_standard_filter()
         converter = self._resource.build_filter_converter(session)
         try:
             await converter.resolve()
@@ -245,7 +258,7 @@ class SqlService(Service[T]):
         ]
         return stmt.where(self._resource.id_column.in_(surviving))
 
-    async def batch_read(self, ids: list[Any]) -> list[T | None]:
+    async def batch_read(self, ids: list[K]) -> list[T | None]:
         """Return DTOs positionally aligned with ``ids`` (``None`` for absent)."""
         session = self._active_session()
         table = self._resource.table
@@ -254,15 +267,47 @@ class SqlService(Service[T]):
         by_id = {row[id_column.name]: self._to_dto(row) for row in rows}
         return [by_id.get(i) for i in ids]
 
-    async def batch_edit(self, edits: list[T]) -> list[T | None]:
-        """Apply each update DTO (carrying its own id); results align with ``edits``."""
+    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
+        """Apply each :class:`Edit`; results align positionally with ``edits``.
+
+        A create / update yields the resulting DTO, a delete yields ``None``
+        (nothing to return), and a miss (an absent id on update / delete) also
+        yields ``None``.
+
+        A create / delete is refused with :class:`InvalidInputError` unless the
+        resource *declares* the matching action, so a batch can never reach an
+        action the resource does not expose (the transport narrows the body the
+        same way; this is the backend's own guard for direct service callers).
+        """
+        supported = self._resource.get_supported_actions()
         results: list[T | None] = []
-        for payload in edits:
-            try:
-                results.append(await self.update(payload))
-            except NotFoundError:
+        for edit in edits:
+            if isinstance(edit, Create):
+                if Action.CREATE not in supported:
+                    raise InvalidInputError("batch_edit cannot create: create is not supported")
+                results.append(await self.create(edit.item))
+            elif isinstance(edit, Update):
+                results.append(await self._update_or_none(edit.item))
+            else:
+                if Action.DELETE not in supported:
+                    raise InvalidInputError("batch_edit cannot delete: delete is not supported")
+                await self._delete_or_none(edit.id)
                 results.append(None)
         return results
+
+    async def _update_or_none(self, payload: T) -> T | None:
+        """``update`` but an absent id yields ``None`` instead of raising."""
+        try:
+            return await self.update(payload)
+        except NotFoundError:
+            return None
+
+    async def _delete_or_none(self, id: K) -> None:  # noqa: A002
+        """``delete`` but an absent id is a no-op instead of raising."""
+        try:
+            await self.delete(id)
+        except NotFoundError:
+            return
 
     # ------------------------------------------------------------------
     # Cursor + sort helpers

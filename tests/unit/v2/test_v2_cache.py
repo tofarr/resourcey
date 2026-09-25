@@ -235,7 +235,7 @@ class HasUpdated(CacheBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class ReadOnly(SqlResource[Any]):
+class ReadOnly(SqlResource[Any, Any]):
     """A resource narrowed to the read subset, for the read-only default."""
 
     def get_supported_actions(self) -> frozenset[Action]:
@@ -282,7 +282,7 @@ def test_mixin_keeps_the_abstract_contract():
     # instantiation, not at the first request.
     from resourcey.v2.core.resource import Resource
 
-    class Incomplete(DefaultCacheStrategyMixin, Resource[Any]):
+    class Incomplete(DefaultCacheStrategyMixin, Resource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Action]:
             return frozenset({Action.READ})
 
@@ -318,7 +318,7 @@ def test_sql_resource_read_only_defaults_to_optimistic():
 
 
 def test_sql_resource_override_seam():
-    class Optimistic(SqlResource[Any]):
+    class Optimistic(SqlResource[Any, Any]):
         def get_cache_strategy(self) -> CacheStrategy[Any]:
             return OptimisticCacheStrategy(expire_in=42)
 
@@ -468,7 +468,9 @@ async def test_batch_read_emits_etag_and_304(client: AsyncClient):
 
 async def test_batch_edit_emits_etag(client: AsyncClient):
     created = (await client.post("/items", json={"label": "a"})).json()
-    edited = await client.post("/items/batch-edit", json=[{"id": created["id"], "label": "b"}])
+    edited = await client.post(
+        "/items/batch-edit", json=[{"kind": "Update", "item": {"id": created["id"], "label": "b"}}]
+    )
     assert edited.status_code == 200
     assert "etag" in edited.headers
 
@@ -499,7 +501,7 @@ async def test_validator_only_last_modified_emits_no_cache():
 
 
 async def test_expiring_strategy_emits_cache_control_and_expires():
-    class EtagExpiring(SqlResource[Any]):
+    class EtagExpiring(SqlResource[Any, Any]):
         def get_cache_strategy(self) -> CacheStrategy[Any]:
             return ETagCacheStrategy(expire_in=120)
 
@@ -573,7 +575,7 @@ async def test_read_only_resource_count_has_no_validator():
 
 
 async def test_optimistic_strategy_emits_freshness_only():
-    class Optimistic(SqlResource[Any]):
+    class Optimistic(SqlResource[Any, Any]):
         def get_cache_strategy(self) -> CacheStrategy[Any]:
             return OptimisticCacheStrategy(expire_in=60)
 
@@ -597,7 +599,7 @@ async def test_optimistic_strategy_emits_freshness_only():
 
 
 async def test_no_strategy_emits_no_cache_headers():
-    class Uncached(SqlResource[Any]):
+    class Uncached(SqlResource[Any, Any]):
         def get_cache_strategy(self) -> Any:
             return None
 

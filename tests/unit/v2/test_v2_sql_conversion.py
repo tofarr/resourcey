@@ -40,7 +40,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.core.dto import DtoField
-from resourcey.v2.core.service import SearchSpec
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.sql.resource import SqlResource
@@ -325,7 +324,7 @@ def test_required_field_is_not_null():
 
 
 @pytest_asyncio.fixture
-async def widget_resources() -> AsyncIterator[tuple[SqlResource[Any], AsyncSession]]:
+async def widget_resources() -> AsyncIterator[tuple[SqlResource[Any, Any], AsyncSession]]:
     """A resource over the model plus a session over a fresh in-memory SQLite."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -408,7 +407,7 @@ async def test_renamed_identifier_crud():
                 created,
                 None,
             ]
-            page = await service.search(spec=SearchSpec(limit=5))
+            page = await service.search(limit=5)
             assert [item.code for item in page.items] == ["US"]
     finally:
         await engine.dispose()
@@ -436,7 +435,7 @@ class Post(AdoptedBase):
 
 
 @pytest_asyncio.fixture
-async def post_resources() -> AsyncIterator[tuple[SqlResource[Any], AsyncSession]]:
+async def post_resources() -> AsyncIterator[tuple[SqlResource[Any, Any], AsyncSession]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     resource = SqlResource(Post, session_factory=maker)

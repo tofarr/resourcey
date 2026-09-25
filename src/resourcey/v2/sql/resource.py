@@ -46,9 +46,10 @@ if TYPE_CHECKING:
     from resourcey.v2.encryption.encryption_service import EncryptionService
 
 T = TypeVar("T", bound=BaseModel)
+K = TypeVar("K")
 
 
-class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
+class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     """The SQL backend: an ORM model served by :class:`SqlService`.
 
     Args:
@@ -250,7 +251,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
         """Every :class:`Action`; a subclass narrows by overriding."""
         return frozenset(Action)
 
-    def get_exposed_resource(self) -> Resource[T] | None:
+    def get_exposed_resource(self) -> Resource[T, K] | None:
         """The resource the outside world sees (default: ``self``)."""
         return self
 
@@ -258,7 +259,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
     # Service seam
     # ------------------------------------------------------------------
 
-    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T]:
+    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build a :class:`SqlService` over ``ctx`` and the injected session factory."""
         return SqlService(self, ctx if ctx is not None else {}, self._session_factory)
 
@@ -274,7 +275,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
         """The manifest that registered this resource, or ``None``."""
         return self._manifest
 
-    async def __aenter__(self) -> Resource[T]:
+    async def __aenter__(self) -> Resource[T, K]:
         """Enter the resource's runtime lifecycle (guards against double entry)."""
         if self._entered:
             raise ServiceError(f"{type(self).__name__} is already entered")

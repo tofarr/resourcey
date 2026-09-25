@@ -61,7 +61,7 @@ class DependencyBuilder(DiscriminatedUnionMixin, ABC):
     """Build the FastAPI dependency that yields a resource's per-request service."""
 
     @abstractmethod
-    def get_service_dependency(self, resource: Resource[Any]) -> Callable[..., object]:
+    def get_service_dependency(self, resource: Resource[Any, Any]) -> Callable[..., object]:
         """Generate a service dependency for the resource given.
 
         The returned callable is used directly as a FastAPI dependency, so it
@@ -72,8 +72,8 @@ class DependencyBuilder(DiscriminatedUnionMixin, ABC):
 class DefaultDependencyBuilder(DependencyBuilder):
     """The default builder: the resource's own service over the request-scoped ctx."""
 
-    def get_service_dependency(self, resource: Resource[Any]) -> Callable[..., object]:
-        async def dependency(request: Request) -> AsyncIterator[Service[Any]]:
+    def get_service_dependency(self, resource: Resource[Any, Any]) -> Callable[..., object]:
+        async def dependency(request: Request) -> AsyncIterator[Service[Any, Any]]:
             async with resource.get_service(request_ctx(request)) as service:
                 yield service
 

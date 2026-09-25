@@ -83,7 +83,7 @@ class Hidden(AppBase):
     value: Mapped[str] = mapped_column(String(50))
 
 
-class HiddenResource(SqlResource[Any]):
+class HiddenResource(SqlResource[Any, Any]):
     """A resource the outside world never sees (``get_exposed_resource() is None``)."""
 
     def get_exposed_resource(self) -> None:
@@ -162,10 +162,75 @@ async def test_batch_read_and_batch_edit_over_http(client: AsyncClient):
 
     edited = await client.post(
         "/threads/batch-edit",
-        json=[{"id": created["id"], "title": "edited"}, {"id": 999, "title": "nope"}],
+        json=[
+            {"kind": "Update", "item": {"id": created["id"], "title": "edited"}},
+            {"kind": "Update", "item": {"id": 999, "title": "nope"}},
+            {"kind": "Create", "item": {"title": "created"}},
+            {"kind": "Delete", "id": created["id"]},
+        ],
     )
     assert edited.status_code == 200
-    assert edited.json() == [{"id": created["id"], "title": "edited"}, None]
+    body = edited.json()
+    assert body[0] == {"id": created["id"], "title": "edited"}
+    assert body[1] is None
+    assert body[2]["title"] == "created"
+    assert body[3] is None
+
+
+async def test_batch_edit_rejects_an_unknown_kind(client: AsyncClient):
+    rejected = await client.post(
+        "/threads/batch-edit",
+        json=[{"kind": "Frobnicate", "id": 1}],
+    )
+    assert rejected.status_code == 422
+
+    # ``kind`` is required, so an untagged item is rejected too.
+    untagged = await client.post("/threads/batch-edit", json=[{"item": {"title": "x"}}])
+    assert untagged.status_code == 422
+
+
+async def test_batch_edit_narrows_to_declared_actions():
+    """A resource that exposes no create / delete cannot reach them via batch-edit."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    class UpdateOnlyThread(SqlResource[Any, Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset(
+                {
+                    Action.READ,
+                    Action.UPDATE,
+                    Action.SEARCH,
+                    Action.COUNT,
+                    Action.BATCH_READ,
+                    Action.BATCH_EDIT,
+                }
+            )
+
+    threads = UpdateOnlyThread(Thread, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(AppBase.metadata.create_all)
+
+    manifest: Manifest = Manifest(resources=[threads])
+    async for c in _make_client(manifest, create_app(manifest)):
+        # The create / delete routes are correctly not mounted...
+        assert (await c.post("/threads", json={"title": "t"})).status_code == 405
+        # ...and neither kind is accepted through batch-edit.
+        assert (
+            await c.post("/threads/batch-edit", json=[{"kind": "Create", "item": {"title": "x"}}])
+        ).status_code == 422
+        assert (
+            await c.post("/threads/batch-edit", json=[{"kind": "Delete", "id": 1}])
+        ).status_code == 422
+        # An update of a missing id is a no-op (never a write), so nothing was
+        # created and nothing exists.
+        assert (
+            await c.post(
+                "/threads/batch-edit", json=[{"kind": "Update", "item": {"id": 1, "title": "u"}}]
+            )
+        ).json() == [None]
+        assert (await c.get("/threads/count")).json() == 0
+    await engine.dispose()
 
 
 async def test_second_resource_serves_its_own_derived_models(client: AsyncClient):
@@ -391,7 +456,7 @@ async def test_register_routes_narrows_to_supported_actions():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
-    class ReadOnlyThread(SqlResource[Any]):
+    class ReadOnlyThread(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Action]:
             return frozenset({Action.READ, Action.SEARCH, Action.COUNT})
 
@@ -569,7 +634,7 @@ class RecordingBuilder(DependencyBuilder):
 
     seen: list[Any] = Field(default_factory=list)
 
-    def get_service_dependency(self, resource: Resource[Any]) -> Any:
+    def get_service_dependency(self, resource: Resource[Any, Any]) -> Any:
         self.seen.append(resource)
         inner_dependency = DefaultDependencyBuilder().get_service_dependency(resource)
 
@@ -621,7 +686,7 @@ async def test_builder_dependency_may_declare_arbitrary_fastapi_parameters():
         return "principal"
 
     class AuthComposingBuilder(DependencyBuilder):
-        def get_service_dependency(self, resource: Resource[Any]) -> Any:
+        def get_service_dependency(self, resource: Resource[Any, Any]) -> Any:
             inner = DefaultDependencyBuilder().get_service_dependency(resource)
 
             async def dependency(request: Request, principal: str = Depends(auth)) -> Any:
@@ -646,7 +711,7 @@ async def test_builder_dependency_may_declare_arbitrary_fastapi_parameters():
 
 def test_builder_that_raises_fails_at_registration():
     class ExplodingBuilder(DependencyBuilder):
-        def get_service_dependency(self, resource: Resource[Any]) -> Any:
+        def get_service_dependency(self, resource: Resource[Any, Any]) -> Any:
             raise RuntimeError("misconfigured")
 
     threads = SqlResource(Thread, session_factory=_dummy_maker())
@@ -656,7 +721,7 @@ def test_builder_that_raises_fails_at_registration():
 
 def test_builder_returning_a_non_callable_fails_at_registration():
     class BadBuilder(DependencyBuilder):
-        def get_service_dependency(self, resource: Resource[Any]) -> Any:
+        def get_service_dependency(self, resource: Resource[Any, Any]) -> Any:
             return None
 
     threads = SqlResource(Thread, session_factory=_dummy_maker())
@@ -678,7 +743,7 @@ def test_builder_cannot_change_the_route_set():
     assert router.routes == []
 
 
-class ExposingResource(SqlResource[Any]):
+class ExposingResource(SqlResource[Any, Any]):
     """Exposes another resource (a projection): the inner drives the routes."""
 
     def __init__(self, *, model: Any, session_factory: Any, exposed_resource: Any) -> None:

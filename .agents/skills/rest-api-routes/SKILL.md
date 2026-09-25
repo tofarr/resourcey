@@ -54,9 +54,19 @@ Every generated resource service exposes the **standard actions** over REST:
   is not a separate privilege from listing.
 * `update` is a partial merge (PATCH semantics), never a full replace.
 * `batch_edit` and `batch_read` accept an array and return an array
-  positionally aligned with the input: each position `i` holds the entity for
-  the `i`-th input id, or `null` if that id does not exist. The response
-  length always equals the input length.
+  positionally aligned with the input: each position `i` carries a result for
+  the `i`-th input, or `null` when there is nothing to return (an absent id, or
+  a delete). The response length always equals the input length.
+* `batch_edit`'s body is a **`kind`-discriminated union** so one batch can mix
+  operations: `{"kind": "Create", "item": <create body>}`,
+  `{"kind": "Update", "item": {<id>, ...partial body}}`, and
+  `{"kind": "Delete", "<id>": <id>}`. A `Create` / `Update` yields the entity
+  (projected onto the create / update response respectively); a `Delete` yields
+  `null` (nothing to return), as does an `Update` / `Delete` for an absent id.
+  The union is **narrowed to the actions the resource declares**: a resource
+  that does not expose `create` / `delete` admits only the `Update` kind (the
+  declaration is the single source of truth, so a batch cannot reach an action
+  the resource never exposed).
 * All actions are permission-checked before execution (see `auth-rbac` skill).
 
 ## Error shapes

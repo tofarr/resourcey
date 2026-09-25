@@ -40,6 +40,11 @@ module resource_actions {
   // A single (id, value) update within a batch_edit list.
   type BatchUpdate = { id: int, value: Entity }
 
+  // One item of a batch_edit: a create (value), an update (id + value), or a
+  // delete (id). This mirrors the Edit union (Create / Update / Delete) the
+  // service accepts, so one batch can mix all three operations.
+  type Edit = CreateEdit(Entity) | UpdateEdit(BatchUpdate) | DeleteEdit(int)
+
   // A predicate over an entity. Equality matches a specific value; `in`
   // matches membership in an accepted set (empty set => matches nothing).
   // None means "no restriction on this attribute".
@@ -140,31 +145,56 @@ module resource_actions {
       acc.append(if (entities.keys().contains(i)) Present(entities.get(i)) else Absent)
     )
 
-  // batch_edit: apply a list of updates positionally; absent ids are no-ops.
-  // The merge is idempotent: re-applying the same batch yields the same state
-  // and leaves absent ids untouched. The positional result list is computed
-  // by ``batch_edit_result``.
-  action batch_edit(updates: List[BatchUpdate]): bool = {
-    val present = updates.foldl(Set(0).filter(x => false), (acc, u) =>
-      if (entities.keys().contains(u.id)) acc.union(Set(u.id)) else acc
-    )
+  // batch_edit: apply a list of edits (create / update / delete) positionally.
+  // A CreateEdit allocates a new id and stores the value (as create does); an
+  // UpdateEdit overwrites an existing id and is a no-op when the id is absent;
+  // a DeleteEdit removes an existing id and is a no-op when absent. The
+  // positional result list is computed by ``batch_edit_result``.
+  action batch_edit(edits: List[Edit]): bool = {
+    val outcome = apply_edits(entities, nextId, edits)
     all {
-      entities' = present.fold(
-        entities,
-        (acc, k) => acc.put(k, updates.foldl(0, (v, u) => if (u.id == k) u.value else v))
-      ),
-      nextId' = nextId,
+      entities' = outcome._1,
+      nextId' = outcome._2,
       true,
     }
   }
 
-  // The positional result of a batch_edit: each position i holds the updated
-  // entity for updates[i].id or Absent when that id was absent (no write).
-  // Read against the *post-edit* state.
-  def batch_edit_result(updates: List[BatchUpdate]): List[BatchResult] =
-    updates.foldl(List(), (acc, u) =>
-      acc.append(if (entities.keys().contains(u.id)) Present(u.value) else Absent)
+  // Fold a list of edits over (state, counter), allocating ids for creates and
+  // accumulating each edit's positional result *as it is applied*. Computing the
+  // result per edit (rather than from the final state) matters when a later edit
+  // deletes an id an earlier update touched: that update still yields its value.
+  pure def apply_edits(
+    state: int -> Entity,
+    counter: int,
+    edits: List[Edit],
+  ): (int -> Entity, int, List[BatchResult]) =
+    edits.foldl((state, counter, List()), (acc, e) =>
+      match e {
+        CreateEdit(v) =>
+          (acc._1.put(acc._2, v), acc._2 + 1, acc._3.append(Present(v))) |
+        UpdateEdit(u) =>
+          if (acc._1.keys().contains(u.id))
+            (acc._1.put(u.id, u.value), acc._2, acc._3.append(Present(u.value)))
+          else
+            (acc._1, acc._2, acc._3.append(Absent)) |
+        DeleteEdit(i) =>
+          if (acc._1.keys().contains(i))
+            (
+              acc._1.keys().filter(k => k != i).fold(Map(), (m, k) => m.put(k, acc._1.get(k))),
+              acc._2,
+              acc._3.append(Absent),
+            )
+          else
+            (acc._1, acc._2, acc._3.append(Absent))
+      }
     )
+
+  // The positional result a batch_edit would return, computed from the state it
+  // is called in (call it *before* applying to compare against the action). A
+  // create / update holds the resulting entity, a delete (nothing to return)
+  // and a miss are Absent.
+  def batch_edit_result(edits: List[Edit]): List[BatchResult] =
+    apply_edits(entities, nextId, edits)._3
 
   // Invariant: nextId is always greater than every stored key.
   val keysAreBelowCounter = entities.keys().forall(k => k < nextId)
@@ -228,9 +258,32 @@ module resource_actions {
         entities' = entities,
         nextId' = nextId,
       })
-      .then(batch_edit(List({ id: 1, value: 100 }, { id: 2, value: 200 }, { id: 999, value: 0 })))
       .then(all {
-        assert(read(1) == 100),
+        // The positional result of the mixed batch below, predicted from the
+        // pre-edit state: updates carry their resulting value, the delete and
+        // the absent-id update are Absent, and the create carries its value.
+        assert(batch_edit_result(List(
+          UpdateEdit({ id: 1, value: 100 }),
+          UpdateEdit({ id: 2, value: 200 }),
+          DeleteEdit(1),
+          UpdateEdit({ id: 999, value: 0 }),
+          CreateEdit(300),
+        )) == List(Present(100), Present(200), Absent, Absent, Present(300))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      // A mixed batch: update id 1, update id 2, delete id 1, update an absent
+      // id 999, then create a new entity.
+      .then(batch_edit(List(
+        UpdateEdit({ id: 1, value: 100 }),
+        UpdateEdit({ id: 2, value: 200 }),
+        DeleteEdit(1),
+        UpdateEdit({ id: 999, value: 0 }),
+        CreateEdit(300),
+      )))
+      .then(all {
+        // id 1 was updated then deleted -> gone.
+        assert(not(entities.keys().contains(1))),
         entities' = entities,
         nextId' = nextId,
       })
@@ -240,10 +293,9 @@ module resource_actions {
         nextId' = nextId,
       })
       .then(all {
-        // batch_edit_result is 1:1 with the input: present ids carry the
-        // updated value, the absent id (999) is Absent.
-        assert(batch_edit_result(List({ id: 1, value: 100 }, { id: 2, value: 200 }, { id: 999, value: 0 }))
-          == List(Present(100), Present(200), Absent)),
+        // the create allocated id 3 (nextId was 3) with value 300.
+        assert(read(3) == 300),
+        assert(nextId == 4),
         entities' = entities,
         nextId' = nextId,
       })

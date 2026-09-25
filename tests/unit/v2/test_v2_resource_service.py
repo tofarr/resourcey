@@ -27,10 +27,12 @@ from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
     STORAGE_KEY,
     Action,
+    Create,
+    Delete,
     NotFoundError,
-    SearchSpec,
     Service,
     ServiceError,
+    Update,
     assert_real_actions,
 )
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
@@ -58,7 +60,7 @@ class Message(CoreBase):
     body: Mapped[str] = mapped_column(String(200))
 
 
-class RecordingResource(SqlResource[Any]):
+class RecordingResource(SqlResource[Any, Any]):
     """A SQL resource recording its ``__aexit__`` calls, for the Manifest test."""
 
     def __init__(self, model: type[Any], *, session_factory: Any, order: list[str]) -> None:
@@ -72,7 +74,7 @@ class RecordingResource(SqlResource[Any]):
 
 @pytest_asyncio.fixture
 async def resources() -> AsyncIterator[
-    tuple[async_sessionmaker[AsyncSession], SqlResource[Any], SqlResource[Any]]
+    tuple[async_sessionmaker[AsyncSession], SqlResource[Any, Any], SqlResource[Any, Any]]
 ]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -153,7 +155,7 @@ async def test_crud_and_count_and_search(resources):
         assert updated.title == "bye"
 
         assert await service.count() == 1
-        page = await service.search(spec=SearchSpec(limit=10))
+        page = await service.search(limit=10)
         assert [item.title for item in page.items] == ["bye"]
 
         await service.delete(created.id)
@@ -194,12 +196,47 @@ async def test_batch_read_and_batch_edit(resources):
 
         edited = await service.batch_edit(
             [
-                _dto_type(Thread)(id=a.id, title="a2"),
-                _dto_type(Thread)(id=999, title="x"),
+                Update(item=_dto_type(Thread)(id=a.id, title="a2")),
+                Update(item=_dto_type(Thread)(id=999, title="x")),
+                Create(item=_dto_type(Thread)(title="c")),
+                Delete(id=b.id),
             ]
         )
         assert edited[0] is not None and edited[0].title == "a2"
         assert edited[1] is None
+        assert edited[2] is not None and edited[2].title == "c"
+        # a delete has nothing to project
+        assert edited[3] is None
+        assert (await service.batch_read([b.id]))[0] is None
+
+
+async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources):
+    """The backend guard: a batch cannot create / delete an action the resource omits."""
+    _maker, _threads, _messages = resources
+
+    class ReadUpdateThread(SqlResource[Any, Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset(
+                {
+                    Action.READ,
+                    Action.UPDATE,
+                    Action.SEARCH,
+                    Action.COUNT,
+                    Action.BATCH_READ,
+                    Action.BATCH_EDIT,
+                }
+            )
+
+    thread = ReadUpdateThread(Thread, session_factory=_maker)
+    async with thread.get_service() as service:
+        dto = _dto_type(Thread)
+        with pytest.raises(InvalidInputError):
+            await service.batch_edit([Create(item=dto(title="nope"))])
+        with pytest.raises(InvalidInputError):
+            await service.batch_edit([Delete(id=1)])
+        # An update is still fine and wrote nothing (the id is absent).
+        assert await service.batch_edit([Update(item=dto(id=1, title="u"))]) == [None]
+        assert await service.count() == 0
 
 
 async def test_search_sorts_ascending_and_descending(resources):
@@ -209,11 +246,11 @@ async def test_search_sorts_ascending_and_descending(resources):
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="c"))
         ascending = await service.search(
-            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", False))
+            limit=10, sort_order=threads.resolve_sort_order("title", False)
         )
         assert [item.title for item in ascending.items] == ["a", "b", "c"]
         descending = await service.search(
-            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", True))
+            limit=10, sort_order=threads.resolve_sort_order("title", True)
         )
         assert [item.title for item in descending.items] == ["c", "b", "a"]
 
@@ -230,9 +267,9 @@ async def test_search_and_count_accept_a_filter(resources):
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
         filtered = build_filter([("title", "eq", "a")])
-        page = await service.search(spec=SearchSpec(filters=filtered))
+        page = await service.search(search_filter=filtered)
         assert [item.title for item in page.items] == ["a"]
-        assert await service.count(filters=filtered) == 1
+        assert await service.count(search_filter=filtered) == 1
         assert await service.count() == 2
 
 
@@ -241,7 +278,7 @@ async def test_search_orders_by_id_ascending(resources):
     async with threads.get_service() as service:
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
-        page = await service.search(spec=SearchSpec(limit=10))
+        page = await service.search(limit=10)
         assert [item.title for item in page.items] == ["a", "b"]
 
 
@@ -328,7 +365,7 @@ def test_assert_real_actions_rejects_non_action_members():
 
 
 def test_manifest_rejects_a_typo_in_supported_actions():
-    class Bad(SqlResource[Any]):
+    class Bad(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Any]:
             return frozenset({"creat"})
 
@@ -337,7 +374,7 @@ def test_manifest_rejects_a_typo_in_supported_actions():
 
 
 def test_manifest_accepts_a_narrowed_real_action_set():
-    class Narrow(SqlResource[Any]):
+    class Narrow(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Any]:
             return frozenset({Action.READ})
 
@@ -451,7 +488,7 @@ class ByCode(CoreBase):
 
 
 @pytest_asyncio.fixture
-async def code_resource() -> AsyncIterator[tuple[SqlResource[Any], Any]]:
+async def code_resource() -> AsyncIterator[tuple[SqlResource[Any, Any], Any]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     resource = SqlResource(ByCode, session_factory=maker)
@@ -528,7 +565,7 @@ def test_ctx_is_a_plain_mutable_mapping(resources):
 
 
 async def test_base_service_actions_are_raising_safety_nets():
-    base: Service[Any] = Service()
+    base: Service[Any, Any] = Service()
     async with base:
         with pytest.raises(NotImplementedError):
             await base.create(None)

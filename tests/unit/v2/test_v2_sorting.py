@@ -27,7 +27,6 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from resourcey.v2.core.dto import DtoField
 from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.service import SearchSpec
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.http.app import create_app
@@ -224,7 +223,7 @@ def _encryption() -> EncryptionService:
 
 
 @pytest_asyncio.fixture
-async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any]]]:
+async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any, Any]]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     widgets = SqlResource(
@@ -402,7 +401,7 @@ class TestSortSurface:
             widgets.resolve_sort_order("secret", False)
 
     async def test_declared_sort_order_type_is_honoured(self) -> None:
-        class Declared(SqlResource[Any]):
+        class Declared(SqlResource[Any, Any]):
             def get_sort_order_type(self) -> type[SortOrder[Any]]:
                 return AttrSortOrder
 
@@ -414,9 +413,7 @@ class TestSortSurface:
         async with resource.get_service() as service:
             await service.create(resource.get_dto_type()(title="b", rank=1, secret="s"))
             await service.create(resource.get_dto_type()(title="a", rank=2, secret="s"))
-            page = await service.search(
-                spec=SearchSpec(sort_order=resource.resolve_sort_order("title", False))
-            )
+            page = await service.search(sort_order=resource.resolve_sort_order("title", False))
             assert [item.title for item in page.items] == ["a", "b"]
             with pytest.raises(InvalidInputError, match="sort field"):
                 resource.resolve_sort_order("nope", False)
@@ -458,16 +455,14 @@ class TestSortColumnNameMapping:
             for label, rank in (("a", 2), ("b", 1), ("c", 1)):
                 await service.create(dto(label=label, rank=rank))
             first = await service.search(
-                spec=SearchSpec(limit=1, sort_order=resource.resolve_sort_order("rank", False))
+                limit=1, sort_order=resource.resolve_sort_order("rank", False)
             )
             assert [item.label for item in first.items] == ["b"]
             assert first.next_cursor is not None
             second = await service.search(
-                spec=SearchSpec(
-                    limit=2,
-                    cursor=first.next_cursor,
-                    sort_order=resource.resolve_sort_order("rank", False),
-                )
+                limit=2,
+                cursor=first.next_cursor,
+                sort_order=resource.resolve_sort_order("rank", False),
             )
             assert [item.label for item in second.items] == ["c", "a"]
             assert second.next_cursor is None
@@ -531,9 +526,7 @@ class TestNullableSortKeys:
                 seen: list[str] = []
                 cursor = None
                 while True:
-                    page = await service.search(
-                        spec=SearchSpec(limit=1, cursor=cursor, sort_order=order)
-                    )
+                    page = await service.search(limit=1, cursor=cursor, sort_order=order)
                     seen.extend(item.label for item in page.items)
                     cursor = page.next_cursor
                     if cursor is None:
