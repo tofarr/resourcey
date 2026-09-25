@@ -2,10 +2,11 @@
     // Debug configurations for the example apps under examples/.
     //
     // Each example is a standalone uv project with its own virtualenv
-    // (examples/<name>/.venv) and a committed .env. Because the framework's
-    // config loader reads .env relative to the process working directory, each
-    // config sets "cwd" to the example directory — that is what makes the
-    // example's database, manifest path, and auth posture apply.
+    // (examples/<name>/.venv) and a committed .env. The v1 examples' config
+    // loader reads .env relative to the process working directory; the v2
+    // example (01) does no .env loading, so its config passes "--env-file .env"
+    // explicitly. Either way each config sets "cwd" to the example directory —
+    // that is what makes the example's database and manifest path apply.
     //
     // The preLaunchTask (see tasks.json) syncs the example's virtualenv and
     // applies the Alembic migration, so a fresh clone can be debugged without
@@ -17,11 +18,11 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug 01 — Message Board (SQLite)",
+            "name": "Debug 01 — Message Board (SQLite, v2)",
             "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
-            "args": ["message_board.app:app", "--port", "8081"],
+            "args": ["message_board.app:app", "--env-file", ".env", "--port", "8081"],
             "cwd": "${workspaceFolder}/examples/01_message_board",
             "python": "${workspaceFolder}/examples/01_message_board/.venv/bin/python",
             "console": "integratedTerminal",
@@ -57,7 +58,7 @@
         {
             "name": "Debug all examples",
             "configurations": [
-                "Debug 01 — Message Board (SQLite)",
+                "Debug 01 — Message Board (SQLite, v2)",
                 "Debug 02 — Message Board (MongoDB, embedded)",
                 "Debug 03 — API Key Auth (SQLite)"
             ],

@@ -1,14 +1,16 @@
-"""End-to-end REST API tests for the message-board example (SQLite).
+"""End-to-end REST API tests for the v2 message-board example (SQLite).
 
 Each test runs against an **isolated SQLite database file** in a per-test tmp
-directory. The schema is created by applying the committed Alembic migration
-via ``migrate_runner.upgrade`` — the same path ``resourcey migrate upgrade``
-uses — so the migration itself is verified, not bypassed with ``create_all``.
+directory. The schema is created by applying the committed Alembic migration —
+the same revision ``alembic upgrade head`` applies — so the migration itself is
+verified, not bypassed with ``create_all``.
 
-The app is assembled with a fresh ``ResourceManifest`` pointed at the isolated
-db, entered via its async lifecycle (so the SQL session factory is built from
-the real config path), and exercised through httpx's ASGI transport — the full
-request → router → service → repository → SQLAlchemy stack.
+The app is assembled through the real config path: the isolated URL is set as
+``APP_SQL_CONNECTIONS_0_URL`` and a fresh
+:class:`~resourcey.v2.sql.session_manager.SqlSessionManager` is built from
+``SqlConfig.get_instance()``, then handed to :func:`message_board.app.build_app`.
+Requests run through httpx's ASGI transport — the full request → router →
+service → SQLAlchemy stack.
 """
 
 from __future__ import annotations
@@ -17,36 +19,46 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
-from message_board.message import Message
-from message_board.thread import Thread
 
-from resourcey.config.config_framework import DbConfig, FrameworkConfig, MigrationConfig
-from resourcey.config.config_runtime import clear_config_cache, set_config
-from resourcey.manifest import ResourceManifest
-from resourcey.migrate import migrate_runner
+from message_board.app import build_app
+from resourcey.v2.sql.session_manager import SqlSessionManager
+from resourcey.v2.sql.sql_config import SqlConfig
+
+
+def _migrations_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "migrations"
+
+
+def _sync_url(async_url: str) -> str:
+    """Alembic drives a sync engine; mirror ``migrations/env.py``'s conversion."""
+    return async_url.replace("+aiosqlite", "")
+
+
+def _apply_migration(async_url: str) -> None:
+    """Apply the committed migration to the isolated database."""
+    config = AlembicConfig()
+    config.set_main_option("script_location", str(_migrations_dir()))
+    # env.py prefers an explicit sqlalchemy.url, so no APP_* env is needed here.
+    config.set_main_option("sqlalchemy.url", _sync_url(async_url))
+    command.upgrade(config, "head")
 
 
 @pytest_asyncio.fixture
-async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
-    """A fully wired REST client backed by an isolated, migrated SQLite file."""
+async def client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]:
+    """A fully wired v2 REST client backed by an isolated, migrated SQLite file."""
     db_path = tmp_path / "e2e.db"
-    db_url = f"sqlite+aiosqlite:///{db_path}"
+    async_url = f"sqlite+aiosqlite:///{db_path}"
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_0_URL", async_url)
+    SqlConfig.clear_instance_cache()
 
-    config = FrameworkConfig(
-        database=DbConfig(url=db_url),
-        migrations=MigrationConfig(
-            migrations_dir=str(Path(__file__).resolve().parent.parent / "migrations")
-        ),
-        manifest="message_board.app:manifest",
-    )
-    set_config(config)
+    _apply_migration(async_url)
 
-    manifest = ResourceManifest(resources=(Thread(), Message()))
-    manifest.materialize()
-    migrate_runner.upgrade(config.migrations, database_url=db_url)
-
-    app = manifest.create_app()
+    manager = SqlSessionManager(SqlConfig.get_instance())
+    manifest, app = build_app(session_manager=manager)
     await manifest.__aenter__()
     try:
         transport = ASGITransport(app=app)
@@ -54,7 +66,6 @@ async def client(tmp_path: Path) -> AsyncIterator[AsyncClient]:
             yield c
     finally:
         await manifest.__aexit__(None, None, None)
-        clear_config_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +302,13 @@ class TestMessageSearch:
             + [m["text"] for m in page3["items"]]
         )
         assert all_texts == [f"msg{i:02d}" for i in range(5)]
+
+    async def test_declared_filter_surface_rejects_other_fields(self, client: AsyncClient) -> None:
+        """The declared filter class is the whole surface: ``id__eq`` is rejected."""
+        await _make_thread(client)
+        resp = await client.get("/messages?id__eq=1")
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_input"
 
 
 # ---------------------------------------------------------------------------
