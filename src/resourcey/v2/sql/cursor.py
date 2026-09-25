@@ -52,7 +52,13 @@ def _serialize(value: Any) -> tuple[str, Any]:
     Returns a ``(type_tag, json_native_repr)`` pair whose repr is always a
     JSON-native scalar, keeping the encrypted payload plain JSON while the tag
     drives reconstruction of the native Python type on decode.
+
+    ``None`` gets its own tag: stringifying it to ``"None"`` (the previous
+    fallback) decoded back as the *string* ``"None"``, which bound against the
+    wrong type and broke keyset paging on a nullable sort column.
     """
+    if value is None:
+        return "n", None
     if isinstance(value, bool):
         return "b", value
     if isinstance(value, int):
@@ -76,6 +82,8 @@ def _serialize(value: Any) -> tuple[str, Any]:
 
 def _deserialize(tag: str, repr_: Any) -> Any:
     """Reconstruct the native Python value from its ``(tag, repr)`` pair."""
+    if tag == "n":
+        return None
     if tag == "b":
         return bool(repr_)
     if tag == "i":
@@ -148,25 +156,42 @@ def keyset_predicate(
 ) -> ColumnElement[bool]:
     """Build the ``WHERE`` clause that seeks past the cursor row.
 
-    For ascending order, rows where ``(sort_key, id) > (cursor_key, cursor_id)``
-    are kept. For descending, the comparison is mirrored so rows *before* the
-    cursor (in sort order) are kept — i.e. ``(sort_key, id) < (cursor_key,
-    cursor_id)``. The id tie-breaker keeps the order stable when sort keys
-    collide, mirroring the identifier appended to every ``ORDER BY``.
+    Ordering is ``(sort_key, id)`` with the sort key in the requested direction
+    and the identifier *always ascending* (the tie-breaker :meth:`SqlSortConverter.apply`
+    appends). Ascending therefore keeps ``sort_key > cursor_key``, or an equal
+    key with a greater id. Descending keeps ``sort_key < cursor_key``, or an
+    equal key with a **greater** id: only the sort-key comparison mirrors, never
+    the tie-breaker — mirroring the id too would skip a row.
 
     When the sort column *is* the id column (the default no-sort case), the
     predicate collapses to a single comparison on id.
+
+    A ``None`` ``cursor_key`` means the cursor row sits in the null block (NULLs
+    first ascending, last descending — the ordering :meth:`SqlSortConverter.apply`
+    emits). Such a row is seeked past with a NULL test rather than a ``= NULL``
+    comparison, which would match nothing.
     """
     if sort_column is id_column:
         if ascending:
             return cast("ColumnElement[bool]", sort_column > cursor_id)
         return cast("ColumnElement[bool]", sort_column < cursor_id)
+    # The sort column's own comparison mirrors for descending; the id tie-breaker
+    # never does. NULL placement reverses with the direction, so each direction
+    # needs its own null-block branch to stay a correct keyset walk.
     if ascending:
+        if cursor_key is None:
+            return cast(
+                "ColumnElement[bool]",
+                sort_column.is_not(None) | (sort_column.is_(None) & (id_column > cursor_id)),
+            )
         return or_(
             sort_column > cursor_key,
             and_(sort_column == cursor_key, id_column > cursor_id),
         )
+    if cursor_key is None:
+        return cast("ColumnElement[bool]", sort_column.is_(None) & (id_column > cursor_id))
     return or_(
         sort_column < cursor_key,
-        and_(sort_column == cursor_key, id_column < cursor_id),
+        and_(sort_column == cursor_key, id_column > cursor_id),
+        sort_column.is_(None),
     )

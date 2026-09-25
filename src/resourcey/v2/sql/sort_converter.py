@@ -33,9 +33,17 @@ SortHandler = Callable[["SqlSortContext", SortOrder[Any]], ColumnElement[Any]]
 
 
 def _attr_order(ctx: SqlSortContext, node: SortOrder[Any]) -> ColumnElement[Any]:
-    """Order by one column, ascending or descending (``node`` is an ``AttrSortOrder``)."""
+    """Order by one column, ascending or descending (``node`` is an ``AttrSortOrder``).
+
+    NULLs are placed explicitly (first ascending, last descending) so the order
+    matches ``AttrSortOrder.compare``'s "``None`` sorts first" reference and the
+    keyset predicate's null-block handling, rather than depending on the SQL
+    dialect's default NULL placement.
+    """
     column = ctx.column_for(node.attribute)  # type: ignore[attr-defined]
-    return cast("ColumnElement[Any]", column.desc() if node.descending else column.asc())  # type: ignore[attr-defined]
+    if node.descending:  # type: ignore[attr-defined]
+        return cast("ColumnElement[Any]", column.desc().nulls_last())
+    return cast("ColumnElement[Any]", column.asc().nullsfirst())
 
 
 _REGISTRY: dict[type[SortOrder[Any]], SortHandler] = {AttrSortOrder: _attr_order}

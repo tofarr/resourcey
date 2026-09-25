@@ -1,8 +1,8 @@
 """Tests for ``v2`` keyset cursor pagination (issue #78).
 
 Paging with ``next_cursor`` walks the whole result set with no gaps or repeats,
-and a tampered cursor is rejected. Ordering is fixed to the identifier field;
-there is no sort / filter surface yet.
+and a tampered or garbage cursor is rejected as an invalid input (``400``).
+Ordering is fixed to the identifier field here; sorting has its own module.
 """
 
 from __future__ import annotations
@@ -19,7 +19,8 @@ from sqlalchemy import String
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from resourcey.v2.core.service import ServiceError
+from resourcey.v2.core.errors import InvalidInputError
+from resourcey.v2.core.service import SearchSpec, ServiceError
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.sql import cursor as cursor_module
@@ -69,7 +70,7 @@ async def _walk(resource: SqlResource[Any], limit: int) -> list[Any]:
     cursor: str | None = None
     async with resource.get_service() as service:
         while True:
-            page = await service.search(limit=limit, cursor=cursor)
+            page = await service.search(spec=SearchSpec(limit=limit, cursor=cursor))
             seen.extend(item.id for item in page.items)
             if page.next_cursor is None:
                 break
@@ -85,7 +86,7 @@ async def test_paging_walks_every_row_with_no_gaps_or_repeats(resource):
 
 async def test_last_page_has_no_next_cursor(resource):
     async with resource.get_service() as service:
-        page = await service.search(limit=10)
+        page = await service.search(spec=SearchSpec(limit=10))
     assert len(page.items) == 7
     assert page.next_cursor is None
 
@@ -94,8 +95,8 @@ async def test_page_does_not_overrun_when_limit_equals_remaining(resource):
     # limit == remaining count on a page: an off-by-one would wrongly advertise
     # a next page.
     async with resource.get_service() as service:
-        first = await service.search(limit=4)
-        second = await service.search(limit=3, cursor=first.next_cursor)
+        first = await service.search(spec=SearchSpec(limit=4))
+        second = await service.search(spec=SearchSpec(limit=3, cursor=first.next_cursor))
     assert (len(first.items), first.next_cursor is not None) == (4, True)
     assert (len(second.items), second.next_cursor) == (3, None)
 
@@ -105,7 +106,7 @@ async def test_next_cursor_is_opaque_and_kid_tagged(resource):
     import json
 
     async with resource.get_service() as service:
-        page = await service.search(limit=1)
+        page = await service.search(spec=SearchSpec(limit=1))
     assert page.next_cursor is not None
     assert page.next_cursor.count(".") == 4
     header_b64 = page.next_cursor.split(".")[0]
@@ -118,19 +119,19 @@ async def test_next_cursor_is_opaque_and_kid_tagged(resource):
 
 async def test_tampered_cursor_is_rejected(resource):
     async with resource.get_service() as service:
-        page = await service.search(limit=1)
+        page = await service.search(spec=SearchSpec(limit=1))
         cursor = page.next_cursor
         assert cursor is not None
         segments = cursor.split(".")
         segments[3] = ("A" if segments[3][0] != "A" else "B") + segments[3][1:]
-        with pytest.raises(ValueError):
-            await service.search(limit=1, cursor=".".join(segments))
+        with pytest.raises(InvalidInputError):
+            await service.search(spec=SearchSpec(limit=1, cursor=".".join(segments)))
 
 
 async def test_garbage_cursor_is_rejected(resource):
     async with resource.get_service() as service:
-        with pytest.raises(ValueError):
-            await service.search(limit=1, cursor="not-a-cursor")
+        with pytest.raises(InvalidInputError):
+            await service.search(spec=SearchSpec(limit=1, cursor="not-a-cursor"))
 
 
 async def test_cursor_pagination_requires_an_encryption_service():
@@ -141,11 +142,11 @@ async def test_cursor_pagination_requires_an_encryption_service():
         await conn.run_sync(res.metadata.create_all)
     async with res.get_service() as service:
         await service.create(_dto_type()(label="x"))
-        page = await service.search(limit=1)
+        page = await service.search(spec=SearchSpec(limit=1))
         assert page.next_cursor is None
         # A cursor cannot be encoded, so asking for the next page fails clearly.
         with pytest.raises(ServiceError, match="no EncryptionService"):
-            await service.search(limit=1, cursor="anything")
+            await service.search(spec=SearchSpec(limit=1, cursor="anything"))
     await engine.dispose()
 
 
@@ -235,7 +236,10 @@ def test_keyset_predicate_uses_the_sort_key_with_id_tie_breaker():
         cursor_id=5,
         ascending=False,
     )
-    assert str(descending.compile()) == "t.n < :n_1 OR t.n = :n_2 AND t.id < :id_1"
+    # Descending mirrors only the sort key; the id tie-breaker stays ascending
+    # (ORDER BY n DESC, id ASC), so an equal key steps to a *greater* id. NULLs
+    # sort last descending, so they are appended rather than compared.
+    assert str(descending.compile()) == ("t.n < :n_1 OR t.n = :n_2 AND t.id > :id_1 OR t.n IS NULL")
 
 
 def test_keyset_predicate_collapses_descending_on_the_id_column():

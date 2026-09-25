@@ -103,6 +103,30 @@ class Page(Generic[T]):
     next_cursor: str | None = None
 
 
+@dataclass
+class SearchSpec:
+    """The validated inputs of a ``search``: paging, ordering, and filtering.
+
+    ``search`` takes one spec rather than loose ``sort`` / ``desc`` / ``filters``
+    arguments, so the *resolved* ordering is a single value the whole operation
+    reads. That matters because the keyset cursor encodes the ordering it was
+    built for: deriving the emitted cursor and the keyset predicate from the same
+    ``sort_order`` is what keeps them from disagreeing (a request that asks for
+    ``desc`` without a ``sort`` cannot emit a cursor its own predicate rejects).
+
+    ``sort_order`` is the resolved, backend-translated ordering — ``None`` means
+    the default identifier order. It is typed ``Any`` so ``core`` stays free of
+    the concrete ``SortOrder`` type, which lives in ``v2/util``; a declared
+    :meth:`~resourcey.v2.core.resource.Resource.get_sort_order_type` refines what
+    a backend resolves it to.
+    """
+
+    limit: int = 20
+    cursor: str | None = None
+    sort_order: Any = None
+    filters: Any = None
+
+
 class Service(Generic[T]):
     """The storage-agnostic service contract, generic over the DTO type ``T``.
 
@@ -168,15 +192,8 @@ class Service(Generic[T]):
         self._require_entered()
         raise NotImplementedError
 
-    async def search(
-        self,
-        *,
-        limit: int = 20,
-        cursor: str | None = None,
-        sort: str | None = None,
-        desc: bool = False,
-        filters: Any = None,
-    ) -> Page[T]:
+    async def search(self, *, spec: SearchSpec | None = None) -> Page[T]:
+        """Search a page of ``T`` per ``spec`` (a default spec when ``None``)."""
         self._require_entered()
         raise NotImplementedError
 

@@ -28,6 +28,7 @@ from resourcey.v2.core.service import (
     STORAGE_KEY,
     Action,
     NotFoundError,
+    SearchSpec,
     Service,
     ServiceError,
     assert_real_actions,
@@ -152,7 +153,7 @@ async def test_crud_and_count_and_search(resources):
         assert updated.title == "bye"
 
         assert await service.count() == 1
-        page = await service.search(limit=10)
+        page = await service.search(spec=SearchSpec(limit=10))
         assert [item.title for item in page.items] == ["bye"]
 
         await service.delete(created.id)
@@ -207,17 +208,20 @@ async def test_search_sorts_ascending_and_descending(resources):
         await service.create(_dto_type(Thread)(title="b"))
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="c"))
-        ascending = await service.search(limit=10, sort="title")
+        ascending = await service.search(
+            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", False))
+        )
         assert [item.title for item in ascending.items] == ["a", "b", "c"]
-        descending = await service.search(limit=10, sort="title", desc=True)
+        descending = await service.search(
+            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", True))
+        )
         assert [item.title for item in descending.items] == ["c", "b", "a"]
 
 
 async def test_search_rejects_an_unknown_sort_field(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
-        with pytest.raises(InvalidInputError, match="sort field"):
-            await service.search(sort="nope")
+    with pytest.raises(InvalidInputError, match="sort field"):
+        threads.resolve_sort_order("nope", False)
 
 
 async def test_search_and_count_accept_a_filter(resources):
@@ -226,7 +230,7 @@ async def test_search_and_count_accept_a_filter(resources):
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
         filtered = build_filter([("title", "eq", "a")])
-        page = await service.search(filters=filtered)
+        page = await service.search(spec=SearchSpec(filters=filtered))
         assert [item.title for item in page.items] == ["a"]
         assert await service.count(filters=filtered) == 1
         assert await service.count() == 2
@@ -237,7 +241,7 @@ async def test_search_orders_by_id_ascending(resources):
     async with threads.get_service() as service:
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
-        page = await service.search(limit=10)
+        page = await service.search(spec=SearchSpec(limit=10))
         assert [item.title for item in page.items] == ["a", "b"]
 
 

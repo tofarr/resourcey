@@ -27,9 +27,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from resourcey.v2.core.dto import DtoField
 from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.manifest import Manifest
+from resourcey.v2.core.service import SearchSpec
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.http.app import create_app
+from resourcey.v2.sql import cursor as cursor_module
 from resourcey.v2.sql.resource import SqlResource
 from resourcey.v2.sql.sort_converter import (
     _REGISTRY,
@@ -134,14 +136,19 @@ class TestSqlSortConversion:
         stmt = select(Thing.__table__)
         ordered = SqlSortConverter(self._context()).apply(stmt, AttrSortOrder(attribute="rank"))
         compiled = str(ordered.compile())
-        assert "ORDER BY sort_things.rank ASC, sort_things.id ASC" in compiled
+        # NULLs first ascending, so the SQL order matches AttrSortOrder.compare.
+        assert "ORDER BY sort_things.rank ASC NULLS FIRST, sort_things.id ASC" in compiled
 
     def test_apply_mirrors_for_descending(self) -> None:
         stmt = select(Thing.__table__)
         ordered = SqlSortConverter(self._context()).apply(
             stmt, AttrSortOrder(attribute="rank", descending=True)
         )
-        assert "ORDER BY sort_things.rank DESC, sort_things.id ASC" in str(ordered.compile())
+        # Only the sort column mirrors; the id tie-breaker stays ascending, and
+        # NULLs move last so the null block reverses with the rest.
+        assert "ORDER BY sort_things.rank DESC NULLS LAST, sort_things.id ASC" in str(
+            ordered.compile()
+        )
 
     def test_unknown_attribute_raises(self) -> None:
         with pytest.raises(InvalidInputError, match="Unknown or non-sortable"):
@@ -338,11 +345,61 @@ class TestSortSurface:
         )
         assert flipped.status_code == 400
 
+    async def test_descending_paging_visits_every_row(self, api_client) -> None:
+        # Regression: descending keyset paging mirrored the id tie-breaker too,
+        # so walking pages under `desc` silently skipped rows.
+        client, _ = api_client
+        seen: list[str] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"sort": "rank", "desc": "true", "limit": 1}
+            if cursor is not None:
+                params["cursor"] = cursor
+            resp = await client.get("/sort-widgets", params=params)
+            seen.extend(await _titles(resp))
+            cursor = resp.json()["next_cursor"]
+            if cursor is None:
+                break
+        # The full descending order, with no row lost and none repeated.
+        assert seen == ["alpha", "gamma", "beta"]
+
+    async def test_descending_ties_step_to_a_greater_id(self, api_client) -> None:
+        client, _ = api_client
+        # alpha (id 1) and gamma (id 3) share rank 2; the cursor at alpha must
+        # seek to gamma, not back to rank 1.
+        first = await client.get(
+            "/sort-widgets", params={"sort": "rank", "desc": "true", "limit": 1}
+        )
+        assert await _titles(first) == ["alpha"]
+        cursor = first.json()["next_cursor"]
+        assert cursor is not None
+        second = await client.get(
+            "/sort-widgets", params={"sort": "rank", "desc": "true", "cursor": cursor}
+        )
+        assert await _titles(second) == ["gamma", "beta"]
+
+    async def test_desc_without_sort_pages_normally(self, api_client) -> None:
+        # Regression: `desc` with no `sort` left the page ordered by id ascending
+        # but encoded a descending cursor, which the next request rejected.
+        client, _ = api_client
+        first = await client.get("/sort-widgets", params={"desc": "true", "limit": 1})
+        assert await _titles(first) == ["alpha"]
+        cursor = first.json()["next_cursor"]
+        assert cursor is not None
+        second = await client.get("/sort-widgets", params={"desc": "true", "cursor": cursor})
+        assert await _titles(second) == ["beta", "gamma"]
+
+    async def test_garbage_cursor_is_400_not_500(self, api_client) -> None:
+        # Regression: a malformed cursor raised a bare ValueError and surfaced 500.
+        client, _ = api_client
+        resp = await client.get("/sort-widgets", params={"cursor": "not-a-cursor"})
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_input"
+
     async def test_service_rejects_a_non_sortable_field(self, api_client) -> None:
         _client, widgets = api_client
-        async with widgets.get_service() as service:
-            with pytest.raises(InvalidInputError, match="sort field"):
-                await service.search(sort="secret")
+        with pytest.raises(InvalidInputError, match="sort field"):
+            widgets.resolve_sort_order("secret", False)
 
     async def test_declared_sort_order_type_is_honoured(self) -> None:
         class Declared(SqlResource[Any]):
@@ -357,10 +414,12 @@ class TestSortSurface:
         async with resource.get_service() as service:
             await service.create(resource.get_dto_type()(title="b", rank=1, secret="s"))
             await service.create(resource.get_dto_type()(title="a", rank=2, secret="s"))
-            page = await service.search(sort="title")
+            page = await service.search(
+                spec=SearchSpec(sort_order=resource.resolve_sort_order("title", False))
+            )
             assert [item.title for item in page.items] == ["a", "b"]
             with pytest.raises(InvalidInputError, match="sort field"):
-                await service.search(sort="nope")
+                resource.resolve_sort_order("nope", False)
         await engine.dispose()
 
 
@@ -398,10 +457,18 @@ class TestSortColumnNameMapping:
             # DTO attribute name.
             for label, rank in (("a", 2), ("b", 1), ("c", 1)):
                 await service.create(dto(label=label, rank=rank))
-            first = await service.search(limit=1, sort="rank")
+            first = await service.search(
+                spec=SearchSpec(limit=1, sort_order=resource.resolve_sort_order("rank", False))
+            )
             assert [item.label for item in first.items] == ["b"]
             assert first.next_cursor is not None
-            second = await service.search(limit=2, sort="rank", cursor=first.next_cursor)
+            second = await service.search(
+                spec=SearchSpec(
+                    limit=2,
+                    cursor=first.next_cursor,
+                    sort_order=resource.resolve_sort_order("rank", False),
+                )
+            )
             assert [item.label for item in second.items] == ["c", "a"]
             assert second.next_cursor is None
         await engine.dispose()
@@ -429,3 +496,57 @@ class TestSortCache:
             headers={"If-None-Match": first.headers["etag"]},
         )
         assert cached.status_code == 304
+
+
+class Nullable(ApiBase):
+    """A model with a nullable sort column, for the NULL-key paging regression."""
+
+    __tablename__ = "sort_nullables"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(50))
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class TestNullableSortKeys:
+    async def test_paging_a_nullable_column_visits_every_row(self) -> None:
+        # Regression: a None sort key was serialized as the *string* "None", so
+        # the next page compared the column against "None" and returned nothing.
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        resource = SqlResource(
+            Nullable,
+            session_factory=maker,
+            path="nullables",
+            encryption_service=_encryption(),
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(ApiBase.metadata.create_all)
+        dto = resource.get_dto_type()
+        async with resource.get_service() as service:
+            for label, score in (("a", None), ("b", 2), ("c", 1), ("d", None)):
+                await service.create(dto(label=label, score=score))
+            for descending in (False, True):
+                order = resource.resolve_sort_order("score", descending)
+                seen: list[str] = []
+                cursor = None
+                while True:
+                    page = await service.search(
+                        spec=SearchSpec(limit=1, cursor=cursor, sort_order=order)
+                    )
+                    seen.extend(item.label for item in page.items)
+                    cursor = page.next_cursor
+                    if cursor is None:
+                        break
+                # NULLs first ascending, last descending; ids break the ties.
+                expected = ["a", "d", "c", "b"] if not descending else ["b", "c", "a", "d"]
+                assert seen == expected
+        await engine.dispose()
+
+    async def test_null_cursor_key_round_trips(self) -> None:
+        service = _encryption()
+        cursor = cursor_module.encode_cursor(
+            service, sort_field="score", ascending=True, sort_key=None, id_value=1
+        )
+        _field, _asc, sort_key, _id = cursor_module.decode_cursor(service, cursor)
+        assert sort_key is None

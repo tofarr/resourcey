@@ -148,6 +148,18 @@ class Resource(ABC, Generic[T]):
         derived ``(attribute, descending)`` surface.
         """
 
+    @abstractmethod
+    def resolve_sort_order(self, sort: str | None, desc: bool) -> Any:
+        """Validate ``sort`` / ``desc`` into the ordering a backend will use.
+
+        Returns the resolved sort order (a :class:`SortOrder`, or ``None`` for
+        the default identifier order). An unknown or non-sortable field raises
+        :class:`~resourcey.v2.core.errors.InvalidInputError`. This is where the
+        request's loose ``(sort, desc)`` becomes the *single value* a search then
+        orders, seeks, and encodes its cursor by — so those three cannot disagree.
+        Typed ``Any`` because the concrete :class:`SortOrder` lives in ``v2/util``.
+        """
+
     # ------------------------------------------------------------------
     # Actions / exposure
     # ------------------------------------------------------------------

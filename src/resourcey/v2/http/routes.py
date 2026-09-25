@@ -54,7 +54,7 @@ from resourcey.v2.cache.cache_header import CacheHeader
 from resourcey.v2.core.dto import RestModels, request_to_dto
 from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.resource import Resource
-from resourcey.v2.core.service import Action, NotFoundError, Service, ServiceError
+from resourcey.v2.core.service import Action, NotFoundError, SearchSpec, Service, ServiceError
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
 from resourcey.v2.util.missing import MISSING
 from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
@@ -360,14 +360,19 @@ def _add_search_route(
     """Register ``GET /{resource}`` — cursor-paginated, filterable, sortable search.
 
     ``limit`` and ``cursor`` paginate; ``sort`` / ``desc`` order the page
-    (validated against the exposed resource's
-    :meth:`~resourcey.v2.core.resource.Resource.get_sortable_fields`, an unknown
+    (resolved by the exposed resource's
+    :meth:`~resourcey.v2.core.resource.Resource.resolve_sort_order`, an unknown
     or non-sortable field -> ``400``); declared ``<field>__<op>`` query params
     are collected into a standard :class:`SearchFilter` and pushed down. The
     filter surface (fields + operators) comes from the exposed resource's
     :meth:`~resourcey.v2.core.resource.Resource.get_filter_operators` (or a
     declared :meth:`~...get_search_filter_type`); an unknown field or operator,
     or any filter on a resource with no surface, is rejected ``400``.
+
+    The resolved ordering and filter are assembled into one
+    :class:`~resourcey.v2.core.service.SearchSpec`, so ``search`` receives a
+    single validated request object rather than loose ``sort`` / ``desc`` /
+    ``filters``.
     """
     filter_spec = _filter_surface(exposed)
     filter_dep = _filter_dependency(filter_spec)
@@ -382,9 +387,13 @@ def _add_search_route(
         service=Depends(service_dep),  # noqa: B008
     ):
         filters = _resolve_filters(request, filter_spec, values)
-        page = await service.search(
-            limit=limit, cursor=cursor, sort=sort, desc=desc, filters=filters
+        spec = SearchSpec(
+            limit=limit,
+            cursor=cursor,
+            sort_order=exposed.resolve_sort_order(sort, desc),
+            filters=filters,
         )
+        page = await service.search(spec=spec)
         body, items = _page_body(page, models.search_response)
         header = _header_for(strategy, items)
         return _cached_json_response(request, body, header)

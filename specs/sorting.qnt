@@ -9,8 +9,9 @@
 //   Law 2 (keyset agreement): the pushed-down keyset predicate keeps exactly
 //   the rows that come after the cursor in compare order (ascending).
 //
-//   Law 3 (descending is the mirror): descending reverses the ascending order
-//   while the identifier tie-breaker is preserved.
+//   Law 3 (descending mirrors the key, not the tie-breaker): descending
+//   reverses the *sort-key* comparison while the identifier tie-breaker stays
+//   ascending, matching `ORDER BY key DESC, id ASC`.
 //
 //   Law 4 (cursor/sort binding): a cursor is accepted only under the
 //   (sort_field, ascending) it was built for.
@@ -32,7 +33,11 @@ module sorting {
     if (byKey == 0) compareKey(a.id, b.id) else byKey
 
   pure def ascending(a: Row, b: Row): bool = compareRow(a, b) < 0
-  pure def descending(a: Row, b: Row): bool = compareRow(a, b) > 0
+
+  // Descending order as the backend builds it: `ORDER BY key DESC, id ASC`.
+  // Only the key comparison mirrors; the identifier tie-breaker stays ascending.
+  pure def descending(a: Row, b: Row): bool =
+    if (a.key != b.key) a.key > b.key else a.id < b.id
 
   // A small universe with deliberate key collisions, so the tie-breaker matters.
   pure val rows: List[Row] = List(
@@ -89,19 +94,19 @@ module sorting {
 
   run law2_keysetAgreement = rows.foldl(true, (acc, c) => acc and keysetAgrees(c))
 
-  // ---- Law 3: descending is the mirror -----------------------------------
-  // The descending predicate is the ascending one with the comparisons
-  // mirrored, and it keeps exactly the rows that precede the cursor in
-  // ascending order — the identifier tie-breaker preserved.
+  // ---- Law 3: descending mirrors the key, not the tie-breaker ------------
+  // The descending predicate keeps exactly the rows that follow the cursor in
+  // descending order: a smaller key, or an equal key with a *greater* id (the
+  // tie-breaker never mirrors).
   pure def descendingKeeps(row: Row, c: Row): bool =
     if (row.key < c.key) true
-    else if (row.key == c.key) row.id < c.id
+    else if (row.key == c.key) row.id > c.id
     else false
 
   pure def descendingIsMirror(c: Row): bool =
     rows.foldl(
       true,
-      (acc, row) => acc and (descendingKeeps(row, c) == descending(c, row)) and (descending(c, row) == ascending(row, c))
+      (acc, row) => acc and (descendingKeeps(row, c) == descending(c, row))
     )
 
   run law3_descendingIsTheMirror = rows.foldl(true, (acc, c) => acc and descendingIsMirror(c))

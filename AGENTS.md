@@ -399,13 +399,19 @@ The keyset cursor grew to the `v1` shape: `encode_cursor(..., sort_field,
 ascending, sort_key, id_value)` and `decode_cursor` returns the tuple, with
 `sort_field=None` for the default identifier-ordered case.
 `keyset_predicate(sort_column, id_column, cursor_key, cursor_id, ascending)`
-builds `(sort_key, id) > (cursor_key, cursor_id)` for ascending (mirrored for
-descending) and collapses to a single id comparison when the sort column *is*
-the id column. `SqlService.search` validates the sort field, orders by it, and
-**rejects** a cursor whose `(sort_field, ascending)` does not match the current
-request (`InvalidInputError` → 400) rather than applying the key against the
-wrong column; changing the sort of a paged request therefore means starting a
-new search (no cursor), matching `v1`.
+builds `(sort_key, id) > (cursor_key, cursor_id)` for ascending and the mirrored
+`(sort_key, id) < (cursor_key, cursor_id)` for descending — but it mirrors only
+the sort-key comparison, never the identifier tie-breaker (`ORDER BY key DESC,
+id ASC`), so equal keys step to a *greater* id instead of skipping the row. A
+`None` cursor key is handled with explicit NULL tests (NULLs sort first
+ascending, last descending — `SqlSortConverter` emits `NULLS FIRST` / `NULLS
+LAST`), not a `= NULL` comparison. The predicate collapses to a single id
+comparison when the sort column *is* the id column. `SqlService.search` validates
+the sort field, orders by it, and **rejects** a cursor whose `(sort_field,
+ascending)` does not match the current request (`InvalidInputError` → 400) rather
+than applying the key against the wrong column; changing the sort of a paged
+request therefore means starting a new search (no cursor), matching `v1`. A
+malformed cursor surfaces as `InvalidInputError` (400), not a 500.
 
 The sort surface: `Resource.get_sortable_fields() -> frozenset[str]` is derived
 from the read model (readable ⇒ sortable) and `Resource.get_sort_order_type()`
@@ -419,10 +425,11 @@ distinct sorts get distinct validators with no extra wiring.
 `specs/sorting.qnt` pins four laws (in `make specs` and CI): (1) `compare` is
 antisymmetric and transitive and equal keys fall back to the identifier (a total
 order); (2) the pushed-down keyset predicate keeps exactly the rows after the
-cursor in `compare` order; (3) descending is the ascending mirror with the
-identifier tie-breaker preserved; and (4) a cursor is accepted only under the
-`(sort_field, ascending)` it was built for. The single-attribute model is
-unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
+cursor in the ascending order; (3) descending keeps exactly the rows after the
+cursor in the *descending* order — key descending, equal keys by ascending
+identifier (the tie-breaker never mirrors); and (4) a cursor is accepted only
+under the `(sort_field, ascending)` it was built for. The single-attribute model
+is unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
 
 ### `v2/cache` — the migrated cache surface (issue #92)
 

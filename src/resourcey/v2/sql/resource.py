@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.v2.cache.cache_defaults import default_cache_strategy
 from resourcey.v2.core.dto import RestModels
+from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.resource import Resource, _camel_to_kebab, _pluralize
 from resourcey.v2.core.service import Action, CacheStrategy, Service, ServiceError
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
@@ -35,7 +36,7 @@ from resourcey.v2.sql.service import SqlService
 from resourcey.v2.sql.sort_converter import SqlSortContext, SqlSortConverter
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
 from resourcey.v2.util.search_filter import SearchFilter, operators_for_annotation
-from resourcey.v2.util.sort_order import SortOrder
+from resourcey.v2.util.sort_order import AttrSortOrder, SortOrder
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
@@ -158,6 +159,37 @@ class SqlResource(Resource[T]):
         ``(attribute, descending)`` surface is otherwise used.
         """
         return None
+
+    def resolve_sort_order(self, sort: str | None, desc: bool) -> SortOrder[Any] | None:
+        """Validate ``sort`` / ``desc`` into the ordering a search will use.
+
+        With no ``sort`` the identifier order is used and ``desc`` is ignored
+        (the identifier is always the default ascending key). With a declared
+        :meth:`get_sort_order_type` the field is validated against the declared
+        class; otherwise it is checked against :meth:`get_sortable_fields` so a
+        projected-away field cannot be sorted on.
+        """
+        if not sort:
+            return None
+        declared = self.get_sort_order_type()
+        if isinstance(declared, type) and issubclass(declared, AttrSortOrder):
+            if sort not in self.get_sortable_fields():
+                raise InvalidInputError(f"Unknown or non-sortable sort field {sort!r}")
+            # A declared class is the opt-in surface: its shape supplies the
+            # default direction when the request does not name one.
+            return declared(attribute=sort, descending=desc)
+        if sort not in self.get_sortable_fields():
+            raise InvalidInputError(f"Unknown or non-sortable sort field {sort!r}")
+        return AttrSortOrder(attribute=sort, descending=desc)
+
+    def get_column_name(self, attribute: str) -> str:
+        """The table column name backing DTO attribute ``attribute``.
+
+        The DTO field name is the mapper attribute name, which can differ from
+        the underlying column name; a cursor's sort key must be read by column
+        name because the row is keyed that way.
+        """
+        return cast("str", self._column_for_attr.get(attribute, attribute))
 
     # Opt-in escape hatch: when True, an unconvertible filter falls back to an
     # in-memory scan instead of raising. Off by default — see
