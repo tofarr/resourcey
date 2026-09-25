@@ -10,6 +10,11 @@
 //   including NULL rows, whereas a naive SQL `NOT` provably does not — the
 //   NULL row is excluded from both branches under three-valued logic.
 //
+//   Law 3 (generalisation): the same NULL-safe complement generalises beyond
+//   equality to the ordering operators — for `Gt` the pushed-down complement
+//   is `col IS NULL OR col <= v`, which agrees on every row where naive `NOT`
+//   does not.
+//
 // Quint rejects recursive type declarations (QNT099), so a genuine recursive
 // filter tree cannot be written; the tree is unrolled into a flat clause list,
 // matching how resource_actions.qnt already models filters.
@@ -109,8 +114,38 @@ module filtering {
   pure def nullSafeNegationAgrees(v: int): bool =
     rows.foldl(true, (acc, row) => acc and ((sqlIsDistinctFrom(row, v) == T) == memNegEq(row, v)))
 
-  pure def naiveNegationDisagrees(v: int): bool =
+  pure def naivelyNegatedEqDisagrees(v: int): bool =
     rows.foldl(false, (acc, row) => acc or ((sqlNot(sqlEq(row, v)) == T) != memNegEq(row, v)))
+
+  // ---- Law 3: NULL-safe negation generalises to the operators ------------
+  // The eq case above is not special: every operator's NULL-safe complement
+  // must agree with the in-memory complement. Restate it for `Gt`, whose
+  // negated handler compiles to `col IS NULL OR col <= v`.
+
+  pure def sqlGt(row: Row, v: int): Tri =
+    match row {
+      | Val(r) => if (r > v) T else F
+      | Null => Unknown
+    }
+
+  // SQL `c IS NULL OR c <= v` — the NULL-safe complement of `c > v`.
+  pure def sqlNullSafeNotGt(row: Row, v: int): Tri =
+    match row {
+      | Val(r) => if (r > v) F else T
+      | Null => T
+    }
+
+  pure def memNegGt(row: Row, v: int): bool =
+    match row {
+      | Val(r) => r <= v
+      | Null => true
+    }
+
+  pure def naivelyNegatedGtDisagrees(v: int): bool =
+    rows.foldl(false, (acc, row) => acc or ((sqlNot(sqlGt(row, v)) == T) != memNegGt(row, v)))
+
+  pure def nullSafeNegationAgreesGt(v: int): bool =
+    rows.foldl(true, (acc, row) => acc and ((sqlNullSafeNotGt(row, v) == T) == memNegGt(row, v)))
 
   // Small finite universes so the laws can be run as tests.
   pure val entityValues = List(0, 1, 2)
@@ -125,5 +160,10 @@ module filtering {
     andNormPreserves(sampleFilters) and andNormPreserves(List(All, All))
 
   run law2_nullSafeNegation =
-    nullSafeNegationAgrees(1) and naiveNegationDisagrees(1)
+    nullSafeNegationAgrees(1) and naivelyNegatedEqDisagrees(1)
+
+  // Law 3: the NULL-safe complement generalises to `Gt` (the `IS NULL OR <=`
+  // form), and the naive SQL `NOT` provably disagrees there too.
+  run law3_nullSafeNegationGeneralises =
+    nullSafeNegationAgreesGt(1) and naivelyNegatedGtDisagrees(1)
 }
