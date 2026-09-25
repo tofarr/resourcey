@@ -1,9 +1,9 @@
 """A :class:`Singleton` mixin for process-wide instances.
 
-Several pieces of the framework are naturally one-per-process (an encryption
-service, a dependency builder, a cache), and each would otherwise hand-roll an
-``lru_cache`` accessor or its own ``__new__`` cache. This module gives them one
-small, composable building block.
+Several pieces of the framework are naturally one-per-process (a dependency
+builder, a cache, the search-filter leaves), and each would otherwise
+hand-roll an ``lru_cache`` accessor or its own ``__new__`` cache. This module
+gives them one small, composable building block.
 
 Semantics:
 
@@ -90,7 +90,7 @@ class Singleton:
 
     Put it first in the bases so its ``__new__`` / ``__init__`` win the MRO::
 
-        class EncryptionService(Singleton, BaseModel): ...
+        class AllFilter(Singleton, SearchFilter[T]): ...
 
     Works with plain classes, Pydantic ``BaseModel`` subclasses, and
     ``DiscriminatedUnionMixin`` hierarchies.

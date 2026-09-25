@@ -1,22 +1,45 @@
-"""Tests for the ``v2/encryption`` package (issue #78).
+"""Tests for the ``v2/encryption`` package (issue #78, config #111).
 
 Covers the migrated ``EncryptionService`` (value + JWE-token paths), the key
 config (including the ``encryption_key`` / ``decryption_keys`` rotation model
-and the ``kid`` header), the ``dir`` + ``A256GCM``-only registry, and
-construction from an injected config instance (no env singleton).
+and the ``kid`` header), the ``dir`` + ``A256GCM``-only registry, construction
+from an injected config instance, the ``BaseConfig`` env surface with its dev
+default, and the process-wide lookup.
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 import pytest
+from pydantic import Field
 
+from resourcey.v2.config.config_base import _reset_config_prefix
+from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.encryption.encryption_config import (
     EncryptionKeyConfig,
     EncryptionKeysConfig,
 )
-from resourcey.v2.encryption.encryption_service import EncryptionService, utc_now
+from resourcey.v2.encryption.encryption_service import (
+    EncryptionService,
+    clear_encryption_service_cache,
+    get_encryption_service,
+    utc_now,
+)
+from resourcey.v2.sql.sql_config import SqlConfig
+
+
+@pytest.fixture(autouse=True)
+def _clean() -> None:
+    """Reset the prefix latch and the process-wide service between cases."""
+    _reset_config_prefix()
+    clear_encryption_service_cache()
+    EncryptionKeysConfig.clear_instance_cache()
+    yield
+    clear_encryption_service_cache()
+    EncryptionKeysConfig.clear_instance_cache()
+    _reset_config_prefix()
 
 
 def _service(
@@ -56,6 +79,127 @@ def test_key_serialization_exposes_secrets_with_context():
     config = EncryptionKeysConfig(encryption_key=EncryptionKeyConfig(id="k", value="super-secret"))
     dumped = config.model_dump(context={"expose_secrets": True})
     assert dumped["encryption_key"]["value"] == "super-secret"
+
+
+# ---------------------------------------------------------------------------
+# BaseConfig env surface + dev default (issue #111)
+# ---------------------------------------------------------------------------
+
+
+def test_absent_key_yields_the_dev_default_and_warns(monkeypatch, caplog):
+    monkeypatch.delenv("APP_ENCRYPTION_KEY_ID", raising=False)
+    monkeypatch.delenv("APP_ENCRYPTION_KEY_VALUE", raising=False)
+    with caplog.at_level(logging.WARNING, logger="resourcey.v2.encryption.encryption_config"):
+        config = EncryptionKeysConfig.get_instance()
+    assert config.encryption_key.value.get_secret_value() == "changeme"
+    assert "Using Default Encryption Key" in caplog.text
+    assert "APP_ENCRYPTION_KEY_VALUE" in caplog.text
+
+
+def test_present_key_suppresses_the_warning(monkeypatch, caplog):
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "prod")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_VALUE", "s3cret")
+    with caplog.at_level(logging.WARNING, logger="resourcey.v2.encryption.encryption_config"):
+        config = EncryptionKeysConfig.get_instance()
+    assert config.encryption_key.id == "prod"
+    assert config.encryption_key.value.get_secret_value() == "s3cret"
+    assert "Using Default Encryption Key" not in caplog.text
+
+
+def test_parses_decryption_keys_from_env(monkeypatch):
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "prod")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_VALUE", "s3cret")
+    monkeypatch.setenv("APP_DECRYPTION_KEYS_0_ID", "old")
+    monkeypatch.setenv("APP_DECRYPTION_KEYS_0_VALUE", "oldsecret")
+    config = EncryptionKeysConfig.get_instance()
+    # The encryption key is auto-included ahead of the rotated-out keys.
+    assert [k.id for k in config.decryption_keys] == ["prod", "old"]
+
+
+def test_default_factory_is_lazy_not_at_class_definition():
+    """The factory runs per construction, not when the class is declared."""
+    calls: list[int] = []
+
+    def factory() -> EncryptionKeyConfig:
+        calls.append(1)
+        return EncryptionKeyConfig(value="changeme")
+
+    class Fresh(EncryptionKeysConfig):
+        encryption_key: EncryptionKeyConfig = Field(default_factory=factory)
+
+    assert calls == []  # declaring the class did not run the factory
+    Fresh()
+    assert len(calls) == 1
+    Fresh()
+    assert len(calls) == 2
+
+
+def test_partial_key_is_a_hard_error_naming_the_field(monkeypatch):
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "prod")
+    monkeypatch.delenv("APP_ENCRYPTION_KEY_VALUE", raising=False)
+    with pytest.raises(ResourceyConfigError, match=r"encryption_key\.value"):
+        EncryptionKeysConfig.get_instance()
+
+
+def test_direct_construction_still_works():
+    service = EncryptionService(
+        EncryptionKeysConfig(encryption_key=EncryptionKeyConfig(id="dev", value="changeme"))
+    )
+    assert service.decrypt_value(service.encrypt_value("hi")) == "hi"
+
+
+# ---------------------------------------------------------------------------
+# Process-wide lookup
+# ---------------------------------------------------------------------------
+
+
+def test_get_encryption_service_is_cached(monkeypatch):
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "test")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_VALUE", "test-secret-key-for-cursors")
+    first = get_encryption_service()
+    assert get_encryption_service() is first
+    assert isinstance(first, EncryptionService)
+
+
+def test_clear_encryption_service_cache_rebuilds(monkeypatch):
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "test")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_VALUE", "test-secret-key-for-cursors")
+    first = get_encryption_service()
+    clear_encryption_service_cache()
+    EncryptionKeysConfig.clear_instance_cache()
+    assert get_encryption_service() is not first
+
+
+# ---------------------------------------------------------------------------
+# Composing an app config from the framework blocks (issue #111)
+# ---------------------------------------------------------------------------
+
+
+class AppConfig(SqlConfig, EncryptionKeysConfig):
+    """The app's single config object, composed from the framework blocks."""
+
+
+def test_app_config_exposes_both_blocks(monkeypatch):
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_0_URL", "sqlite+aiosqlite:///main.db")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "prod")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_VALUE", "s3cret")
+    AppConfig.clear_instance_cache()
+    config = AppConfig.get_instance()
+    assert [c.name for c in config.sql_connections] == ["main"]
+    assert config.encryption_key.id == "prod"
+    # Per-class caches are independent, though the values agree.
+    assert AppConfig.get_instance() is not SqlConfig.get_instance()
+
+
+def test_app_config_env_template_covers_both_blocks(monkeypatch):
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "prod")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_VALUE", "s3cret")
+    AppConfig.clear_instance_cache()
+    template = AppConfig.get_instance().generate_env_template()
+    assert "APP_SQL_CONNECTIONS_0_NAME=main" in template
+    assert "APP_ENCRYPTION_KEY_VALUE=" in template
 
 
 # ---------------------------------------------------------------------------
