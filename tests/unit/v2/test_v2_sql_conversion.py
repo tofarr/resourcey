@@ -324,7 +324,7 @@ def test_required_field_is_not_null():
 
 
 @pytest_asyncio.fixture
-async def widget_resources() -> AsyncIterator[tuple[SqlResource[Any], AsyncSession]]:
+async def widget_resources() -> AsyncIterator[tuple[SqlResource[Any, Any], AsyncSession]]:
     """A resource over the model plus a session over a fresh in-memory SQLite."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -435,7 +435,7 @@ class Post(AdoptedBase):
 
 
 @pytest_asyncio.fixture
-async def post_resources() -> AsyncIterator[tuple[SqlResource[Any], AsyncSession]]:
+async def post_resources() -> AsyncIterator[tuple[SqlResource[Any, Any], AsyncSession]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     resource = SqlResource(Post, session_factory=maker)

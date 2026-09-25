@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from resourcey.v2.core.manifest import Manifest
 
 T = TypeVar("T", bound=BaseModel)
+K = TypeVar("K")
 
 _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z]{2})(?=[A-Z][a-z])")
 
@@ -68,8 +69,8 @@ _CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z]{2})(?=[A-Z][a-z]
 # ---------------------------------------------------------------------------
 
 
-class Resource(ABC, Generic[T]):
-    """The abstract resource contract, generic over the DTO type ``T``.
+class Resource(ABC, Generic[T, K]):
+    """The abstract resource contract, generic over the DTO type ``T`` and id ``K``.
 
     Every method is abstract. A backend (e.g.
     :class:`~resourcey.v2.sql.resource.SqlResource`) implements the whole
@@ -169,7 +170,7 @@ class Resource(ABC, Generic[T]):
         """The actions this resource serves — the single action declaration."""
 
     @abstractmethod
-    def get_exposed_resource(self) -> Resource[T] | None:
+    def get_exposed_resource(self) -> Resource[T, K] | None:
         """The resource the outside world sees, or ``None`` for internal-only."""
 
     # ------------------------------------------------------------------
@@ -177,7 +178,7 @@ class Resource(ABC, Generic[T]):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, Any]:
+    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build the service for this resource over the call-scoped ``ctx``.
 
         Sync: the returned :class:`~resourcey.v2.core.service.Service` is the
@@ -208,7 +209,7 @@ class Resource(ABC, Generic[T]):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def __aenter__(self) -> Resource[T]:
+    async def __aenter__(self) -> Resource[T, K]:
         """Enter the resource's runtime lifecycle."""
 
     @abstractmethod

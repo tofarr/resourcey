@@ -48,9 +48,10 @@ if TYPE_CHECKING:
     from resourcey.v2.sql.resource import SqlResource
 
 T = TypeVar("T", bound=BaseModel)
+K = TypeVar("K")
 
 
-class SqlService(Service[T, Any]):
+class SqlService(Service[T, K]):
     """The standard actions over a SQL table, with keyset cursor pagination.
 
     Holds the call-scoped ``ctx`` and the session factory. On enter it adopts
@@ -61,7 +62,7 @@ class SqlService(Service[T, Any]):
 
     def __init__(
         self,
-        resource: SqlResource[T],
+        resource: SqlResource[T, K],
         ctx: MutableMapping[Any, Any],
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -76,7 +77,7 @@ class SqlService(Service[T, Any]):
     # Lifecycle + storage ownership
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> SqlService[T]:
+    async def __aenter__(self) -> SqlService[T, K]:
         await super().__aenter__()
         session = self._ctx.get(STORAGE_KEY)
         if session is None:
@@ -123,7 +124,7 @@ class SqlService(Service[T, Any]):
         )
         return self._to_dto(row)
 
-    async def read(self, id: Any) -> T:  # noqa: A002
+    async def read(self, id: K) -> T:  # noqa: A002
         """Fetch one DTO by id; raise :class:`NotFoundError` if absent."""
         session = self._active_session()
         found = (await session.execute(_by_id(self._resource.id_column, id))).mappings().first()
@@ -156,7 +157,7 @@ class SqlService(Service[T, Any]):
             await session.execute(update(table).where(id_column == id_value).values(**columns))
         return await self.read(id_value)
 
-    async def delete(self, id: Any) -> None:  # noqa: A002
+    async def delete(self, id: K) -> None:  # noqa: A002
         """Delete by id; raise :class:`NotFoundError` if absent."""
         session = self._active_session()
         table = self._resource.table
@@ -257,7 +258,7 @@ class SqlService(Service[T, Any]):
         ]
         return stmt.where(self._resource.id_column.in_(surviving))
 
-    async def batch_read(self, ids: list[Any]) -> list[T | None]:
+    async def batch_read(self, ids: list[K]) -> list[T | None]:
         """Return DTOs positionally aligned with ``ids`` (``None`` for absent)."""
         session = self._active_session()
         table = self._resource.table
@@ -266,7 +267,7 @@ class SqlService(Service[T, Any]):
         by_id = {row[id_column.name]: self._to_dto(row) for row in rows}
         return [by_id.get(i) for i in ids]
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[Any]]) -> list[T | None]:
+    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply each :class:`Edit`; results align positionally with ``edits``.
 
         A create / update yields the resulting DTO, a delete yields ``None``
@@ -301,7 +302,7 @@ class SqlService(Service[T, Any]):
         except NotFoundError:
             return None
 
-    async def _delete_or_none(self, id: Any) -> None:  # noqa: A002
+    async def _delete_or_none(self, id: K) -> None:  # noqa: A002
         """``delete`` but an absent id is a no-op instead of raising."""
         try:
             await self.delete(id)

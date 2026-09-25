@@ -51,7 +51,7 @@ def _encryption() -> EncryptionService:
 
 
 @pytest_asyncio.fixture
-async def resource() -> AsyncIterator[SqlResource[Any]]:
+async def resource() -> AsyncIterator[SqlResource[Any, Any]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     res = SqlResource(Item, session_factory=maker, encryption_service=_encryption())
@@ -64,7 +64,7 @@ async def resource() -> AsyncIterator[SqlResource[Any]]:
     await engine.dispose()
 
 
-async def _walk(resource: SqlResource[Any], limit: int) -> list[Any]:
+async def _walk(resource: SqlResource[Any, Any], limit: int) -> list[Any]:
     """Walk every page via ``next_cursor`` and return the collected ids."""
     seen: list[int] = []
     cursor: str | None = None

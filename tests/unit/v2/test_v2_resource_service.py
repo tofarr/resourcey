@@ -60,7 +60,7 @@ class Message(CoreBase):
     body: Mapped[str] = mapped_column(String(200))
 
 
-class RecordingResource(SqlResource[Any]):
+class RecordingResource(SqlResource[Any, Any]):
     """A SQL resource recording its ``__aexit__`` calls, for the Manifest test."""
 
     def __init__(self, model: type[Any], *, session_factory: Any, order: list[str]) -> None:
@@ -74,7 +74,7 @@ class RecordingResource(SqlResource[Any]):
 
 @pytest_asyncio.fixture
 async def resources() -> AsyncIterator[
-    tuple[async_sessionmaker[AsyncSession], SqlResource[Any], SqlResource[Any]]
+    tuple[async_sessionmaker[AsyncSession], SqlResource[Any, Any], SqlResource[Any, Any]]
 ]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -214,7 +214,7 @@ async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources
     """The backend guard: a batch cannot create / delete an action the resource omits."""
     _maker, _threads, _messages = resources
 
-    class ReadUpdateThread(SqlResource[Any]):
+    class ReadUpdateThread(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Action]:
             return frozenset(
                 {
@@ -365,7 +365,7 @@ def test_assert_real_actions_rejects_non_action_members():
 
 
 def test_manifest_rejects_a_typo_in_supported_actions():
-    class Bad(SqlResource[Any]):
+    class Bad(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Any]:
             return frozenset({"creat"})
 
@@ -374,7 +374,7 @@ def test_manifest_rejects_a_typo_in_supported_actions():
 
 
 def test_manifest_accepts_a_narrowed_real_action_set():
-    class Narrow(SqlResource[Any]):
+    class Narrow(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Any]:
             return frozenset({Action.READ})
 
@@ -488,7 +488,7 @@ class ByCode(CoreBase):
 
 
 @pytest_asyncio.fixture
-async def code_resource() -> AsyncIterator[tuple[SqlResource[Any], Any]]:
+async def code_resource() -> AsyncIterator[tuple[SqlResource[Any, Any], Any]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     resource = SqlResource(ByCode, session_factory=maker)

@@ -175,9 +175,11 @@ Four files, no `__init__.py`:
   stored values); timestamps appear in every response shape and no request
   shape.
 * `resource.py` — `Resource` is a **genuine ABC**: every method is abstract, so
-  `v2/core` keeps no behaviour and a backend supplies the whole contract. The
-  abstract surface is the DTO / REST-model getters (`get_dto_type`,
-  `get_rest_models`, `get_id_field`), `get_resource_path`,
+  `v2/core` keeps no behaviour and a backend supplies the whole contract. It is
+  generic over the DTO `T` and the identifier type `K` (`Resource[T, K]`), so
+  `get_service` returns a `Service[T, K]` and the id surface is typed by `K`
+  rather than `Any`. The abstract surface is the DTO / REST-model getters
+  (`get_dto_type`, `get_rest_models`, `get_id_field`), `get_resource_path`,
   `get_cache_strategy`, the action declaration (`get_supported_actions`, no
   `actions` property) and exposure (`get_exposed_resource`, whose declaration
   wins outright), the service seam (`get_service(ctx)` — **sync**, takes an

@@ -73,7 +73,7 @@ T = TypeVar("T", bound=BaseModel)
 
 def register_routes(
     app_or_router: FastAPI | APIRouter,
-    resource: Resource[Any],
+    resource: Resource[Any, Any],
     *,
     prefix: str = "",
     tags: Sequence[str] | None = None,
@@ -152,7 +152,7 @@ def register_routes(
 
 
 def _service_dependency(
-    resource: Resource[T], builder: DependencyBuilder
+    resource: Resource[T, Any], builder: DependencyBuilder
 ) -> Callable[..., AsyncIterator[Service[T, Any]]]:
     """Resolve the per-request service dependency for ``resource`` via ``builder``.
 
@@ -175,7 +175,7 @@ def _service_dependency(
 # ---------------------------------------------------------------------------
 
 
-def _filter_surface(resource: Resource[Any]) -> dict[str, tuple[Any, frozenset[str]]]:
+def _filter_surface(resource: Resource[Any, Any]) -> dict[str, tuple[Any, frozenset[str]]]:
     """The exposed resource's filter surface: attribute -> (annotation, ops).
 
     Two sources, matching the two candidates in issue #79:
@@ -362,7 +362,7 @@ def _add_search_route(
     router: APIRouter,
     path: str,
     models: RestModels,
-    exposed: Resource[Any],
+    exposed: Resource[Any, Any],
     service_dep: Any,
     strategy: Any,
 ) -> None:
@@ -420,7 +420,7 @@ def _add_search_route(
 def _add_count_route(
     router: APIRouter,
     path: str,
-    exposed: Resource[Any],
+    exposed: Resource[Any, Any],
     service_dep: Any,
     strategy: Any,
 ) -> None:

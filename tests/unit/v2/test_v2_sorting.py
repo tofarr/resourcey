@@ -223,7 +223,7 @@ def _encryption() -> EncryptionService:
 
 
 @pytest_asyncio.fixture
-async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any]]]:
+async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any, Any]]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     widgets = SqlResource(
@@ -401,7 +401,7 @@ class TestSortSurface:
             widgets.resolve_sort_order("secret", False)
 
     async def test_declared_sort_order_type_is_honoured(self) -> None:
-        class Declared(SqlResource[Any]):
+        class Declared(SqlResource[Any, Any]):
             def get_sort_order_type(self) -> type[SortOrder[Any]]:
                 return AttrSortOrder
 

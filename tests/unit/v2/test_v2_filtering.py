@@ -218,7 +218,7 @@ class Thing(SqlBase):
 
 
 @pytest_asyncio.fixture
-async def sql_env() -> AsyncIterator[tuple[Any, SqlResource[Any]]]:
+async def sql_env() -> AsyncIterator[tuple[Any, SqlResource[Any, Any]]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     resource = SqlResource(Thing, session_factory=maker)
@@ -239,7 +239,7 @@ async def sql_env() -> AsyncIterator[tuple[Any, SqlResource[Any]]]:
     await engine.dispose()
 
 
-async def _ids(resource: SqlResource[Any], filter_: SearchFilter[Any]) -> list[int]:
+async def _ids(resource: SqlResource[Any, Any], filter_: SearchFilter[Any]) -> list[int]:
     from sqlalchemy import select
 
     async with resource._session_factory() as session:
@@ -423,7 +423,7 @@ class Widget(ApiBase):
 
 
 @pytest_asyncio.fixture
-async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any]]]:
+async def api_client() -> AsyncIterator[tuple[AsyncClient, SqlResource[Any, Any]]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     widgets = SqlResource(Widget, session_factory=maker)
