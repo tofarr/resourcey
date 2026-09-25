@@ -74,7 +74,8 @@ class DefaultDependencyBuilder(DependencyBuilder):
 
     def get_service_dependency(self, resource: Resource[Any, Any]) -> Callable[..., object]:
         async def dependency(request: Request) -> AsyncIterator[Service[Any, Any]]:
-            async with resource.get_service(request_ctx(request)) as service:
+            service = await resource.get_service(request_ctx(request))
+            async with service:
                 yield service
 
         return dependency

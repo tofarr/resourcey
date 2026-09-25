@@ -11,9 +11,12 @@ transport assumption and makes the resource a clean seam to subclass::
 
 ``ctx`` and storage ownership
 -----------------------------
-:meth:`Resource.get_service` is **sync** and takes an optional call-scoped
-``MutableMapping``; the returned :class:`~resourcey.v2.core.service.Service` is
-the async context manager that owns the storage lifetime. This keeps storage
+:meth:`Resource.get_service` is **async** and takes an optional call-scoped
+``MutableMapping``; awaiting it *builds* the service (a backend may have to
+resolve a connection), and the returned
+:class:`~resourcey.v2.core.service.Service` is the async context manager that
+owns the storage lifetime, so the call site is
+``async with await resource.get_service(ctx) as service``. This keeps storage
 strategies expressible without core privileging one:
 
 * **session-per-service** — a caller supplies the storage via ``ctx`` and owns
@@ -70,7 +73,7 @@ class Resource(ABC, Generic[T, K]):
     """The abstract resource contract, generic over the DTO type ``T`` and id ``K``.
 
     Every method is abstract. A backend (e.g.
-    :class:`~resourcey.v2.sql.resource.SqlResource`) implements the whole
+    :class:`~resourcey.v2.sql.sql_resource.SqlResource`) implements the whole
     contract; the transport layer consumes it, and the manifest owns the
     lifecycle it exposes through :meth:`__aenter__` / :meth:`__aexit__`.
     """
@@ -175,12 +178,14 @@ class Resource(ABC, Generic[T, K]):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
+    async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build the service for this resource over the call-scoped ``ctx``.
 
-        Sync: the returned :class:`~resourcey.v2.core.service.Service` is the
-        async context manager that owns the storage lifetime. Pass ``ctx`` to
-        share storage across services.
+        Async, so a backend can resolve a connection (e.g. an async session
+        maker) as part of building. The returned
+        :class:`~resourcey.v2.core.service.Service` is the async context manager
+        that owns the storage lifetime. Pass ``ctx`` to share storage across
+        services.
         """
 
     # ------------------------------------------------------------------

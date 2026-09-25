@@ -45,7 +45,7 @@ from resourcey.v2.util.sort_order import SortOrder
 
 if TYPE_CHECKING:
     from resourcey.v2.encryption.encryption_service import EncryptionService
-    from resourcey.v2.sql.resource import SqlResource
+    from resourcey.v2.sql.sql_resource import SqlResource
 
 T = TypeVar("T", bound=BaseModel)
 K = TypeVar("K")

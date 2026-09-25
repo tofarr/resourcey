@@ -189,13 +189,23 @@ def test_the_sql_files_exist_without_an_init():
     names = {p.name for p in sorted(sql.glob("*.py"))}
     assert names == {
         "cursor.py",
+        "db_config.py",
         "filter_converter.py",
-        "resource.py",
-        "service.py",
+        "session_manager.py",
         "sort_converter.py",
+        "sql_config.py",
+        "sql_resource.py",
+        "sql_service.py",
         "sqlalchemy_2_dto.py",
     }
     assert not (sql / "__init__.py").exists()
+
+
+def test_the_config_files_exist_without_an_init():
+    config = V2_DIR / "config"
+    names = {p.name for p in sorted(config.glob("*.py"))}
+    assert names == {"config_base.py", "lazy_field.py"}
+    assert not (config / "__init__.py").exists()
 
 
 def test_the_encryption_files_exist_without_an_init():

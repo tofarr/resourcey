@@ -83,10 +83,6 @@ class TestResolveImportPaths:
 
 
 class _SingleLazyConfig(BaseConfig):
-    @classmethod
-    def get_prefix(cls) -> str:
-        return "SINGLECFG"
-
     pet: ClassVar[Animal] = LazyField()
 
 

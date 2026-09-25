@@ -31,7 +31,7 @@ from resourcey.v2.core.errors import UnsupportedFilterError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.http.app import create_app
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
-from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.util.search_filter import (
     AllFilter,
     AndFilter,
@@ -400,7 +400,7 @@ class TestSqlConversion:
 class TestFilterSurfaceQueries:
     async def test_search_and_count_filter(self, sql_env) -> None:
         _maker, resource = sql_env
-        async with resource.get_service() as service:
+        async with await resource.get_service() as service:
             page = await service.search(search_filter=build_filter([("name", "contains", "b")]))
             assert [item.id for item in page.items] == [2]
             assert await service.count(search_filter=build_filter([("score", "ge", 10)])) == 1
@@ -496,7 +496,7 @@ class TestFilterIterationFallback:
     async def test_iteration_fallback_matches_equivalently(self, sql_env) -> None:
         _maker, resource = sql_env
         resource.allow_filter_iteration = True
-        async with resource.get_service() as service:
+        async with await resource.get_service() as service:
             # A filter that lowers to standard nodes converts normally, so the
             # fallback is exercised by a filter referencing a relationship-like
             # attribute that has no column.
@@ -508,12 +508,12 @@ class TestFilterIterationFallback:
     async def test_iteration_fallback_recovers_from_unconvertible(self, sql_env) -> None:
         _maker, resource = sql_env
         resource.allow_filter_iteration = True
-        async with resource.get_service() as service:
+        async with await resource.get_service() as service:
             page = await service.search(search_filter=attr("nope", EqFilter(value=1)))
             assert page.items == []
 
     async def test_unconvertible_without_opt_in_raises(self, sql_env) -> None:
         _maker, resource = sql_env
-        async with resource.get_service() as service:
+        async with await resource.get_service() as service:
             with pytest.raises(UnsupportedFilterError):
                 await service.search(search_filter=attr("nope", EqFilter(value=1)))

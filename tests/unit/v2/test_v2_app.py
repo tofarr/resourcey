@@ -34,7 +34,7 @@ from resourcey.v2.http.dependency_builder import (
     request_ctx,
 )
 from resourcey.v2.http.routes import register_error_handlers, register_routes
-from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.sql.sql_resource import SqlResource
 
 
 class AppBase(DeclarativeBase):

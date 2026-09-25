@@ -12,7 +12,7 @@ A column may override the inferred field projection by placing a
 :class:`~resourcey.v2.core.dto.DtoField` in its ``info`` under the
 ``dto_field`` key.
 
-The action layer lives in :mod:`resourcey.v2.sql.service`.
+The action layer lives in :mod:`resourcey.v2.sql.sql_service`.
 
 This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``.
 """
@@ -32,8 +32,9 @@ from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, Service, ServiceError
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
-from resourcey.v2.sql.service import SqlService
+from resourcey.v2.sql.session_manager import SqlSessionManager, get_sql_session_manager
 from resourcey.v2.sql.sort_converter import SqlSortContext, SqlSortConverter
+from resourcey.v2.sql.sql_service import SqlService
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
 from resourcey.v2.util.naming import camel_to_kebab, pluralize
 from resourcey.v2.util.search_filter import SearchFilter, operators_for_annotation
@@ -56,6 +57,12 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         model: The SQLAlchemy declarative model to serve. Its mapped columns
             become the DTO / REST models.
         session_factory: The async session maker the service opens sessions from.
+            The escape hatch: when supplied it wins over ``session_manager``.
+        session_manager: The manager the service resolves a session maker from
+            (default: the process-wide :func:`get_sql_session_manager`). It must
+            be entered (via the manifest) before the first service is built.
+        name: The connection name to resolve from ``session_manager`` (default:
+            the first configured connection).
         path: An explicit REST path segment (defaults to the model name, pluralized).
         encryption_service: The service used to encrypt/decrypt pagination
             cursors; when omitted, cursors are unsupported.
@@ -65,7 +72,9 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         self,
         model: type[Any],
         *,
-        session_factory: async_sessionmaker[AsyncSession],
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+        session_manager: SqlSessionManager | None = None,
+        name: str | None = None,
         path: str | None = None,
         encryption_service: EncryptionService | None = None,
     ) -> None:
@@ -73,6 +82,8 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         self._dto = sqlalchemy_2_dto(model)
         self._path = path
         self._session_factory = session_factory
+        self._session_manager = session_manager
+        self._connection_name = name
         self._encryption_service = encryption_service
         self._entered = False
         self._manifest: Manifest | None = None
@@ -259,9 +270,19 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     # Service seam
     # ------------------------------------------------------------------
 
-    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
-        """Build a :class:`SqlService` over ``ctx`` and the injected session factory."""
-        return SqlService(self, ctx if ctx is not None else {}, self._session_factory)
+    async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
+        """Build a :class:`SqlService` over ``ctx`` and a session maker.
+
+        An explicit ``session_factory`` wins (the escape hatch); otherwise the
+        session maker is resolved from ``session_manager`` — the injected one,
+        else the process-wide :func:`get_sql_session_manager` — by
+        ``connection_name``. Resolving by name makes this method async.
+        """
+        maker = self._session_factory
+        if maker is None:
+            manager = self._session_manager or get_sql_session_manager()
+            maker = await manager.get_session_maker(self._connection_name)
+        return SqlService(self, ctx if ctx is not None else {}, maker)
 
     # ------------------------------------------------------------------
     # Registration / lifecycle

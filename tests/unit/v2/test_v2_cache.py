@@ -1,7 +1,7 @@
 """Tests for ``v2`` caching (issue #92): the migration of the v1 cache surface.
 
 Covers the ``v2`` value objects and strategies, the default selection on
-:class:`~resourcey.v2.sql.resource.SqlResource`, and the HTTP-layer integration:
+:class:`~resourcey.v2.sql.sql_resource.SqlResource`, and the HTTP-layer integration:
 ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires`` emission and
 ``304 Not Modified`` conditional-request short-circuit on read / search / count
 / batch-read / batch-edit / create.
@@ -37,7 +37,7 @@ from resourcey.v2.cache.cache_strategy import (
 from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.service import Action
-from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.sql.sql_resource import SqlResource
 
 
 class Item(BaseModel):

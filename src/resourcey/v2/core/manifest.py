@@ -21,6 +21,8 @@ This module is part of the ``v2/core`` bottom layer: it imports no other
 
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
+from types import TracebackType
 from typing import Any
 
 from resourcey.v2.core.resource import Resource
@@ -32,12 +34,21 @@ class Manifest:
 
     Attributes:
         resources: The resource instances, in declaration order.
+        managers: App-lifecycle async context managers (e.g. a session manager)
+            entered before the resources and exited after them. Deliberately
+            generic, not typed to any backend: ``v2/core`` must not import
+            ``v2/sql``, and later resources / config can hang their own
+            lifecycle off the same slot.
     """
 
     def __init__(
-        self, resources: tuple[Resource[Any, Any], ...] | list[Resource[Any, Any]]
+        self,
+        resources: tuple[Resource[Any, Any], ...] | list[Resource[Any, Any]],
+        managers: tuple[AbstractAsyncContextManager[Any], ...]
+        | list[AbstractAsyncContextManager[Any]] = (),
     ) -> None:
         self.resources: tuple[Resource[Any, Any], ...] = tuple(resources)
+        self.managers: tuple[AbstractAsyncContextManager[Any], ...] = tuple(managers)
         self._entered = False
         for resource in self.resources:
             assert_real_actions(type(resource).__name__, resource.get_supported_actions())
@@ -60,18 +71,27 @@ class Manifest:
     # -- lifecycle ------------------------------------------------------
 
     async def __aenter__(self) -> Manifest:
-        """Enter each resource's runtime lifecycle in declaration order."""
+        """Enter managers, then each resource's lifecycle in declaration order."""
         if self._entered:
             raise ServiceError("Manifest already entered")
         self._entered = True
+        for manager in self.managers:
+            await manager.__aenter__()
         for resource in self.resources:
             await resource.__aenter__()
         return self
 
-    async def __aexit__(self, *exc: object) -> None:
-        """Exit each resource in reverse declaration order."""
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        """Exit resources in reverse order, then managers (reverse of entry)."""
         for resource in reversed(self.resources):
-            await resource.__aexit__(*exc)
+            await resource.__aexit__(exc_type, exc, tb)
+        for manager in reversed(self.managers):
+            await manager.__aexit__(exc_type, exc, tb)
         self._entered = False
 
     @property
