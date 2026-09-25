@@ -32,7 +32,13 @@ until the first release.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
-  standalone projects.
+  standalone projects. `01_message_board` is the **`v2` reference app** (issue
+  #113): model-first `SqlResource` over ORM models, a shared `SqlSessionManager`
+  in the manifest's `managers=`, `create_app`, a declared `BaseObjectFilter`,
+  `APP_*` config, and Alembic driven directly against `Base.metadata` (there is
+  no `resourcey migrate` in `v2` — that CLI reads the `v1` `ResourceyBase` /
+  `FrameworkConfig.manifest`). `v2` does no `.env` loading, so its run/debug
+  commands pass `uvicorn --env-file .env` / `uv run --env-file .env`.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
