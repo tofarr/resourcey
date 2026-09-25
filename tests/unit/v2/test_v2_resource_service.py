@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.cache.cache_strategy import ETagCacheStrategy
+from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
@@ -200,13 +201,23 @@ async def test_batch_read_and_batch_edit(resources):
         assert edited[1] is None
 
 
-async def test_search_rejects_sort_and_desc_for_now(resources):
+async def test_search_sorts_ascending_and_descending(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
-        with pytest.raises(NotImplementedError):
-            await service.search(sort="title")
-        with pytest.raises(NotImplementedError):
-            await service.search(desc=True)
+        await service.create(_dto_type(Thread)(title="b"))
+        await service.create(_dto_type(Thread)(title="a"))
+        await service.create(_dto_type(Thread)(title="c"))
+        ascending = await service.search(limit=10, sort="title")
+        assert [item.title for item in ascending.items] == ["a", "b", "c"]
+        descending = await service.search(limit=10, sort="title", desc=True)
+        assert [item.title for item in descending.items] == ["c", "b", "a"]
+
+
+async def test_search_rejects_an_unknown_sort_field(resources):
+    _maker, threads, _messages = resources
+    async with threads.get_service() as service:
+        with pytest.raises(InvalidInputError, match="sort field"):
+            await service.search(sort="nope")
 
 
 async def test_search_and_count_accept_a_filter(resources):

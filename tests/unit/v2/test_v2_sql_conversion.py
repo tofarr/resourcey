@@ -612,12 +612,12 @@ def test_explicit_dto_field_on_the_primary_key_wins_over_conventions():
 
 
 def test_uuid_natural_key_stays_client_supplied():
-    class Country(AdoptedBase):
+    class UuidCountry(AdoptedBase):
         __tablename__ = "uuid_countries"
         code: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
         name: Mapped[str] = mapped_column(String(50))
 
-    dto = sqlalchemy_2_dto(Country)
+    dto = sqlalchemy_2_dto(UuidCountry)
     field = dto.get_fields()["code"]
     assert dto.id_field_name == "code"
     assert field.in_create_request is True

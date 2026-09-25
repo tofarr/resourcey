@@ -160,17 +160,20 @@ async def test_cursor_pagination_requires_an_encryption_service():
 )
 def test_cursor_round_trips_scalar_values(value):
     service = _encryption()
-    cursor = cursor_module.encode_cursor(service, value)
-    assert cursor_module.decode_cursor(service, cursor) == value
+    cursor = cursor_module.encode_cursor(
+        service, sort_field=None, ascending=True, sort_key=value, id_value=value
+    )
+    sort_field, ascending, sort_key, id_value = cursor_module.decode_cursor(service, cursor)
+    assert (sort_field, ascending, sort_key, id_value) == (None, True, value, value)
 
 
 def test_cursor_round_trips_datetime_and_uuid():
     service = _encryption()
     for value in (datetime(2020, 1, 2, 3, 4, 5, tzinfo=UTC), uuid4()):
-        assert (
-            cursor_module.decode_cursor(service, cursor_module.encode_cursor(service, value))
-            == value
+        cursor = cursor_module.encode_cursor(
+            service, sort_field="created_at", ascending=False, sort_key=value, id_value=value
         )
+        assert cursor_module.decode_cursor(service, cursor) == ("created_at", False, value, value)
 
 
 @pytest.mark.parametrize(
@@ -184,12 +187,15 @@ def test_cursor_round_trips_datetime_and_uuid():
 )
 def test_cursor_round_trips_remaining_scalar_types(value):
     service = _encryption()
-    decoded = cursor_module.decode_cursor(service, cursor_module.encode_cursor(service, value))
+    cursor = cursor_module.encode_cursor(
+        service, sort_field=None, ascending=True, sort_key=value, id_value=value
+    )
+    decoded = cursor_module.decode_cursor(service, cursor)
     if isinstance(value, object) and type(value) is object:
         # An unknown type falls back to its string repr.
-        assert decoded == str(value)
+        assert decoded[2] == str(value)
     else:
-        assert decoded == value
+        assert decoded[2] == value
 
 
 def test_deserialize_unknown_tag_falls_back_to_the_repr():
@@ -200,5 +206,47 @@ def test_keyset_predicate_compares_the_id_column():
     from sqlalchemy import Column, Integer, MetaData, Table
 
     table = Table("t", MetaData(), Column("id", Integer, primary_key=True))
-    predicate = cursor_module.keyset_predicate(table.c.id, 5)
+    predicate = cursor_module.keyset_predicate(
+        sort_column=table.c.id,
+        id_column=table.c.id,
+        cursor_key=5,
+        cursor_id=5,
+        ascending=True,
+    )
     assert str(predicate.compile()) == "t.id > :id_1"
+
+
+def test_keyset_predicate_uses_the_sort_key_with_id_tie_breaker():
+    from sqlalchemy import Column, Integer, MetaData, Table
+
+    table = Table("t", MetaData(), Column("id", Integer, primary_key=True), Column("n", Integer))
+    ascending = cursor_module.keyset_predicate(
+        sort_column=table.c.n,
+        id_column=table.c.id,
+        cursor_key=3,
+        cursor_id=5,
+        ascending=True,
+    )
+    assert str(ascending.compile()) == "t.n > :n_1 OR t.n = :n_2 AND t.id > :id_1"
+    descending = cursor_module.keyset_predicate(
+        sort_column=table.c.n,
+        id_column=table.c.id,
+        cursor_key=3,
+        cursor_id=5,
+        ascending=False,
+    )
+    assert str(descending.compile()) == "t.n < :n_1 OR t.n = :n_2 AND t.id < :id_1"
+
+
+def test_keyset_predicate_collapses_descending_on_the_id_column():
+    from sqlalchemy import Column, Integer, MetaData, Table
+
+    table = Table("t", MetaData(), Column("id", Integer, primary_key=True))
+    predicate = cursor_module.keyset_predicate(
+        sort_column=table.c.id,
+        id_column=table.c.id,
+        cursor_key=5,
+        cursor_id=5,
+        ascending=False,
+    )
+    assert str(predicate.compile()) == "t.id < :id_1"

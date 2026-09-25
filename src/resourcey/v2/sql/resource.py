@@ -32,8 +32,10 @@ from resourcey.v2.core.resource import Resource, _camel_to_kebab, _pluralize
 from resourcey.v2.core.service import Action, CacheStrategy, Service, ServiceError
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.service import SqlService
+from resourcey.v2.sql.sort_converter import SqlSortContext, SqlSortConverter
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
 from resourcey.v2.util.search_filter import SearchFilter, operators_for_annotation
+from resourcey.v2.util.sort_order import SortOrder
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
@@ -140,6 +142,23 @@ class SqlResource(Resource[T]):
         """
         return None
 
+    def get_sortable_fields(self) -> frozenset[str]:
+        """Every field the read model exposes — the default sort surface.
+
+        Derived from ``read_response`` (the same gate as filtering), so a field
+        projected away is not sortable: ``?sort=secret`` would otherwise leak
+        the hidden value's relative order. Override to narrow it.
+        """
+        return self.get_queryable_fields()
+
+    def get_sort_order_type(self) -> type[SortOrder[Any]] | None:
+        """A declared :class:`SortOrder` class, or ``None`` (derive the surface).
+
+        Override to opt into a declared sort node; the derived
+        ``(attribute, descending)`` surface is otherwise used.
+        """
+        return None
+
     # Opt-in escape hatch: when True, an unconvertible filter falls back to an
     # in-memory scan instead of raising. Off by default — see
     # ``SqlService._apply_filters``.
@@ -175,6 +194,30 @@ class SqlResource(Resource[T]):
         return SqlFilterConverter(
             self.build_filter_context(session, allow_iteration=allow_iteration)
         )
+
+    # ------------------------------------------------------------------
+    # Sort conversion seam
+    # ------------------------------------------------------------------
+
+    def build_sort_context(self) -> SqlSortContext:
+        """The sort context: only *sortable* fields resolve to columns.
+
+        Restricting ``columns`` to :meth:`get_sortable_fields` is the security
+        gate, mirroring filtering: a field projected away from the read model
+        has no column here, so ``?sort=secret`` raises rather than leaking the
+        hidden value's relative order.
+        """
+        sortable = self.get_sortable_fields()
+        columns = {
+            attr: self.table.c[column_name]
+            for attr, column_name in self._column_for_attr.items()
+            if attr in sortable
+        }
+        return SqlSortContext(columns=columns, id_column=self.id_column)
+
+    def build_sort_converter(self) -> SqlSortConverter:
+        """A converter over this resource's sort surface."""
+        return SqlSortConverter(self.build_sort_context())
 
     # ------------------------------------------------------------------
     # Actions / exposure

@@ -1,17 +1,22 @@
-"""Opaque, tamper-proof keyset cursor for ``v2`` pagination (issue #78).
+"""Opaque, tamper-proof keyset cursor for ``v2`` pagination (issues #78, #97).
 
-The cursor encodes the identifier of the last row on the current page and is
-encrypted with :class:`~resourcey.v2.encryption.encryption_service.EncryptionService`
+The cursor encodes the ``(sort field, ascending, sort key, id)`` of the last row
+on the current page — the ``v1`` shape — and is encrypted with
+:class:`~resourcey.v2.encryption.encryption_service.EncryptionService`
 (JWE ``dir`` + ``A256GCM``), so a client cannot forge or alter it: any tampering
 invalidates the GCM auth tag and :meth:`EncryptionService.decrypt_value` raises,
 which the service maps to an error rather than silently paging from a bogus
 position.
 
-Ordering in ``v2`` is fixed to the identifier field, so the cursor needs only
-the id keyset — no sort-field tuple. Values are stored with a type tag
-(:func:`_serialize` / :func:`_deserialize`) so non-JSON-native types
-(``datetime``, ``UUID``, ``Decimal``, ...) round-trip to their native Python
-type and bind correctly to the keyset ``WHERE`` predicate.
+Encoding the sort field and direction is what lets the service **reject** a
+cursor reused under a different sort (a ``sort=created_at`` page's
+``next_cursor`` sent back with ``sort=name`` would otherwise apply the
+decrypted key against the wrong column, yielding silently wrong results).
+``sort_field`` is ``None`` for the default, no-sort (identifier-ordered) case.
+
+Values are stored with a type tag (:func:`_serialize` / :func:`_deserialize`) so
+non-JSON-native types (``datetime``, ``UUID``, ``Decimal``, ...) round-trip to
+their native Python type and bind correctly to the keyset ``WHERE`` predicate.
 
 A *seek* (keyset) cursor is both efficient (no ``OFFSET n`` scan) and stable
 under concurrent inserts.
@@ -24,8 +29,10 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
+
+from sqlalchemy import and_, or_
 
 if TYPE_CHECKING:
     from sqlalchemy.sql.elements import ColumnElement
@@ -33,6 +40,9 @@ if TYPE_CHECKING:
     from resourcey.v2.encryption.encryption_service import EncryptionService
 
 # JSON keys kept short to minimise ciphertext size.
+_K_SORT = "s"  # sort field name (None for the default id-ordered case)
+_K_ASC = "a"  # ascending flag
+_K_KEY = "k"  # type-tagged sort-key value
 _K_ID = "id"  # type-tagged id value
 
 
@@ -87,23 +97,76 @@ def _deserialize(tag: str, repr_: Any) -> Any:
     return repr_
 
 
-def encode_cursor(encryption_service: EncryptionService, id_value: Any) -> str:
-    """Encrypt an id value into an opaque cursor."""
-    payload = json.dumps({_K_ID: _serialize(id_value)}, default=str)
+def encode_cursor(
+    encryption_service: EncryptionService,
+    *,
+    sort_field: str | None,
+    ascending: bool,
+    sort_key: Any,
+    id_value: Any,
+) -> str:
+    """Encrypt a ``(sort_field, ascending, sort_key, id)`` tuple into a cursor."""
+    payload = json.dumps(
+        {
+            _K_SORT: sort_field,
+            _K_ASC: ascending,
+            _K_KEY: _serialize(sort_key),
+            _K_ID: _serialize(id_value),
+        },
+        default=str,
+    )
     return encryption_service.encrypt_value(payload)
 
 
-def decode_cursor(encryption_service: EncryptionService, cursor: str) -> Any:
-    """Decrypt a cursor back to its native id value.
+def decode_cursor(
+    encryption_service: EncryptionService, cursor: str
+) -> tuple[str | None, bool, Any, Any]:
+    """Decrypt a cursor back to ``(sort_field, ascending, sort_key, id_value)``.
 
-    Raises ``ValueError`` (from ``decrypt_value``) when the cursor is malformed
-    or tampered.
+    ``sort_field`` is ``None`` when the cursor was built for the default
+    identifier-ordered (no-sort) case. Raises ``ValueError`` (from
+    ``decrypt_value``) when the cursor is malformed or tampered.
     """
     payload: dict[str, Any] = json.loads(encryption_service.decrypt_value(cursor))
+    key_tag, key_repr = payload[_K_KEY]
     id_tag, id_repr = payload[_K_ID]
-    return _deserialize(id_tag, id_repr)
+    return (
+        payload[_K_SORT],
+        bool(payload[_K_ASC]),
+        _deserialize(key_tag, key_repr),
+        _deserialize(id_tag, id_repr),
+    )
 
 
-def keyset_predicate(id_column: Any, cursor_id: Any) -> ColumnElement[bool]:
-    """The ``WHERE`` clause that seeks past the cursor row (ascending id order)."""
-    return id_column > cursor_id  # type: ignore[no-any-return]
+def keyset_predicate(
+    *,
+    sort_column: Any,
+    id_column: Any,
+    cursor_key: Any,
+    cursor_id: Any,
+    ascending: bool,
+) -> ColumnElement[bool]:
+    """Build the ``WHERE`` clause that seeks past the cursor row.
+
+    For ascending order, rows where ``(sort_key, id) > (cursor_key, cursor_id)``
+    are kept. For descending, the comparison is mirrored so rows *before* the
+    cursor (in sort order) are kept — i.e. ``(sort_key, id) < (cursor_key,
+    cursor_id)``. The id tie-breaker keeps the order stable when sort keys
+    collide, mirroring the identifier appended to every ``ORDER BY``.
+
+    When the sort column *is* the id column (the default no-sort case), the
+    predicate collapses to a single comparison on id.
+    """
+    if sort_column is id_column:
+        if ascending:
+            return cast("ColumnElement[bool]", sort_column > cursor_id)
+        return cast("ColumnElement[bool]", sort_column < cursor_id)
+    if ascending:
+        return or_(
+            sort_column > cursor_key,
+            and_(sort_column == cursor_key, id_column > cursor_id),
+        )
+    return or_(
+        sort_column < cursor_key,
+        and_(sort_column == cursor_key, id_column < cursor_id),
+    )
