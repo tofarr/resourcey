@@ -29,12 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from resourcey.v2.cache.cache_defaults import DefaultCacheStrategyMixin
 from resourcey.v2.core.dto import RestModels
 from resourcey.v2.core.errors import InvalidInputError
-from resourcey.v2.core.resource import Resource, _camel_to_kebab, _pluralize
+from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, Service, ServiceError
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.service import SqlService
 from resourcey.v2.sql.sort_converter import SqlSortContext, SqlSortConverter
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
+from resourcey.v2.util.naming import camel_to_kebab, pluralize
 from resourcey.v2.util.search_filter import SearchFilter, operators_for_annotation
 from resourcey.v2.util.sort_order import AttrSortOrder, SortOrder
 
@@ -100,7 +101,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
         """The REST path segment: an explicit ``path`` else the model name, pluralized."""
         if self._path is not None:
             return self._path.lstrip("/")
-        return _pluralize(_camel_to_kebab(self._dto.__name__).lower())
+        return pluralize(camel_to_kebab(self._dto.__name__).lower())
 
     # get_cache_strategy is inherited from DefaultCacheStrategyMixin: read-only
     # → optimistic, else last-modified when ``updated_at`` is readable, else

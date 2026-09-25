@@ -511,6 +511,12 @@ untouched until it is removed. `v2/util` imports **no project package** at all
 
 and `v2/core` may import `v2/util` — the dependency runs one way.
 
+`src/resourcey/v2/util/naming.py` holds the shared name helpers `camel_to_kebab`
+(inserts `-` boundaries without lowercasing) and `pluralize` (a small `s` / `es`
+rule preserving case), public and reusable by any backend — e.g. `SqlResource`
+composes them for its default `get_resource_path`. They were formerly private
+to `v2/core/resource.py`.
+
 `src/resourcey/v2/util/singleton.py` (issue #95) is a second, non-vendored
 leaf: a small `Singleton` mixin for the process-wide pieces the framework
 keeps accruing (encryption service, dependency builders, caches). Constructing
