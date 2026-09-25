@@ -162,10 +162,31 @@ async def test_batch_read_and_batch_edit_over_http(client: AsyncClient):
 
     edited = await client.post(
         "/threads/batch-edit",
-        json=[{"id": created["id"], "title": "edited"}, {"id": 999, "title": "nope"}],
+        json=[
+            {"kind": "Update", "item": {"id": created["id"], "title": "edited"}},
+            {"kind": "Update", "item": {"id": 999, "title": "nope"}},
+            {"kind": "Create", "item": {"title": "created"}},
+            {"kind": "Delete", "id": created["id"]},
+        ],
     )
     assert edited.status_code == 200
-    assert edited.json() == [{"id": created["id"], "title": "edited"}, None]
+    body = edited.json()
+    assert body[0] == {"id": created["id"], "title": "edited"}
+    assert body[1] is None
+    assert body[2]["title"] == "created"
+    assert body[3] is None
+
+
+async def test_batch_edit_rejects_an_unknown_kind(client: AsyncClient):
+    rejected = await client.post(
+        "/threads/batch-edit",
+        json=[{"kind": "Frobnicate", "id": 1}],
+    )
+    assert rejected.status_code == 422
+
+    # ``kind`` is required, so an untagged item is rejected too.
+    untagged = await client.post("/threads/batch-edit", json=[{"item": {"title": "x"}}])
+    assert untagged.status_code == 422
 
 
 async def test_second_resource_serves_its_own_derived_models(client: AsyncClient):

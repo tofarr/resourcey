@@ -257,7 +257,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
     # Service seam
     # ------------------------------------------------------------------
 
-    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T]:
+    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, Any]:
         """Build a :class:`SqlService` over ``ctx`` and the injected session factory."""
         return SqlService(self, ctx if ctx is not None else {}, self._session_factory)
 

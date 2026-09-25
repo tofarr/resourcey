@@ -42,19 +42,27 @@ import inspect
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
-from typing import Any, TypeVar, cast
+from typing import Annotated, Any, Literal, TypeVar, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, Field, create_model
 from sqlalchemy.exc import IntegrityError
 
 from resourcey.v2.cache.cache_header import CacheHeader
 from resourcey.v2.core.dto import RestModels, request_to_dto
 from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.resource import Resource
-from resourcey.v2.core.service import Action, NotFoundError, SearchSpec, Service, ServiceError
+from resourcey.v2.core.service import (
+    Action,
+    Create,
+    Delete,
+    NotFoundError,
+    Service,
+    ServiceError,
+    Update,
+)
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
 from resourcey.v2.util.missing import MISSING
 from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
@@ -144,7 +152,7 @@ def register_routes(
 
 def _service_dependency(
     resource: Resource[T], builder: DependencyBuilder
-) -> Callable[..., AsyncIterator[Service[T]]]:
+) -> Callable[..., AsyncIterator[Service[T, Any]]]:
     """Resolve the per-request service dependency for ``resource`` via ``builder``.
 
     The builder is consulted **once, here, at registration time** (issue #86);
@@ -158,7 +166,7 @@ def _service_dependency(
             f"{type(builder).__name__}.get_service_dependency() returned a "
             f"non-callable {dependency!r}; a builder must return a FastAPI dependency."
         )
-    return cast("Callable[..., AsyncIterator[Service[T]]]", dependency)
+    return cast("Callable[..., AsyncIterator[Service[T, Any]]]", dependency)
 
 
 # ---------------------------------------------------------------------------
@@ -369,10 +377,9 @@ def _add_search_route(
     declared :meth:`~...get_search_filter_type`); an unknown field or operator,
     or any filter on a resource with no surface, is rejected ``400``.
 
-    The resolved ordering and filter are assembled into one
-    :class:`~resourcey.v2.core.service.SearchSpec`, so ``search`` receives a
-    single validated request object rather than loose ``sort`` / ``desc`` /
-    ``filters``.
+    The resolved ordering and filter are passed to ``search`` as plain
+    arguments (``search_filter`` / ``sort_order`` / ``cursor`` / ``limit``) rather
+    than wrapped in a request object.
     """
     filter_spec = _filter_surface(exposed)
     filter_dep = _filter_dependency(filter_spec)
@@ -387,13 +394,12 @@ def _add_search_route(
         service=Depends(service_dep),  # noqa: B008
     ):
         filters = _resolve_filters(request, filter_spec, values)
-        spec = SearchSpec(
-            limit=limit,
-            cursor=cursor,
+        page = await service.search(
+            search_filter=filters,
             sort_order=exposed.resolve_sort_order(sort, desc),
-            filters=filters,
+            cursor=cursor,
+            limit=limit,
         )
-        page = await service.search(spec=spec)
         body, items = _page_body(page, models.search_response)
         header = _header_for(strategy, items)
         return _cached_json_response(request, body, header)
@@ -432,7 +438,7 @@ def _add_count_route(
         service=Depends(service_dep),  # noqa: B008
     ):
         filters = _resolve_filters(request, filter_spec, values)
-        total = await service.count(filters=filters)
+        total = await service.count(search_filter=filters)
         header: CacheHeader | None = None
         if strategy is not None:
             candidate = strategy.count_cache_header(total, filters)
@@ -471,18 +477,29 @@ def _add_batch_edit_route(
     service_dep: Any,
     strategy: Any,
 ) -> None:
-    item_model = _batch_edit_item_model(models.update_request, id_field, id_type)
+    """Register ``POST /{resource}/batch-edit`` — mixed create / update / delete.
+
+    The body is a list discriminated by ``kind`` (``Create`` / ``Update`` /
+    ``Delete``), so one batch can create, update, *and* delete. Each item is
+    folded into the matching :class:`~resourcey.v2.core.service.Edit` node and
+    the results align positionally with the input (a delete, or a miss, is
+    ``None``).
+    """
+    body_model = _batch_edit_body(models.create_request, models.update_request, id_field, id_type)
 
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
-        edits = [_item_to_update_dto(item, dto_model) for item in payload]
+        edits = [_batch_edit_node(item, dto_model, id_field) for item in payload]
         edited = await service.batch_edit(edits)
-        items = [_project(item, models.update_response) for item in edited]
+        items = [
+            _project_edit_result(edit, result, models)
+            for edit, result in zip(edits, edited, strict=True)
+        ]
         header = _header_for(strategy, items)
         return _cached_json_response(request, _dump(items), header)
 
     handler.__annotations__ = {
         "request": Request,
-        "payload": list[item_model],  # type: ignore[valid-type]
+        "payload": list[body_model],  # type: ignore[valid-type]
         "service": Service,
     }
     _route(router, f"{path}/batch-edit", ["POST"], handler)
@@ -666,23 +683,77 @@ def _id_python_type(models: RestModels, id_field: str) -> Any:
     return annotation if isinstance(annotation, type) else str
 
 
-def _batch_edit_item_model(
-    update_request: type[BaseModel], id_field: str, id_type: Any
-) -> type[BaseModel]:
-    """Build the request-body item model for ``batch-edit``: id + update fields.
+def _batch_edit_body(
+    create_request: type[BaseModel],
+    update_request: type[BaseModel],
+    id_field: str,
+    id_type: Any,
+) -> Any:
+    """Build the ``batch-edit`` body: a ``kind``-discriminated union of edits.
 
-    Combines the typed identifier with the update model's fields so the JSON
-    body validates each edit in one pass.
+    Three wire shapes, matching :class:`~resourcey.v2.core.service.Create`,
+    :class:`~resourcey.v2.core.service.Update`, and
+    :class:`~resourcey.v2.core.service.Delete`:
+
+    * ``{kind: "Create", item: <create_request>}``
+    * ``{kind: "Update", item: {<id_field>, ...update_request fields}}``
+    * ``{kind: "Delete", <id_field>: <id>}``
+
+    The update item carries the identifier because the path does not; a create
+    item is the create request verbatim (a server-generated id is absent, a
+    natural key is client-supplied).
     """
+    create_edit = create_model(
+        f"{create_request.__name__}CreateEdit",
+        kind=(Literal["Create"], ...),
+        item=(create_request, ...),
+    )
     update_fields = {
         name: (field.annotation, field) for name, field in update_request.model_fields.items()
     }
-    model = create_model(  # type: ignore[call-overload]
-        f"{update_request.__name__}BatchEditItem",
-        **{id_field: (id_type, ...)},  # id is required on each edit
+    update_item = create_model(  # type: ignore[call-overload]
+        f"{update_request.__name__}BatchUpdateItem",
+        **{id_field: (id_type, ...)},  # the id is required on each update
         **update_fields,
     )
-    return cast("type[BaseModel]", model)
+    update_edit = create_model(
+        f"{update_request.__name__}UpdateEdit",
+        kind=(Literal["Update"], ...),
+        item=(update_item, ...),
+    )
+    delete_edit = create_model(  # type: ignore[call-overload]
+        f"{create_request.__name__}DeleteEdit",
+        kind=(Literal["Delete"], ...),
+        **{id_field: (id_type, ...)},
+    )
+    edits = create_edit | update_edit | delete_edit
+    return Annotated[edits, Field(discriminator="kind")]
+
+
+def _batch_edit_node(item: BaseModel, dto_model: type[BaseModel], id_field: str) -> Any:
+    """Fold a validated ``batch-edit`` body item into its :class:`Edit` node."""
+    kind = item.kind  # type: ignore[attr-defined]
+    if kind == "Create":
+        return Create(item=request_to_dto(dto_model, item.item))  # type: ignore[attr-defined]
+    if kind == "Update":
+        return Update(item=request_to_dto(dto_model, item.item))  # type: ignore[attr-defined]
+    return Delete(id=getattr(item, id_field))
+
+
+def _project_edit_result(
+    edit: Any, result: BaseModel | None, models: RestModels
+) -> BaseModel | None:
+    """Project a batch-edit result onto the shape for its edit.
+
+    A delete yields ``None`` (nothing to return); a create projects onto the
+    create response (so a one-time-reveal field survives) and an update onto the
+    update response. A miss (``result`` is ``None``) stays ``None``.
+    """
+    if isinstance(edit, Delete) or result is None:
+        return None
+    if isinstance(edit, Create):
+        return _project(result, models.create_response)
+    return _project(result, models.update_response)
 
 
 def _update_dto(
@@ -697,11 +768,6 @@ def _update_dto(
     dto = request_to_dto(dto_model, payload)
     setattr(dto, id_field, id_value)
     return dto
-
-
-def _item_to_update_dto(item: BaseModel, dto_model: type[BaseModel]) -> BaseModel:
-    """Build a batch-edit DTO from an item that already carries its own id."""
-    return request_to_dto(dto_model, item)
 
 
 def _normalize_prefix(prefix: str) -> str:

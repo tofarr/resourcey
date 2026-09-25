@@ -185,12 +185,17 @@ Four files, no `__init__.py`:
   CM), registration (`on_register` / `get_manifest`), and the lifecycle
   (`__aenter__` / `__aexit__`). Core stays free of storage *and* transport: the
   per-request FastAPI dependency is built in `v2/http`, not here.
-* `service.py` — `Service` is generic over the DTO, declares the eight actions,
-  and *is* the async context manager; a call before `__aenter__` raises. It
-  carries no storage: session-per-service and session-per-operation are both
-  expressible and core privileges neither. The shared rule is *whoever opens
-  the storage owns its commit and close; a resource that finds storage already
-  in `ctx` reuses it and neither commits nor closes it*.
+* `service.py` — `Service` is generic over the DTO `T` and the identifier type
+  `K`, declares the eight actions, and *is* the async context manager; a call
+  before `__aenter__` raises. `search` / `count` take a standard `SearchFilter`
+  tree (and `search` a `SortOrder`) as plain arguments, not a request object.
+  `batch_edit` takes a list of `Edit` nodes — a `kind`-discriminated union of
+  `Create[T]` / `Update[T]` / `Delete[K]` — so one batch can create, update,
+  *and* delete. It carries no storage: session-per-service and
+  session-per-operation are both expressible and core privileges neither. The
+  shared rule is *whoever opens the storage owns its commit and close; a
+  resource that finds storage already in `ctx` reuses it and neither commits nor
+  closes it*.
 * `manifest.py` — `Manifest` owns the resource set and lifecycle, and asserts
   at construction that every `get_supported_actions()` names only real
   `Action` members (a typo would otherwise silently drop a route). Construction
@@ -223,8 +228,10 @@ a developer can drop straight back to SQLAlchemy.
 * `service.py` — `SqlService` holds the call-scoped `ctx` and the session
   factory and implements the eight actions. `search` does keyset cursor
   pagination ordered by the identifier, or by a validated `sort` field (with
-  the identifier as a stable tie-breaker) when one is requested; `filters` is
-  pushed into the `WHERE` clause before the page is taken.
+  the identifier as a stable tie-breaker) when one is requested; `search_filter`
+  is pushed into the `WHERE` clause before the page is taken. `batch_edit`
+  dispatches over the `Edit` union: a `Create` yields the new DTO, an `Update`
+  the updated one, and a `Delete` (or an absent id) yields `None`.
 * `sqlalchemy_2_dto.py` — `sqlalchemy_2_dto(model)` infers a DTO declaration
   from an ORM model: column types map back to Python annotations, the primary
   key becomes `id_field_name`, nullability becomes `ann | None`, and
@@ -297,7 +304,7 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   class name, through the `_route` no-clobber escape hatch (a developer's route
   wins). The builder is resolved on the **exposed** resource, so a projection's
   wrapped service is the projection's. It also holds `register_error_handlers`,
-  the projection helper, and the batch-edit item model.
+  the projection helper, and the batch-edit body union.
 
 Where the port differs from `v1`: `get_rest_models()` replaces the
 create/update/read model getters, so each action maps explicitly to its shape

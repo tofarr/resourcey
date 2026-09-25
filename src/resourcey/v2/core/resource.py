@@ -177,7 +177,7 @@ class Resource(ABC, Generic[T]):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T]:
+    def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, Any]:
         """Build the service for this resource over the call-scoped ``ctx``.
 
         Sync: the returned :class:`~resourcey.v2.core.service.Service` is the

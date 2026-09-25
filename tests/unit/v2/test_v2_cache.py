@@ -468,7 +468,9 @@ async def test_batch_read_emits_etag_and_304(client: AsyncClient):
 
 async def test_batch_edit_emits_etag(client: AsyncClient):
     created = (await client.post("/items", json={"label": "a"})).json()
-    edited = await client.post("/items/batch-edit", json=[{"id": created["id"], "label": "b"}])
+    edited = await client.post(
+        "/items/batch-edit", json=[{"kind": "Update", "item": {"id": created["id"], "label": "b"}}]
+    )
     assert edited.status_code == 200
     assert "etag" in edited.headers
 

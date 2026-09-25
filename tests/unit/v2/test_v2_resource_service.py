@@ -27,10 +27,12 @@ from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
     STORAGE_KEY,
     Action,
+    Create,
+    Delete,
     NotFoundError,
-    SearchSpec,
     Service,
     ServiceError,
+    Update,
     assert_real_actions,
 )
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
@@ -153,7 +155,7 @@ async def test_crud_and_count_and_search(resources):
         assert updated.title == "bye"
 
         assert await service.count() == 1
-        page = await service.search(spec=SearchSpec(limit=10))
+        page = await service.search(limit=10)
         assert [item.title for item in page.items] == ["bye"]
 
         await service.delete(created.id)
@@ -194,12 +196,18 @@ async def test_batch_read_and_batch_edit(resources):
 
         edited = await service.batch_edit(
             [
-                _dto_type(Thread)(id=a.id, title="a2"),
-                _dto_type(Thread)(id=999, title="x"),
+                Update(item=_dto_type(Thread)(id=a.id, title="a2")),
+                Update(item=_dto_type(Thread)(id=999, title="x")),
+                Create(item=_dto_type(Thread)(title="c")),
+                Delete(id=b.id),
             ]
         )
         assert edited[0] is not None and edited[0].title == "a2"
         assert edited[1] is None
+        assert edited[2] is not None and edited[2].title == "c"
+        # a delete has nothing to project
+        assert edited[3] is None
+        assert (await service.batch_read([b.id]))[0] is None
 
 
 async def test_search_sorts_ascending_and_descending(resources):
@@ -209,11 +217,11 @@ async def test_search_sorts_ascending_and_descending(resources):
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="c"))
         ascending = await service.search(
-            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", False))
+            limit=10, sort_order=threads.resolve_sort_order("title", False)
         )
         assert [item.title for item in ascending.items] == ["a", "b", "c"]
         descending = await service.search(
-            spec=SearchSpec(limit=10, sort_order=threads.resolve_sort_order("title", True))
+            limit=10, sort_order=threads.resolve_sort_order("title", True)
         )
         assert [item.title for item in descending.items] == ["c", "b", "a"]
 
@@ -230,9 +238,9 @@ async def test_search_and_count_accept_a_filter(resources):
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
         filtered = build_filter([("title", "eq", "a")])
-        page = await service.search(spec=SearchSpec(filters=filtered))
+        page = await service.search(search_filter=filtered)
         assert [item.title for item in page.items] == ["a"]
-        assert await service.count(filters=filtered) == 1
+        assert await service.count(search_filter=filtered) == 1
         assert await service.count() == 2
 
 
@@ -241,7 +249,7 @@ async def test_search_orders_by_id_ascending(resources):
     async with threads.get_service() as service:
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
-        page = await service.search(spec=SearchSpec(limit=10))
+        page = await service.search(limit=10)
         assert [item.title for item in page.items] == ["a", "b"]
 
 
@@ -528,7 +536,7 @@ def test_ctx_is_a_plain_mutable_mapping(resources):
 
 
 async def test_base_service_actions_are_raising_safety_nets():
-    base: Service[Any] = Service()
+    base: Service[Any, Any] = Service()
     async with base:
         with pytest.raises(NotImplementedError):
             await base.create(None)

@@ -40,7 +40,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.core.dto import DtoField
-from resourcey.v2.core.service import SearchSpec
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.sql.resource import SqlResource
@@ -408,7 +407,7 @@ async def test_renamed_identifier_crud():
                 created,
                 None,
             ]
-            page = await service.search(spec=SearchSpec(limit=5))
+            page = await service.search(limit=5)
             assert [item.code for item in page.items] == ["US"]
     finally:
         await engine.dispose()

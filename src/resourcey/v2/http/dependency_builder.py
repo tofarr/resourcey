@@ -73,7 +73,7 @@ class DefaultDependencyBuilder(DependencyBuilder):
     """The default builder: the resource's own service over the request-scoped ctx."""
 
     def get_service_dependency(self, resource: Resource[Any]) -> Callable[..., object]:
-        async def dependency(request: Request) -> AsyncIterator[Service[Any]]:
+        async def dependency(request: Request) -> AsyncIterator[Service[Any, Any]]:
             async with resource.get_service(request_ctx(request)) as service:
                 yield service
 
