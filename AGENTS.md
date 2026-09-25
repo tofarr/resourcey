@@ -359,6 +359,16 @@ unknown `field__op` key with `InvalidInputError` (400) — FastAPI silently igno
 unknown query params, so a typo must not be dropped. The count route's ETag hashes
 the resolved filter too, so distinct filters get distinct validators.
 
+`specs/filtering.qnt` is the spec for this and pins four laws (all in `make
+specs` and CI): (1) `and_()`'s identity/annihilator normalisation preserves
+`matches` for every value; (2) the NULL-safe negated operator agrees with the
+in-memory complement on every row *and* naive SQL `NOT` provably disagrees (the
+NULL row is the counterexample); (3) that NULL-safe complement generalises from
+equality to the ordering operators (`IS NULL OR <complement>`); and (4) a
+positive pushdown agrees with `matches` on every row — the "convertible ⇒ SQL
+agrees" property the all-or-nothing policy rests on. The flat unrolling means
+`Or`/`Not` normalisation is not expressed.
+
 ### `v2/cache` — the migrated cache surface (issue #92)
 
 `src/resourcey/v2/cache/` mirrors the old `resourcey.cache` layout (no

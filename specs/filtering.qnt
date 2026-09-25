@@ -15,6 +15,10 @@
 //   is `col IS NULL OR col <= v`, which agrees on every row where naive `NOT`
 //   does not.
 //
+//   Law 4 (soundness): a positive pushdown agrees with the in-memory predicate
+//   on every row (NULL included), the "convertible => SQL agrees with matches"
+//   property the all-or-nothing pushdown policy rests on.
+//
 // Quint rejects recursive type declarations (QNT099), so a genuine recursive
 // filter tree cannot be written; the tree is unrolled into a flat clause list,
 // matching how resource_actions.qnt already models filters.
@@ -147,6 +151,37 @@ module filtering {
   pure def nullSafeNegationAgreesGt(v: int): bool =
     rows.foldl(true, (acc, row) => acc and ((sqlNullSafeNotGt(row, v) == T) == memNegGt(row, v)))
 
+  // ---- Law 4: positive pushdown is sound (all-or-nothing) ---------------
+  // "Convertible => the SQL condition agrees with matches()". If the positive
+  // condition were unsound, `_apply_filters` would either drop matching rows or
+  // admit non-matching ones once it truncates the page — so the all-or-nothing
+  // pushdown policy rests on this. Restricted to the operators here; NULL lands
+  // in the excluded (Unknown) branch on both sides, so it can never be admitted
+  // by mistake.
+
+  // (the `sqlGt` / `sqlEq` helpers above are reused here)
+
+  pure def memEq(row: Row, v: int): bool =
+    match row {
+      | Val(r) => r == v
+      | Null => false
+    }
+
+  pure def memGt(row: Row, v: int): bool =
+    match row {
+      | Val(r) => r > v
+      | Null => false
+    }
+
+  pure def positivePushdownIsSound(v: int): bool =
+    rows.foldl(
+      true,
+      (acc, row) =>
+        acc and
+        ((sqlEq(row, v) == T) == memEq(row, v)) and
+        ((sqlGt(row, v) == T) == memGt(row, v))
+    )
+
   // Small finite universes so the laws can be run as tests.
   pure val entityValues = List(0, 1, 2)
   pure val rows: List[Row] = List(Val(0), Val(1), Val(2), Null)
@@ -166,4 +201,9 @@ module filtering {
   // form), and the naive SQL `NOT` provably disagrees there too.
   run law3_nullSafeNegationGeneralises =
     nullSafeNegationAgreesGt(1) and naivelyNegatedGtDisagrees(1)
+
+  // Law 4: the positive pushdown is sound for eq / gt — the "convertible =>
+  // SQL agrees with matches()" property the all-or-nothing policy relies on.
+  run law4_positivePushdownIsSound =
+    positivePushdownIsSound(1) and positivePushdownIsSound(2)
 }
