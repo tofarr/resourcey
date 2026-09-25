@@ -30,11 +30,16 @@ class CacheHeader(BaseModel):
             when the strategy does not produce one.
         expire_at: When the cached representation should be considered stale,
             or ``None`` when no freshness directive is emitted.
+        private: Whether the freshness window is caller-scoped. When ``True``
+            the HTTP layer emits ``Cache-Control: private`` so a shared cache
+            (a proxy or CDN) must not store the response -- required when the
+            body can differ per caller even though the resource is read-only.
     """
 
     etag: str | None = None
     updated_at: datetime | None = None
     expire_at: datetime | None = None
+    private: bool = False
 
     def is_modified(self, other: CacheHeader) -> bool:
         """Whether the client's cached copy (``other``) is still current.
@@ -70,4 +75,9 @@ class CacheHeader(BaseModel):
 
     def has_any(self) -> bool:
         """Whether this header carries any validator or freshness directive."""
-        return self.etag is not None or self.updated_at is not None or self.expire_at is not None
+        return (
+            self.etag is not None
+            or self.updated_at is not None
+            or self.expire_at is not None
+            or self.private
+        )

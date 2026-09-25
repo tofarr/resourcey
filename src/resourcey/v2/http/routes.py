@@ -583,20 +583,27 @@ def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
         headers["ETag"] = header.etag
     if header.updated_at is not None:
         headers["Last-Modified"] = _http_date(header.updated_at)
+    # ``private`` keeps a caller-scoped freshness window out of shared caches;
+    # it is orthogonal to the validators, so it is a directive on whatever
+    # Cache-Control the freshness/validator rules produce.
+    directives: list[str] = ["private"] if header.private else []
     if header.expire_at is not None:
         # max-age is the remaining freshness window (the strategy's expire_in,
         # computed moments ago). Rounding preserves the integer seconds clients
         # expect in Cache-Control.
         now = datetime.now(UTC)
         max_age = max(0, int((header.expire_at - now).total_seconds()))
-        headers["Cache-Control"] = f"max-age={max_age}"
+        directives.append(f"max-age={max_age}")
+        headers["Cache-Control"] = ", ".join(directives)
         headers["Expires"] = _http_date(header.expire_at)
-    elif has_validator:
+    elif has_validator or directives:
         # Validators with no freshness window: force revalidation on every use.
         # Without a Cache-Control directive a browser falls back to heuristic
         # freshness and serves from cache without ever echoing the validator
         # back, so the conditional-request path (and 304s) never fires.
-        headers["Cache-Control"] = "no-cache"
+        if has_validator:
+            directives.append("no-cache")
+        headers["Cache-Control"] = ", ".join(directives)
     return headers
 
 

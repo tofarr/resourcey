@@ -93,9 +93,15 @@ class CacheStrategy(DiscriminatedUnionMixin, CoreCacheStrategy, ABC, Generic[T])
     field (seconds) is validated ``>= 0``; when ``> 0`` the strategy sets
     ``expire_at`` on the header, which the HTTP layer translates to
     ``Cache-Control: max-age=<expire_in>`` and an ``Expires`` header.
+
+    ``private`` marks the freshness window as caller-scoped: the HTTP layer
+    then emits ``Cache-Control: private`` so a shared cache (proxy / CDN) does
+    not store the response. A read-only resource whose body can still differ
+    per caller (a permission-narrowed search) sets it.
     """
 
     expire_in: int = 0
+    private: bool = False
 
     @model_validator(mode="after")
     def _validate_expire_in(self) -> CacheStrategy[T]:
@@ -132,8 +138,9 @@ class CacheStrategy(DiscriminatedUnionMixin, CoreCacheStrategy, ABC, Generic[T])
         return self.with_expiry(CacheHeader(etag=f'"{_digest(parts)}"'))
 
     def with_expiry(self, header: CacheHeader) -> CacheHeader:
-        """Attach ``expire_at`` from ``expire_in`` (in place) and return it."""
+        """Attach ``expire_at`` from ``expire_in`` and ``private`` (in place)."""
         header.expire_at = _expire_at(self.expire_in)
+        header.private = self.private
         return header
 
 
@@ -212,4 +219,13 @@ class OptimisticCacheStrategy(CacheStrategy[T]):
     def get_cache_header(
         self, models: list[T], *, context: dict[str, Any] | None = None
     ) -> CacheHeader:
+        return self.with_expiry(CacheHeader())
+
+    def count_cache_header(self, count: int, filters: Any = None) -> CacheHeader:
+        """Freshness only: the optimistic strategy emits no validators anywhere.
+
+        The base ``count`` ETag would contradict this strategy's contract (no
+        validator), so the count route gets the same freshness-only header as
+        the read routes.
+        """
         return self.with_expiry(CacheHeader())
