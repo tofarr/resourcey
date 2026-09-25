@@ -26,10 +26,10 @@ from pydantic import BaseModel
 from sqlalchemy import Column
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from resourcey.v2.cache.cache_defaults import default_cache_strategy
+from resourcey.v2.cache.cache_defaults import DefaultCacheStrategyMixin
 from resourcey.v2.core.dto import RestModels
 from resourcey.v2.core.resource import Resource, _camel_to_kebab, _pluralize
-from resourcey.v2.core.service import Action, CacheStrategy, Service, ServiceError
+from resourcey.v2.core.service import Action, Service, ServiceError
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.service import SqlService
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
 T = TypeVar("T", bound=BaseModel)
 
 
-class SqlResource(Resource[T]):
+class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
     """The SQL backend: an ORM model served by :class:`SqlService`.
 
     Args:
@@ -71,8 +71,7 @@ class SqlResource(Resource[T]):
         self._encryption_service = encryption_service
         self._entered = False
         self._manifest: Manifest | None = None
-        # Cache policy, resolved lazily by :meth:`get_cache_strategy`.
-        self._v2_cache_strategy: CacheStrategy | None = None
+        # The cache policy is resolved lazily by DefaultCacheStrategyMixin.
         self._column_for_attr = {
             prop.key: prop.columns[0].name for prop in model.__mapper__.column_attrs
         }
@@ -100,18 +99,9 @@ class SqlResource(Resource[T]):
             return self._path.lstrip("/")
         return _pluralize(_camel_to_kebab(self._dto.__name__).lower())
 
-    def get_cache_strategy(self) -> CacheStrategy:
-        """The default strategy: last-modified when ``updated_at`` is readable, else ETag.
-
-        Resolved from the derived read model and cached on the *instance*, so a
-        resource gets a stable strategy object across calls. (One ``SqlResource``
-        class serves many models, so a class-level cache would hand one model's
-        strategy to another.) A developer overrides this to change the policy
-        (e.g. an ``OptimisticCacheStrategy(expire_in=60)``).
-        """
-        if self._v2_cache_strategy is None:
-            self._v2_cache_strategy = default_cache_strategy(self.get_rest_models())
-        return self._v2_cache_strategy
+    # get_cache_strategy is inherited from DefaultCacheStrategyMixin: read-only
+    # → optimistic, else last-modified when ``updated_at`` is readable, else
+    # ETag. Override it here to change the policy for this resource.
 
     def get_queryable_fields(self) -> frozenset[str]:
         """Every field the read model exposes — the default query surface.

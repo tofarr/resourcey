@@ -374,8 +374,10 @@ agrees" property the all-or-nothing policy rests on. The flat unrolling means
 `src/resourcey/v2/cache/` mirrors the old `resourcey.cache` layout (no
 `__init__.py`):
 
-* `cache_header.py` — `CacheHeader` (the `etag` / `updated_at` / `expire_at`
-  value object and the `is_modified` matrix). HTTP-agnostic.
+* `cache_header.py` — `CacheHeader` (the `etag` / `updated_at` / `expire_at` /
+  `private` value object and the `is_modified` matrix). `private` marks a
+  caller-scoped freshness window so the HTTP layer emits `Cache-Control:
+  private` and a shared cache will not store the response. HTTP-agnostic.
 * `cache_strategy.py` — the concrete `CacheStrategy` base plus
   `ETagCacheStrategy` / `LastModifiedCacheStrategy` / `OptimisticCacheStrategy`.
   The concrete base is a `DiscriminatedUnionMixin` **and** extends
@@ -383,19 +385,39 @@ agrees" property the all-or-nothing policy rests on. The flat unrolling means
   so a strategy satisfies the core-level seam while its behaviour lives in
   `cache`. `get_cache_header(items, *, context=...)` hashes the read-model
   projection; `count_cache_header(count, filters)` handles the bare-integer
-  `count` route (a count-derived ETag; never last-modified).
-* `cache_defaults.py` — `default_cache_strategy(rest_models)`: last-modified
-  when the read model carries `updated_at`, else ETag.
+  `count` route (a count-derived ETag; never last-modified). The optimistic
+  strategy overrides `count_cache_header` to return freshness only, so it emits
+  no validator on **any** route — the read and count routes agree.
+* `cache_defaults.py` — the storage-agnostic default policy.
+  `default_cache_strategy(rest_models, supported_actions)` selects, in order: a
+  **read-only** resource (one advertising none of the write actions) →
+  `OptimisticCacheStrategy(expire_in=DEFAULT_READ_ONLY_EXPIRE_IN, private=True)`
+  (600s), since a surface that cannot change gains nothing from a validator; else
+  last-modified when the read model carries `updated_at`; else ETag. The
+  read-only window is **always `private`**: read-only does not imply the same
+  bytes for every caller (a permission-narrowed search is caller-scoped), and
+  the API-key header is not `Authorization`, so RFC 9111's authenticated-response
+  protection does not apply — a shared cache must be told not to store it.
+  `is_read_only(actions)` is the write-action test. `DefaultCacheStrategyMixin`
+  packages the default `get_cache_strategy()` — including the per-instance
+  caching — so any backend inherits the policy by supplying only
+  `get_rest_models()` and `get_supported_actions()` rather than copying it.
+  Those two hooks stay `@abstractmethod` in the mixin so it does not, by defining
+  concrete overrides, drop them from `Resource`'s abstract set (a backend that
+  forgets one still fails at instantiation).
 
 The wiring: `Resource.get_cache_strategy()` returns `None` in `v2/core` (which
-stays dependency-free); `SqlResource` overrides it to resolve the default
-**per instance** (one `SqlResource` class serves many DTOs, so a class-level
-cache would leak between them) and caches it on the instance. A developer
-overrides the same hook to change the policy. `v2/http/routes.py` reads the
-exposed resource's strategy once, passes it to every route builder, and each
-handler emits `ETag` / `Last-Modified` / `Cache-Control` / `Expires` and
-short-circuits a conditional `GET`/`HEAD` to `304 Not Modified`; a validator
-with no freshness window forces revalidation with `Cache-Control: no-cache`.
+stays dependency-free); `SqlResource` mixes in `DefaultCacheStrategyMixin` and
+so resolves the default **per instance** (one `SqlResource` class serves many
+DTOs, so a class-level cache would leak between them) and caches it on the
+instance. A developer overrides the same hook to change the policy.
+`v2/http/routes.py` reads the exposed resource's strategy once, passes it to
+every route builder, and each handler emits `ETag` / `Last-Modified` /
+`Cache-Control` / `Expires` and short-circuits a conditional `GET`/`HEAD` to
+`304 Not Modified`; a validator with no freshness window forces revalidation
+with `Cache-Control: no-cache`, and a `private` header prefixes `private` onto
+the freshness directive. `specs/cache_defaults.qnt` pins the selection and the
+`private` scoping.
 Only the projected REST representation is hashed, so the ETag validates exactly
 the bytes sent.
 
