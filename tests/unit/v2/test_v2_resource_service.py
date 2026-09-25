@@ -34,6 +34,7 @@ from resourcey.v2.core.service import (
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
 from resourcey.v2.http.routes import _service_dependency
 from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.util.search_filter import build_filter
 
 
 class CoreBase(DeclarativeBase):
@@ -206,16 +207,18 @@ async def test_search_rejects_sort_and_desc_for_now(resources):
             await service.search(sort="title")
         with pytest.raises(NotImplementedError):
             await service.search(desc=True)
-        with pytest.raises(NotImplementedError):
-            await service.search(filters={"title": "x"})
 
 
-async def test_count_rejects_filters_for_now(resources):
-    """``count`` must not silently ignore filters while ``search`` raises."""
+async def test_search_and_count_accept_a_filter(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:
-        with pytest.raises(NotImplementedError):
-            await service.count(filters={"title": "x"})
+        await service.create(_dto_type(Thread)(title="a"))
+        await service.create(_dto_type(Thread)(title="b"))
+        filtered = build_filter([("title", "eq", "a")])
+        page = await service.search(filters=filtered)
+        assert [item.title for item in page.items] == ["a"]
+        assert await service.count(filters=filtered) == 1
+        assert await service.count() == 2
 
 
 async def test_search_orders_by_id_ascending(resources):

@@ -310,6 +310,55 @@ through the configured `DependencyBuilder` behind the one private helper
 `v2` has now — `NotFoundError`→404, `IntegrityError`→409, `ServiceError`→500,
 pydantic→422 (kept by FastAPI) — and #83 extends the same function.
 
+### `v2/util/search_filter.py` and `v2/sql/filter_converter.py` — filtering (issue #79)
+
+Filtering is two-level. `v2/util/search_filter.py` (the bottom layer) holds the
+storage-agnostic core: `SearchFilter[T]` is a frozen, generic
+`DiscriminatedUnionMixin` whose only method is `matches(value) -> bool`, with the
+standard node types `AllFilter`, `NoMatchFilter`, `AndFilter`, `OrFilter`,
+`NotFilter`, `AttrFilter` (two type params, `ObjT`/`ValT`, because it applies a
+`SearchFilter[ValT]` to one attribute of an `ObjT`), and the value leaves
+`EqFilter` / `GtFilter` / `GeFilter` / `LtFilter` / `LeFilter` / `ContainsFilter`.
+Normalisation cannot live in `__init__` (a frozen model cannot return a different
+type), so the identities — `NoMatch` annihilates an `And`, `All` is dropped,
+nested nodes flatten, double negation unwraps — live in the factory functions
+`and_` / `or_` / `not_` / `attr`. Children are tuples (a frozen model with a list
+is unhashable), and `All` / `NoMatch` reuse the `Singleton` mixin. `Contains` is
+pinned needle-in-haystack with case-insensitive strings. `BaseObjectFilter`
+subclasses declare `<attribute>__<op>` fields and lower themselves to a standard
+tree via `create_standard_filter()`, cached in a `PrivateAttr` (never a field, so
+it stays out of `model_dump`, which the count ETag hashes). The derived query
+surface helper `operators_for_annotation` fixes the op set by field type.
+
+`v2/sql/filter_converter.py` is the only v2 file importing SQLAlchemy for
+filtering. It consumes a *standard* tree (an object filter has already lowered),
+dispatched through **three registries** — logical (`All`/`NoMatch`/`And`/`Or`/
+`Not`, no column), attribute (`Attr`, which resolves a name to a column and binds
+it), and operator (the value leaves, reachable only *with* a bound column;
+`(ctx, column, value) -> ColumnElement[bool]`), with an import-time completeness
+assert. Every operator registers a `(positive, negated)` pair; the negated form
+is NULL-safe (`IS DISTINCT FROM` for equality, `col IS NULL OR <complement>`
+otherwise) so it agrees with the in-memory `matches` complement on NULL rows,
+where naive SQL `NOT` would drop them. `SqlFilterConverter` splits `resolve()`
+(the only IO phase; empty today) from `apply()` (pure statement building). Pushdown
+is all-or-nothing: an unconvertible node raises `UnsupportedFilterError` (a
+`v2/core/errors.py` error, mapped by transport to `501 unsupported_filter`) unless
+the resource sets `allow_filter_iteration = True`, which materialises matching ids
+in memory — an unbounded scan behind a public `GET` is otherwise a DoS, and
+silently skipping a filter could leak a permission scope. A frozen
+`SqlFilterContext(columns, session=None)` carries the bound columns and the live
+transaction into handlers.
+
+The query surface: `Resource.get_filter_operators()` returns the derived surface
+(each field's allowed ops) and `Resource.get_search_filter_type()` returns `None`
+by default; `SqlResource` derives the surface from the read model so a field is
+filterable exactly when it is readable (a wrapper that projects `secret` away
+still rejects `?secret__eq=`). `v2/http/routes.py` synthesises one typed `Query`
+param per `<attribute>__<op>` for OpenAPI, and `_resolve_filters` rejects any
+unknown `field__op` key with `InvalidInputError` (400) — FastAPI silently ignores
+unknown query params, so a typo must not be dropped. The count route's ETag hashes
+the resolved filter too, so distinct filters get distinct validators.
+
 ### `v2/cache` — the migrated cache surface (issue #92)
 
 `src/resourcey/v2/cache/` mirrors the old `resourcey.cache` layout (no

@@ -33,6 +33,13 @@ Declaring a resource produces:
 * **SQLAlchemy models** for persistence, derived from the same metadata.
 * **A service** exposing the standard actions over REST:
   `create`, `read`, `update`, `delete`, `search`, `count`, `batch_read`, `batch_edit`.
+* **Search filtering** — `search` and `count` accept `<field>__<op>` query
+  params (`?title__contains=ali&id__gt=5`). A field is filterable exactly when
+  the read model exposes it, so a hidden field is rejected `400`; a resource can
+  declare a richer filter via `get_search_filter_type`. Filters lower to a
+  storage-agnostic tree and are pushed into the SQL `WHERE` clause; an
+  unconvertible filter fails loudly unless the resource opts into an in-memory
+  fallback.
 * **Migrations** — Alembic autogeneration from the current models, so you
   can derive schema changes from your resource declarations.
 * **Permissions** — the resource declares which actions a role may perform,

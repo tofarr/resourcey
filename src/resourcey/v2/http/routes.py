@@ -22,8 +22,10 @@ Where the ``v2`` seams differ from ``v1``:
   ``create_response``, so the one-time-reveal field survives).
 * services return DTO instances, so every response is **projected** onto the
   REST model here (:func:`_project`), dropping the ``MISSING`` sentinel.
-* ``v1``'s sort / filter surface is out of scope (issue #79), so search is
-  ``limit`` + ``cursor`` only.
+* filtering is back (issue #79): search and count accept ``<field>__<op>``
+  query params, validated against the exposed resource's filter surface (a
+  declared :meth:`~resourcey.v2.core.resource.Resource.get_search_filter_type`,
+  else derived from the read model). Sort remains out of scope (#79).
 * caching is back (issue #92): the exposed resource's
   :meth:`~resourcey.v2.core.resource.Resource.get_cache_strategy` drives
   ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires`` headers, and a
@@ -34,7 +36,8 @@ This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Sequence
+import inspect
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, TypeVar, cast
@@ -47,10 +50,12 @@ from sqlalchemy.exc import IntegrityError
 
 from resourcey.v2.cache.cache_header import CacheHeader
 from resourcey.v2.core.dto import RestModels, request_to_dto
+from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, NotFoundError, Service, ServiceError
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
 from resourcey.v2.util.missing import MISSING
+from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -108,9 +113,9 @@ def register_routes(
     # before the ``{id}`` routes, otherwise ``batch-read`` would be captured as
     # an id value by the ``/{resource}/{id}`` route.
     if Action.SEARCH in supported:
-        _add_search_route(router, path, models, service_dep, strategy)
+        _add_search_route(router, path, models, exposed, service_dep, strategy)
     if Action.COUNT in supported:
-        _add_count_route(router, path, service_dep, strategy)
+        _add_count_route(router, path, exposed, service_dep, strategy)
     if Action.BATCH_READ in supported:
         _add_batch_read_route(router, path, models, id_type, service_dep, strategy)
     if Action.BATCH_EDIT in supported:
@@ -152,6 +157,115 @@ def _service_dependency(
             f"non-callable {dependency!r}; a builder must return a FastAPI dependency."
         )
     return cast("Callable[..., AsyncIterator[Service[T]]]", dependency)
+
+
+# ---------------------------------------------------------------------------
+# Filter surface (query params -> filter instance)
+# ---------------------------------------------------------------------------
+
+
+def _filter_surface(resource: Resource[Any]) -> dict[str, tuple[Any, frozenset[str]]]:
+    """The exposed resource's filter surface: attribute -> (annotation, ops).
+
+    Two sources, matching the two candidates in issue #79:
+
+    * a **declared** filter class (:meth:`get_search_filter_type`) — its
+      ``<attribute>__<op>`` fields are the whole surface (v1's opt-in style);
+    * the **derived** surface (:meth:`get_filter_operators`) — a field is
+      filterable exactly when the read model exposes it, with the operator set
+      fixed by the field's type.
+
+    The returned mapping drives both the generated FastAPI query parameters and
+    the rejection of unknown ``field__op`` params.
+    """
+    declared = resource.get_search_filter_type()
+    if declared is not None:
+        fields = declared.model_fields
+        surface: dict[str, tuple[Any, frozenset[str]]] = {}
+        for name, field in fields.items():
+            attribute, sep, op = name.rpartition(SEPARATOR)
+            if not sep or attribute == "":
+                continue
+            existing = surface.get(attribute)
+            ops = (existing[1] if existing else frozenset()) | {op}
+            surface[attribute] = (field.annotation, ops)
+        return surface
+
+    read_fields = resource.get_rest_models().read_response.model_fields
+    return {
+        attribute: (read_fields[attribute].annotation, ops)
+        for attribute, ops in resource.get_filter_operators().items()
+        if attribute in read_fields
+    }
+
+
+def _filter_dependency(
+    surface: Mapping[str, tuple[Any, frozenset[str]]],
+) -> Callable[..., dict[str, Any]]:
+    """Build a FastAPI dependency exposing each ``<attribute>__<op>`` as a query param.
+
+    The signature is synthesised (one typed, ``Query``-defaulted parameter per
+    attribute/operator pair) so FastAPI unfolds them into OpenAPI parameters and
+    coerces each value before the handler runs. Unknown params are not rejected
+    by FastAPI, so the handler still validates the raw query keys.
+    """
+    parameters: list[inspect.Parameter] = []
+    for attribute, (annotation, ops) in surface.items():
+        for op in sorted(ops):
+            # ``contains`` is a substring test, so its value is always a string;
+            # the ordering / equality operators keep the field's own type.
+            value_annotation = str if op == "contains" else annotation
+            parameters.append(
+                inspect.Parameter(
+                    f"{attribute}{SEPARATOR}{op}",
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=Query(default=None),
+                    annotation=value_annotation,
+                )
+            )
+
+    def dependency(**kwargs: Any) -> dict[str, Any]:
+        return {name: value for name, value in kwargs.items() if value is not None}
+
+    dependency.__signature__ = inspect.Signature(parameters=parameters)  # type: ignore[attr-defined]
+    return dependency
+
+
+def _resolve_filters(
+    request: Request,
+    surface: Mapping[str, tuple[Any, frozenset[str]]],
+    values: Mapping[str, Any],
+) -> SearchFilter[Any] | None:
+    """Validate the ``field__op`` query keys and build a standard filter tree.
+
+    FastAPI collects the declared params into ``values`` (typed / coerced) and
+    surfaces them in OpenAPI, but it silently ignores unknown query parameters.
+    To keep a typo from being dropped, any ``field__op`` key outside the surface
+    is rejected with :class:`InvalidInputError` (mapped to ``400``). With no
+    surface at all, every filter param is rejected. Returns ``None`` when no
+    filter params were supplied.
+    """
+    present = {key for key in request.query_params if SEPARATOR in key}
+    if not present:
+        return None
+    known = {
+        f"{attribute}{SEPARATOR}{op}" for attribute, (_ann, ops) in surface.items() for op in ops
+    }
+    if not known:
+        raise InvalidInputError(
+            f"Filter parameters {sorted(present)} are not supported on this resource"
+        )
+    unknown = present - known
+    if unknown:
+        raise InvalidInputError(f"Unknown filter parameters {sorted(unknown)}")
+    clauses = []
+    for name, value in values.items():
+        attribute, sep, op = name.rpartition(SEPARATOR)
+        if sep and attribute:
+            clauses.append((attribute, op, value))
+    if not clauses:
+        return None
+    return build_filter(clauses)
 
 
 # ---------------------------------------------------------------------------
@@ -237,22 +351,31 @@ def _add_search_route(
     router: APIRouter,
     path: str,
     models: RestModels,
+    exposed: Resource[Any],
     service_dep: Any,
     strategy: Any,
 ) -> None:
-    """Register ``GET /{resource}`` — cursor-paginated search (no sort/filter yet).
+    """Register ``GET /{resource}`` — cursor-paginated, filterable search.
 
-    ``limit`` and ``cursor`` are the only query parameters: ordering is fixed to
-    the identifier and filtering is out of scope (issue #79).
+    ``limit`` and ``cursor`` paginate; declared ``<field>__<op>`` query params
+    are collected into a standard :class:`SearchFilter` and pushed down. The
+    surface (fields + operators) comes from the exposed resource's
+    :meth:`~resourcey.v2.core.resource.Resource.get_filter_operators` (or a
+    declared :meth:`~...get_search_filter_type`); an unknown field or operator,
+    or any filter on a resource with no surface, is rejected ``400``.
     """
+    filter_spec = _filter_surface(exposed)
+    filter_dep = _filter_dependency(filter_spec)
 
     async def handler(  # type: ignore[no-untyped-def]
         request,
         limit=20,
         cursor=None,
+        values=Depends(filter_dep),  # noqa: B008
         service=Depends(service_dep),  # noqa: B008
     ):
-        page = await service.search(limit=limit, cursor=cursor)
+        filters = _resolve_filters(request, filter_spec, values)
+        page = await service.search(limit=limit, cursor=cursor, filters=filters)
         body, items = _page_body(page, models.search_response)
         header = _header_for(strategy, items)
         return _cached_json_response(request, body, header)
@@ -261,6 +384,7 @@ def _add_search_route(
         "request": Request,
         "limit": int,
         "cursor": str | None,
+        "values": dict,
         "service": Service,
     }
     _route(router, path, ["GET"], handler)
@@ -269,20 +393,33 @@ def _add_search_route(
 def _add_count_route(
     router: APIRouter,
     path: str,
+    exposed: Resource[Any],
     service_dep: Any,
     strategy: Any,
 ) -> None:
-    """Register ``GET /{resource}/count`` — the matching row count."""
+    """Register ``GET /{resource}/count`` — the count of matching rows.
 
-    async def handler(request, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
-        total = await service.count()
+    Accepts the same ``<field>__<op>`` filter surface as search, and contributes
+    the resolved filter to the cache ETag so distinct filters get distinct
+    validators.
+    """
+    filter_spec = _filter_surface(exposed)
+    filter_dep = _filter_dependency(filter_spec)
+
+    async def handler(  # type: ignore[no-untyped-def]
+        request,
+        values=Depends(filter_dep),  # noqa: B008
+        service=Depends(service_dep),  # noqa: B008
+    ):
+        filters = _resolve_filters(request, filter_spec, values)
+        total = await service.count(filters=filters)
         header: CacheHeader | None = None
         if strategy is not None:
-            candidate = strategy.count_cache_header(total)
+            candidate = strategy.count_cache_header(total, filters)
             header = candidate if candidate.has_any() else None
         return _cached_json_response(request, total, header)
 
-    handler.__annotations__ = {"request": Request, "service": Service}
+    handler.__annotations__ = {"request": Request, "values": dict, "service": Service}
     _route(router, f"{path}/count", ["GET"], handler)
 
 
@@ -556,6 +693,8 @@ def register_error_handlers(app: FastAPI) -> None:
     Maps the exceptions ``v2`` has today to the documented status + code:
 
     * ``NotFoundError`` -> 404 ``not_found``
+    * ``InvalidInputError`` -> 400 ``invalid_input``
+    * ``UnsupportedFilterError`` -> 501 ``unsupported_filter``
     * ``IntegrityError`` -> 409 ``conflict``
     * ``ServiceError`` -> 500 ``internal_error``
     * Pydantic validation failures keep FastAPI's 422 (its default handler).
@@ -567,6 +706,14 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(NotFoundError)
     async def _not_found(_: Request, exc: NotFoundError) -> JSONResponse:
         return _error_response("not_found", str(exc), status.HTTP_404_NOT_FOUND)
+
+    @app.exception_handler(InvalidInputError)
+    async def _invalid_input(_: Request, exc: InvalidInputError) -> JSONResponse:
+        return _error_response("invalid_input", str(exc), status.HTTP_400_BAD_REQUEST)
+
+    @app.exception_handler(UnsupportedFilterError)
+    async def _unsupported_filter(_: Request, exc: UnsupportedFilterError) -> JSONResponse:
+        return _error_response("unsupported_filter", str(exc), status.HTTP_501_NOT_IMPLEMENTED)
 
     @app.exception_handler(IntegrityError)
     async def _conflict(_: Request, exc: IntegrityError) -> JSONResponse:

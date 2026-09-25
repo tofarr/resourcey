@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from resourcey.v2.core.errors import UnsupportedFilterError
 from resourcey.v2.core.service import STORAGE_KEY, NotFoundError, Page, Service, ServiceError
 from resourcey.v2.sql.cursor import decode_cursor, encode_cursor, keyset_predicate
 from resourcey.v2.util.missing import MISSING
@@ -160,16 +161,18 @@ class SqlService(Service[T]):
     ) -> Page[T]:
         """Return up to ``limit`` rows by id, with keyset pagination via ``cursor``.
 
-        Ordering is fixed to the identifier field; ``sort`` / ``desc`` /
-        ``filters`` are accepted for interface compatibility but not yet
-        implemented (a future PR adds them together).
+        Ordering is fixed to the identifier field; ``sort`` / ``desc`` remain
+        unimplemented. ``filters`` is a standard :class:`SearchFilter` tree (an
+        object filter is lowered first) and is pushed into the ``WHERE`` clause
+        before the page is taken, so a filtered keyset page stays correct.
         """
-        if sort is not None or desc or filters is not None:
-            raise NotImplementedError("v2 SqlService.search does not support sort/desc/filters yet")
+        if sort is not None or desc:
+            raise NotImplementedError("v2 SqlService.search does not support sort/desc yet")
         session = self._active_session()
         table = self._resource.table
         id_column = self._resource.id_column
         stmt = select(table).order_by(id_column.asc()).limit(limit + 1)
+        stmt = await self._apply_filters(stmt, session, filters)
         if cursor is not None:
             stmt = stmt.where(keyset_predicate(id_column, self._decode(cursor)))
         rows = (await session.execute(stmt)).mappings().all()
@@ -183,17 +186,56 @@ class SqlService(Service[T]):
         )
 
     async def count(self, *, filters: Any = None) -> int:
-        """Return the number of rows.
-
-        ``filters`` is accepted for interface compatibility but not yet
-        implemented, so — like :meth:`search` — passing one raises rather than
-        silently returning the unfiltered total.
-        """
-        if filters is not None:
-            raise NotImplementedError("v2 SqlService.count does not support filters yet")
+        """Return the number of rows matching ``filters`` (all rows when ``None``)."""
         session = self._active_session()
-        result = await session.execute(select(func.count()).select_from(self._resource.table))
+        stmt = select(func.count()).select_from(self._resource.table)
+        stmt = await self._apply_filters(stmt, session, filters)
+        result = await session.execute(stmt)
         return int(result.scalar_one())
+
+    # ------------------------------------------------------------------
+    # Filter pushdown
+    # ------------------------------------------------------------------
+
+    async def _apply_filters(self, stmt: Any, session: AsyncSession, filters: Any) -> Any:
+        """Push ``filters`` into ``stmt``'s WHERE clause (all-or-nothing).
+
+        ``filters`` is a standard filter tree; an object filter lowers itself
+        first, so a custom filter needs no backend handler. Conversion is
+        all-or-nothing per filter: an unconvertible node raises
+        :class:`UnsupportedFilterError` unless the resource opted into the in-memory
+        iteration fallback (which needs the live session), because silently
+        skipping a filter could leak every row of a permission scope.
+        """
+        if filters is None:
+            return stmt
+        standard = filters.create_standard_filter()
+        converter = self._resource.build_filter_converter(session)
+        try:
+            await converter.resolve()
+            return converter.apply(stmt, standard)
+        except UnsupportedFilterError:
+            if not self._resource.allow_filter_iteration:
+                raise
+            return await self._apply_filters_by_iteration(stmt, standard)
+
+    async def _apply_filters_by_iteration(self, stmt: Any, standard: Any) -> Any:
+        """The opt-in fallback: materialise matching ids and constrain to them.
+
+        Applies ``matches`` in Python over the resource's rows, then restricts
+        the statement to the surviving identifiers. This is only used when a
+        resource explicitly sets ``allow_filter_iteration = True`` — an
+        unbounded scan behind a public GET is otherwise a DoS.
+        """
+        session = self._active_session()
+        rows = (await session.execute(select(self._resource.table))).mappings().all()
+        dto_type = self._resource.get_dto_type()
+        surviving = [
+            row[self._resource.id_column.name]
+            for row in rows
+            if standard.matches(dto_type.model_validate(_row_values(self._resource, row)))
+        ]
+        return stmt.where(self._resource.id_column.in_(surviving))
 
     async def batch_read(self, ids: list[Any]) -> list[T | None]:
         """Return DTOs positionally aligned with ``ids`` (``None`` for absent)."""
@@ -262,10 +304,12 @@ class SqlService(Service[T]):
 
     def _to_dto(self, row: Any) -> T:
         """Build a DTO instance from a result row mapping (column names -> fields)."""
-        values = {
-            self._resource._attr_for_column.get(name, name): value for name, value in row.items()
-        }
-        return self._resource.get_dto_type().model_validate(values)
+        return self._resource.get_dto_type().model_validate(_row_values(self._resource, row))
+
+
+def _row_values(resource: Any, row: Any) -> dict[str, Any]:
+    """Map a result row's column names back to DTO attribute names."""
+    return {resource._attr_for_column.get(name, name): value for name, value in row.items()}
 
 
 def _payload_values(payload: Any) -> dict[str, Any]:

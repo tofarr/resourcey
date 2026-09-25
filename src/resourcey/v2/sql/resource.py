@@ -19,7 +19,7 @@ This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``
 
 from __future__ import annotations
 
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pydantic import BaseModel
@@ -30,8 +30,10 @@ from resourcey.v2.cache.cache_defaults import default_cache_strategy
 from resourcey.v2.core.dto import RestModels
 from resourcey.v2.core.resource import Resource, _camel_to_kebab, _pluralize
 from resourcey.v2.core.service import Action, CacheStrategy, Service, ServiceError
+from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.service import SqlService
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
+from resourcey.v2.util.search_filter import SearchFilter, operators_for_annotation
 
 if TYPE_CHECKING:
     from sqlalchemy import Table
@@ -110,6 +112,69 @@ class SqlResource(Resource[T]):
         if self._v2_cache_strategy is None:
             self._v2_cache_strategy = default_cache_strategy(self.get_rest_models())
         return self._v2_cache_strategy
+
+    def get_queryable_fields(self) -> frozenset[str]:
+        """Every field the read model exposes — the default query surface.
+
+        Derived from ``read_response``, so a field projected away is not
+        filterable: a wrapper that hides ``secret`` must not leave
+        ``?secret__eq=`` disclosing it.
+        """
+        return frozenset(self.get_rest_models().read_response.model_fields)
+
+    def get_filter_operators(self) -> Mapping[str, frozenset[str]]:
+        """The derived filter surface: each queryable field's allowed operators.
+
+        A field is filterable exactly when it is readable, and the operator set
+        follows the field's Python type (equality always, ordering for numbers /
+        datetimes, substring for strings). Override to widen or narrow it.
+        """
+        fields = self.get_rest_models().read_response.model_fields
+        return {name: operators_for_annotation(field.annotation) for name, field in fields.items()}
+
+    def get_search_filter_type(self) -> type[SearchFilter[Any]] | None:
+        """A declared object-filter class, or ``None`` (derive from the read model).
+
+        Override to opt into v1-style declared filters; the class's
+        ``<attribute>__<op>`` fields then define the whole surface.
+        """
+        return None
+
+    # Opt-in escape hatch: when True, an unconvertible filter falls back to an
+    # in-memory scan instead of raising. Off by default — see
+    # ``SqlService._apply_filters``.
+    allow_filter_iteration: bool = False
+
+    # ------------------------------------------------------------------
+    # Filter conversion seam
+    # ------------------------------------------------------------------
+
+    def build_filter_context(
+        self, session: AsyncSession | None = None, *, allow_iteration: bool = False
+    ) -> SqlFilterContext:
+        """The conversion context: only *queryable* fields resolve to columns.
+
+        Restricting ``columns`` to :meth:`get_queryable_fields` is the security
+        gate: a field projected away from the read model has no column here, so
+        ``?secret__eq=`` raises rather than disclosing the value. Extension
+        point — a subclass may add handler inputs (dialect, resource, cache)
+        without changing converter signatures.
+        """
+        queryable = self.get_queryable_fields()
+        columns = {
+            attr: self.table.c[column_name]
+            for attr, column_name in self._column_for_attr.items()
+            if attr in queryable
+        }
+        return SqlFilterContext(columns=columns, session=session, allow_iteration=allow_iteration)
+
+    def build_filter_converter(
+        self, session: AsyncSession | None = None, *, allow_iteration: bool = False
+    ) -> SqlFilterConverter:
+        """A converter over this resource's query surface."""
+        return SqlFilterConverter(
+            self.build_filter_context(session, allow_iteration=allow_iteration)
+        )
 
     # ------------------------------------------------------------------
     # Actions / exposure

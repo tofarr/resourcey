@@ -45,13 +45,14 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
 from resourcey.v2.core.dto import RestModels
 from resourcey.v2.core.service import Action, CacheStrategy, Service
+from resourcey.v2.util.search_filter import SearchFilter
 
 if TYPE_CHECKING:
     from resourcey.v2.core.manifest import Manifest
@@ -98,6 +99,34 @@ class Resource(ABC, Generic[T]):
     @abstractmethod
     def get_cache_strategy(self) -> CacheStrategy | None:
         """The cache strategy for this resource, or ``None`` for no caching."""
+
+    @abstractmethod
+    def get_queryable_fields(self) -> frozenset[str]:
+        """Field names the outside world may filter / sort on.
+
+        The gate on the *query* surface: a field hidden from the read model must
+        not be filterable, otherwise ``?secret__eq=`` discloses a value the
+        outside world never sees.
+        """
+
+    @abstractmethod
+    def get_filter_operators(self) -> Mapping[str, frozenset[str]]:
+        """The allowed ``<op>`` suffixes per queryable field — the filter surface.
+
+        Derived from the read model by default (equality always, ordering for
+        orderable types, substring for strings), so the read model *is* the query
+        surface. Override, or declare a filter class via
+        :meth:`get_search_filter_type`, to change it.
+        """
+
+    @abstractmethod
+    def get_search_filter_type(self) -> type[SearchFilter[Any]] | None:
+        """A declared object-filter class, or ``None`` to derive the surface.
+
+        When set, the declared class's ``<attribute>__<op>`` fields *are* the
+        filter surface (v1's opt-in style); when ``None`` the surface is derived
+        from the read model via :meth:`get_filter_operators`.
+        """
 
     # ------------------------------------------------------------------
     # Actions / exposure
