@@ -1,20 +1,22 @@
-"""Tests for the ``v2`` configuration system (issue #82).
+"""Tests for the ``v2`` configuration system (issues #82 / #74).
 
-Covers ``BaseConfig`` (prefix, per-class cached ``get_instance`` typed to the
-owning class, per-class ``clear_instance_cache``, ``generate_env_template``,
-``ResourceyConfigError`` mapping), ``load_dotenv`` (present/absent/quoted/
-commented, env-over-file precedence), and ``LazyField`` (genuine laziness,
-caching, missing/invalid/non-subclass ``_CLASS``, the list variant). Uses
-``monkeypatch.setenv`` / ``delenv`` — no mocks of the parser.
+Covers ``BaseConfig`` (the process-wide prefix and its latch, per-class cached
+``get_instance`` typed to the owning class, the cross-class field-name/type
+guard, ``clear_instance_cache``, ``generate_env_template``,
+``ResourceyConfigError`` mapping) and ``LazyField`` (genuine laziness, caching,
+missing/invalid/non-subclass ``_CLASS``, the list variant).
 
-The ``FrameworkConfig`` / ``DbConfig`` sections of v1's ``test_config_system``
-are deliberately absent: ``FrameworkConfig`` is deferred to a later PR, and
-these tests exercise the generic machinery only.
+``v2`` does no ``.env`` loading of its own — ``config_loader`` is gone — so the
+old ``load_dotenv`` section is deliberately absent; how config reaches the
+environment (``uvicorn --env-file``, a wrapper script) is the app's business.
+``FrameworkConfig`` / ``DbConfig`` are deferred: these tests exercise the
+generic machinery only.
+
+Uses ``monkeypatch.setenv`` / ``delenv`` — no mocks of the parser.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import ClassVar
 
@@ -30,34 +32,72 @@ from v2_config_helpers import (
 )
 from v2_config_lazy_helpers import Animal, Cat, Dog, NotAnAnimal
 
-from resourcey.v2.config.config_base import BaseConfig
-from resourcey.v2.config.config_loader import _strip_inline_comment, _unquote, load_dotenv
+from resourcey.v2.config import config_base
+from resourcey.v2.config.config_base import (
+    BaseConfig,
+    _reset_config_prefix,
+    get_config_prefix,
+    set_config_prefix,
+)
 from resourcey.v2.config.lazy_field import LazyField, _unwrap_classvar
 from resourcey.v2.core.errors import ResourceyConfigError, ResourceyError
 
+
+@pytest.fixture(autouse=True)
+def _reset_prefix():
+    """Restore the default prefix and clear the latch/caches around each case."""
+    _reset_config_prefix()
+    yield
+    _reset_config_prefix()
+
+
 # ---------------------------------------------------------------------------
-# BaseConfig.get_prefix
+# get_config_prefix / set_config_prefix
 # ---------------------------------------------------------------------------
 
 
-class TestGetPrefix:
-    def test_default_top_level_module_uppercased(self):
-        # BaseConfig lives in resourcey.v2.config.config_base -> "RESOURCEY".
-        assert BaseConfig.get_prefix() == "RESOURCEY"
+class TestConfigPrefix:
+    def test_default_is_app(self):
+        assert get_config_prefix() == "APP"
+        assert BaseConfig.get_prefix() == "APP"
 
-    def test_default_uses_module_name(self):
-        class Cfg(BaseConfig):
-            pass
+    def test_every_class_shares_the_prefix(self):
+        assert V2FrameworkLikeConfig.get_prefix() == V2AppLikeConfig.get_prefix() == "APP"
 
-        assert Cfg.get_prefix() == Cfg.__module__.split(".")[0].upper()
+    def test_set_before_first_read(self):
+        set_config_prefix("BEFORE")
+        assert get_config_prefix() == "BEFORE"
+        assert BaseConfig.get_prefix() == "BEFORE"
 
-    def test_override(self):
-        class Cfg(BaseConfig):
-            @classmethod
-            def get_prefix(cls) -> str:
-                return "CUSTOM"
+    def test_read_latches(self):
+        assert get_config_prefix() == "APP"
+        with pytest.raises(ResourceyConfigError, match="already been read"):
+            set_config_prefix("LATE")
 
-        assert Cfg.get_prefix() == "CUSTOM"
+    def test_set_clears_instance_caches(self, monkeypatch):
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
+        # A cached instance would otherwise survive a prefix change and keep
+        # serving values read under the old prefix, so setting the prefix must
+        # drop every class's cache. Clear the latch to reach that branch.
+        _ = V2FrameworkLikeConfig.get_instance()
+        assert "_cached_instance" in V2FrameworkLikeConfig.__dict__
+
+        monkeypatch.setattr(config_base, "_config_prefix_retrieved", False)
+        set_config_prefix("LATE")
+        assert "_cached_instance" not in V2FrameworkLikeConfig.__dict__
+
+    def test_set_before_read_changes_the_env_names(self, monkeypatch):
+        # The one prefix governs every class, so a set is immediately visible
+        # in the var each class parses — there is no per-class override.
+        set_config_prefix("MYAPP")
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
+        monkeypatch.setenv("MYAPP_BASE_URL", "https://myapp.example.com")
+        assert V2FrameworkLikeConfig.get_instance().base_url == "https://myapp.example.com"
+
+    def test_reset_restores_default(self):
+        set_config_prefix("TEMP")
+        _reset_config_prefix()
+        assert get_config_prefix() == "APP"
 
 
 # ---------------------------------------------------------------------------
@@ -67,17 +107,14 @@ class TestGetPrefix:
 
 class TestGetInstance:
     def test_caches_per_class(self, monkeypatch):
-        monkeypatch.delenv("V2CFG_BASE_URL", raising=False)
-        V2FrameworkLikeConfig.clear_instance_cache()
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
         first = V2FrameworkLikeConfig.get_instance()
         second = V2FrameworkLikeConfig.get_instance()
         assert first is second
 
     def test_return_is_typed_to_the_calling_class(self, monkeypatch):
-        monkeypatch.delenv("V2CFG_BASE_URL", raising=False)
-        monkeypatch.delenv("V2CFG_FEATURE", raising=False)
-        V2FrameworkLikeConfig.clear_instance_cache()
-        V2AppLikeConfig.clear_instance_cache()
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
+        monkeypatch.delenv("APP_FEATURE", raising=False)
         base = V2FrameworkLikeConfig.get_instance()
         app = V2AppLikeConfig.get_instance()
         assert isinstance(base, V2FrameworkLikeConfig)
@@ -87,10 +124,8 @@ class TestGetInstance:
         assert not hasattr(base, "feature")
 
     def test_subclass_and_base_cache_independently(self, monkeypatch):
-        monkeypatch.delenv("V2CFG_BASE_URL", raising=False)
-        monkeypatch.setenv("V2CFG_FEATURE", "on")
-        V2FrameworkLikeConfig.clear_instance_cache()
-        V2AppLikeConfig.clear_instance_cache()
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
+        monkeypatch.setenv("APP_FEATURE", "on")
         app = V2AppLikeConfig.get_instance()
         base = V2FrameworkLikeConfig.get_instance()
         assert app is not base
@@ -98,12 +133,11 @@ class TestGetInstance:
         assert app.feature == "on"
 
     def test_rebuilds_after_clear(self, monkeypatch):
-        monkeypatch.setenv("V2CFG_BASE_URL", "https://example.com")
-        V2FrameworkLikeConfig.clear_instance_cache()
+        monkeypatch.setenv("APP_BASE_URL", "https://example.com")
         first = V2FrameworkLikeConfig.get_instance()
         assert first.base_url == "https://example.com"
 
-        monkeypatch.setenv("V2CFG_BASE_URL", "https://other.com")
+        monkeypatch.setenv("APP_BASE_URL", "https://other.com")
         # Without clearing, the stale cached instance is returned.
         assert V2FrameworkLikeConfig.get_instance().base_url == "https://example.com"
 
@@ -112,49 +146,26 @@ class TestGetInstance:
         assert second.base_url == "https://other.com"
         assert first is not second
 
-    def test_folds_dotenv_into_environ(self, monkeypatch, tmp_path):
-        env_file = tmp_path / ".env"
-        env_file.write_text("V2CFG_BASE_URL=https://from-dotenv.com\n")
+    def test_reads_environ_only(self, monkeypatch, tmp_path):
+        """No ``.env`` loading: a file in cwd is ignored."""
+        (tmp_path / ".env").write_text("APP_BASE_URL=https://from-dotenv.com\n")
         monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("V2CFG_BASE_URL", raising=False)
-        V2FrameworkLikeConfig.clear_instance_cache()
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
         instance = V2FrameworkLikeConfig.get_instance()
-        assert instance.base_url == "https://from-dotenv.com"
-
-    def test_dotenv_path_override_via_env_file(self, monkeypatch, tmp_path):
-        env_file = tmp_path / "custom.env"
-        env_file.write_text("V2CFG_BASE_URL=https://custom.com\n")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("RESOURCEY_ENV_FILE", str(env_file))
-        monkeypatch.delenv("V2CFG_BASE_URL", raising=False)
-        V2FrameworkLikeConfig.clear_instance_cache()
-        instance = V2FrameworkLikeConfig.get_instance()
-        assert instance.base_url == "https://custom.com"
-
-    def test_env_overrides_dotenv(self, monkeypatch, tmp_path):
-        env_file = tmp_path / ".env"
-        env_file.write_text("V2CFG_BASE_URL=https://from-dotenv.com\n")
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("V2CFG_BASE_URL", "https://from-env.com")
-        V2FrameworkLikeConfig.clear_instance_cache()
-        instance = V2FrameworkLikeConfig.get_instance()
-        assert instance.base_url == "https://from-env.com"
+        assert instance.base_url == "http://localhost:8000"
 
     def test_missing_required_var_raises_config_error(self, monkeypatch):
-        monkeypatch.delenv("V2REQ_NAME", raising=False)
-        V2RequiredConfig.clear_instance_cache()
-        with pytest.raises(ResourceyConfigError, match="V2REQ"):
+        monkeypatch.delenv("APP_NAME", raising=False)
+        with pytest.raises(ResourceyConfigError, match="APP"):
             V2RequiredConfig.get_instance()
 
     def test_invalid_value_raises_config_error(self, monkeypatch):
-        monkeypatch.setenv("V2INT_PORT", "not-an-int")
-        V2IntConfig.clear_instance_cache()
-        with pytest.raises(ResourceyConfigError, match="V2INT"):
+        monkeypatch.setenv("APP_PORT", "not-an-int")
+        with pytest.raises(ResourceyConfigError, match="APP"):
             V2IntConfig.get_instance()
 
     def test_config_error_is_resourcey_error(self, monkeypatch):
-        monkeypatch.delenv("V2REQ_NAME", raising=False)
-        V2RequiredConfig.clear_instance_cache()
+        monkeypatch.delenv("APP_NAME", raising=False)
         with pytest.raises(ResourceyError):
             V2RequiredConfig.get_instance()
 
@@ -166,9 +177,7 @@ class TestGetInstance:
 
 class TestClearInstanceCache:
     def test_clear_drops_only_that_class(self, monkeypatch):
-        monkeypatch.delenv("V2CFG_BASE_URL", raising=False)
-        V2FrameworkLikeConfig.clear_instance_cache()
-        V2AppLikeConfig.clear_instance_cache()
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
         _ = V2FrameworkLikeConfig.get_instance()
         _ = V2AppLikeConfig.get_instance()
         assert "_cached_instance" in V2FrameworkLikeConfig.__dict__
@@ -180,11 +189,48 @@ class TestClearInstanceCache:
         assert "_cached_instance" in V2AppLikeConfig.__dict__
 
     def test_clearing_base_does_not_clear_subclass(self, monkeypatch):
-        monkeypatch.delenv("V2CFG_BASE_URL", raising=False)
-        V2AppLikeConfig.clear_instance_cache()
+        monkeypatch.delenv("APP_BASE_URL", raising=False)
         app = V2AppLikeConfig.get_instance()
         BaseConfig.clear_instance_cache()
         assert V2AppLikeConfig.get_instance() is app
+
+
+# ---------------------------------------------------------------------------
+# Cross-class field-name collision guard
+# ---------------------------------------------------------------------------
+
+
+class TestFieldCollisionGuard:
+    def test_conflicting_types_raise_at_class_creation(self):
+        class First(BaseConfig):
+            v2_config_collide_a: str = "a"
+
+        with pytest.raises(TypeError, match="conflicting types"):
+
+            class Second(BaseConfig):
+                v2_config_collide_a: int = 1
+
+        # ``First`` is a real, usable config despite the failed sibling.
+        assert First().v2_config_collide_a == "a"
+
+    def test_same_name_same_type_is_allowed(self):
+        class First(BaseConfig):
+            v2_config_same_type: str = "a"
+
+        class Second(BaseConfig):
+            v2_config_same_type: str = "b"
+
+        assert Second().v2_config_same_type == "b"
+        assert First is not Second
+
+    def test_classvar_is_not_a_field(self):
+        # A ClassVar named like an existing field is not registered, so it does
+        # not collide even when its inner type differs.
+        class Holder(BaseConfig):
+            v2_config_classvar_pet: str = "scalar"
+            v2_config_classvar_lazy: ClassVar[Animal] = LazyField(default=Cat)
+
+        assert Holder().v2_config_classvar_pet == "scalar"
 
 
 # ---------------------------------------------------------------------------
@@ -195,132 +241,19 @@ class TestClearInstanceCache:
 class TestGenerateEnvTemplate:
     def test_defaults_instance(self):
         template = V2FrameworkLikeConfig().generate_env_template()
-        assert "V2CFG_BASE_URL=http://localhost:8000" in template
+        assert "APP_BASE_URL=http://localhost:8000" in template
         # Descriptions appear as comments.
         assert "Public base URL" in template
 
     def test_resolved_instance(self, monkeypatch):
-        monkeypatch.setenv("V2CFG_BASE_URL", "https://changed.com")
-        V2FrameworkLikeConfig.clear_instance_cache()
+        monkeypatch.setenv("APP_BASE_URL", "https://changed.com")
         instance = V2FrameworkLikeConfig.get_instance()
         template = instance.generate_env_template()
-        assert "V2CFG_BASE_URL=https://changed.com" in template
+        assert "APP_BASE_URL=https://changed.com" in template
 
     def test_explicit_prefix(self):
         template = V2FrameworkLikeConfig().generate_env_template(prefix="OTHER")
         assert "OTHER_BASE_URL=http://localhost:8000" in template
-
-
-# ---------------------------------------------------------------------------
-# load_dotenv
-# ---------------------------------------------------------------------------
-
-
-class TestLoadDotenv:
-    def test_present(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text("FOO=bar\nBAZ=qux\n")
-        monkeypatch.delenv("FOO", raising=False)
-        monkeypatch.delenv("BAZ", raising=False)
-        load_dotenv(path)
-        assert os.environ["FOO"] == "bar"
-        assert os.environ["BAZ"] == "qux"
-
-    def test_absent_is_noop(self, monkeypatch, tmp_path):
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("RESOURCEY_ENV_FILE", raising=False)
-        # No file present — should not raise.
-        load_dotenv()
-
-    def test_env_overrides_file(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text("FOO=fromfile\n")
-        monkeypatch.setenv("FOO", "fromenv")
-        load_dotenv(path)
-        assert os.environ["FOO"] == "fromenv"
-
-    def test_comments_and_blanks_skipped(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text("# a comment\n\nKEY=val\n")
-        monkeypatch.delenv("KEY", raising=False)
-        load_dotenv(path)
-        assert os.environ["KEY"] == "val"
-
-    def test_quoted_values_unquoted(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text("A=\"value\"\nB='single'\nC=`back`\nD=plain\n")
-        for k in ("A", "B", "C", "D"):
-            monkeypatch.delenv(k, raising=False)
-        load_dotenv(path)
-        assert os.environ["A"] == "value"
-        assert os.environ["B"] == "single"
-        assert os.environ["C"] == "back"
-        assert os.environ["D"] == "plain"
-
-    def test_uses_resourcey_env_file(self, monkeypatch, tmp_path):
-        path = tmp_path / "custom.env"
-        path.write_text("FROMCUSTOM=1\n")
-        monkeypatch.setenv("RESOURCEY_ENV_FILE", str(path))
-        monkeypatch.delenv("FROMCUSTOM", raising=False)
-        load_dotenv()
-        assert os.environ["FROMCUSTOM"] == "1"
-
-    def test_unquote_helpers(self):
-        assert _unquote('"x"') == "x"
-        assert _unquote("'y'") == "y"
-        assert _unquote("`z`") == "z"
-        assert _unquote("plain") == "plain"
-        assert _unquote('"unmatched') == '"unmatched'
-        assert _unquote('""') == ""
-
-    def test_inline_comment_stripped(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text("KEY=val # a comment\nNUM=42 #another\n")
-        monkeypatch.delenv("KEY", raising=False)
-        monkeypatch.delenv("NUM", raising=False)
-        load_dotenv(path)
-        assert os.environ["KEY"] == "val"
-        assert os.environ["NUM"] == "42"
-
-    def test_inline_comment_requires_preceding_whitespace(self, monkeypatch, tmp_path):
-        # `#` not preceded by whitespace is part of the value (e.g. a password).
-        path = tmp_path / ".env"
-        path.write_text("PW=p#ass\nURL=https://x/#frag\n")
-        monkeypatch.delenv("PW", raising=False)
-        monkeypatch.delenv("URL", raising=False)
-        load_dotenv(path)
-        assert os.environ["PW"] == "p#ass"
-        assert os.environ["URL"] == "https://x/#frag"
-
-    def test_inline_comment_inside_quotes_preserved(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text('MSG="hi # there"\n')
-        monkeypatch.delenv("MSG", raising=False)
-        load_dotenv(path)
-        assert os.environ["MSG"] == "hi # there"
-
-    def test_strip_inline_comment_helpers(self):
-        assert _strip_inline_comment("val # comment") == "val"
-        assert _strip_inline_comment("val#comment") == "val#comment"
-        assert _strip_inline_comment("p#ass") == "p#ass"
-        assert _strip_inline_comment('"a # b"') == '"a # b"'
-        assert _strip_inline_comment("plain") == "plain"
-        assert _strip_inline_comment("") == ""
-
-    def test_line_without_equals_skipped(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text("NOEQUALSSIGN\nKEY=val\n")
-        monkeypatch.delenv("KEY", raising=False)
-        monkeypatch.delenv("NOEQUALSSIGN", raising=False)
-        load_dotenv(path)
-        assert os.environ["KEY"] == "val"
-
-    def test_line_with_empty_key_skipped(self, monkeypatch, tmp_path):
-        path = tmp_path / ".env"
-        path.write_text("=value\nKEY=val\n")
-        monkeypatch.delenv("KEY", raising=False)
-        load_dotenv(path)
-        assert os.environ["KEY"] == "val"
 
 
 # ---------------------------------------------------------------------------
@@ -429,39 +362,39 @@ class TestLazyField:
 
 class TestLazyFieldList:
     def test_list_from_sequential_env(self, monkeypatch):
-        monkeypatch.delenv("V2LAZYLIST_PETS", raising=False)
-        monkeypatch.setenv("V2LAZYLIST_PETS_0", f"{Cat.__module__}.Cat")
-        monkeypatch.setenv("V2LAZYLIST_PETS_1", f"{Dog.__module__}.Dog")
+        monkeypatch.delenv("APP_PETS", raising=False)
+        monkeypatch.setenv("APP_PETS_0", f"{Cat.__module__}.Cat")
+        monkeypatch.setenv("APP_PETS_1", f"{Dog.__module__}.Dog")
         instance = V2LazyListConfig()
         assert instance.pets == [Cat, Dog]
 
     def test_list_from_json_array(self, monkeypatch):
         import json
 
-        monkeypatch.delenv("V2LAZYLIST_PETS_0", raising=False)
-        monkeypatch.delenv("V2LAZYLIST_PETS_1", raising=False)
+        monkeypatch.delenv("APP_PETS_0", raising=False)
+        monkeypatch.delenv("APP_PETS_1", raising=False)
         monkeypatch.setenv(
-            "V2LAZYLIST_PETS", json.dumps([f"{Cat.__module__}.Cat", f"{Dog.__module__}.Dog"])
+            "APP_PETS", json.dumps([f"{Cat.__module__}.Cat", f"{Dog.__module__}.Dog"])
         )
         instance = V2LazyListConfig()
         assert instance.pets == [Cat, Dog]
 
     def test_unset_list_is_empty(self, monkeypatch):
-        monkeypatch.delenv("V2LAZYLIST_PETS", raising=False)
-        monkeypatch.delenv("V2LAZYLIST_PETS_0", raising=False)
+        monkeypatch.delenv("APP_PETS", raising=False)
+        monkeypatch.delenv("APP_PETS_0", raising=False)
         instance = V2LazyListConfig()
         assert instance.pets == []
 
     def test_malformed_json_raises_config_error(self, monkeypatch):
-        monkeypatch.delenv("V2LAZYLIST_PETS_0", raising=False)
-        monkeypatch.setenv("V2LAZYLIST_PETS", "{not json")
+        monkeypatch.delenv("APP_PETS_0", raising=False)
+        monkeypatch.setenv("APP_PETS", "{not json")
         instance = V2LazyListConfig()
         with pytest.raises(ResourceyConfigError, match="JSON array"):
             _ = instance.pets
 
     def test_non_subclass_path_raises_config_error(self, monkeypatch):
-        monkeypatch.delenv("V2LAZYLIST_PETS_0", raising=False)
-        monkeypatch.setenv("V2LAZYLIST_PETS", '["datetime.datetime"]')
+        monkeypatch.delenv("APP_PETS_0", raising=False)
+        monkeypatch.setenv("APP_PETS", '["datetime.datetime"]')
         instance = V2LazyListConfig()
         with pytest.raises(ResourceyConfigError, match="DiscriminatedUnionMixin"):
             _ = instance.pets
@@ -474,7 +407,6 @@ class TestLazyFieldList:
 
 class TestUnwrapClassvar:
     def test_strips_classvar(self):
-
         assert _unwrap_classvar(ClassVar[Animal]) is Animal
 
     def test_passes_through_non_classvar(self):
@@ -492,7 +424,6 @@ class TestNoOpenhandsImport:
         [
             "resourcey.v2.core.errors",
             "resourcey.v2.config.config_base",
-            "resourcey.v2.config.config_loader",
             "resourcey.v2.config.lazy_field",
             "resourcey.v2.util.import_paths",
         ],

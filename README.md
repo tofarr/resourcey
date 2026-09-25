@@ -196,17 +196,22 @@ The four files:
   `class Country(DTO, id_field_name="code")` with a `code: str` field.
 
 * **`resource.py`** — a `Resource` is derived from a DTO. `SqlResource` is the
-  first backend (a DTO-derived table over an injected async session factory;
-  the backend is chosen explicitly at construction, not inferred from config).
-  `get_service(ctx)` is **sync** and takes an optional call-scoped
-  `MutableMapping`; the returned `Service` is the async context manager that
-  owns the storage. `get_supported_actions()` is the single action declaration
-  (there is no `actions` property), and `get_exposed_resource()` composes on
-  top of it — the exposed resource's declaration wins outright.
+  first backend (a DTO-derived table over an injected async session factory or
+  a named connection from `SqlConfig`; the backend is chosen explicitly at
+  construction, not inferred from config). `get_service(ctx)` is **async** and
+  takes an optional call-scoped `MutableMapping`; awaiting it builds the
+  service (a backend may resolve a connection first) and the returned `Service`
+  is the async context manager that owns the storage, so the call site is
+  `async with await resource.get_service(ctx)`. `get_supported_actions()` is the
+  single action declaration (there is no `actions` property), and
+  `get_exposed_resource()` composes on top of it — the exposed resource's
+  declaration wins outright.
 * **`service.py`** — `Service` is generic over the DTO, declares the eight
   actions, and *is* the async context manager; a call before `__aenter__`
   raises clearly. `Action` is the action enum.
-* **`manifest.py`** — the `Manifest` owns the resource set and its lifecycle,
+* **`manifest.py`** — the `Manifest` owns the resource set and its lifecycle
+  (it may also own app-lifecycle managers, e.g. a `SqlSessionManager`, entered
+  before the resources and exited after them),
   and asserts at construction that every resource's supported actions name only
   real `Action` members (a typo would otherwise silently drop a route).
 

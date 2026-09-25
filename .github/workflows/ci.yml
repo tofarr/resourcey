@@ -26,6 +26,11 @@ jobs:
         with:
           node-version: "20"
       - run: npm install -g @informalsystems/quint
+      - name: Install the Quint Rust evaluator
+        # `quint test` / `quint run` download this binary via the unauthenticated
+        # GitHub releases API, which rate-limits shared runner IPs. Fetch it from
+        # the direct release URL instead and pre-seed the CLI's cache.
+        run: scripts/install_quint_evaluator.sh
       - name: Typecheck all specs
         run: |
           for f in specs/*.qnt; do

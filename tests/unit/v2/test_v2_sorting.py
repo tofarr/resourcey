@@ -31,13 +31,13 @@ from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, Encry
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.http.app import create_app
 from resourcey.v2.sql import cursor as cursor_module
-from resourcey.v2.sql.resource import SqlResource
 from resourcey.v2.sql.sort_converter import (
     _REGISTRY,
     SqlSortContext,
     SqlSortConverter,
     register_sort_order,
 )
+from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.util.sort_order import AttrSortOrder, CompareResult, SortOrder
 
 
@@ -410,7 +410,7 @@ class TestSortSurface:
         resource = Declared(Widget, session_factory=maker, encryption_service=_encryption())
         async with engine.begin() as conn:
             await conn.run_sync(ApiBase.metadata.create_all)
-        async with resource.get_service() as service:
+        async with await resource.get_service() as service:
             await service.create(resource.get_dto_type()(title="b", rank=1, secret="s"))
             await service.create(resource.get_dto_type()(title="a", rank=2, secret="s"))
             page = await service.search(sort_order=resource.resolve_sort_order("title", False))
@@ -448,7 +448,7 @@ class TestSortColumnNameMapping:
         async with engine.begin() as conn:
             await conn.run_sync(ApiBase.metadata.create_all)
         dto = resource.get_dto_type()
-        async with resource.get_service() as service:
+        async with await resource.get_service() as service:
             # Two rows share rank 1, so paging must use the id tie-breaker and
             # the cursor's sort key must come from the mapped column, not the
             # DTO attribute name.
@@ -518,7 +518,7 @@ class TestNullableSortKeys:
         async with engine.begin() as conn:
             await conn.run_sync(ApiBase.metadata.create_all)
         dto = resource.get_dto_type()
-        async with resource.get_service() as service:
+        async with await resource.get_service() as service:
             for label, score in (("a", None), ("b", 2), ("c", 1), ("d", None)):
                 await service.create(dto(label=label, score=score))
             for descending in (False, True):

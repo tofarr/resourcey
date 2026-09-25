@@ -1,7 +1,7 @@
 """Tests for ``sqlalchemy_2_dto`` — inferring a ``v2`` DTO from an ORM model.
 
 The SQL workflow is model-first (issue #89): a developer defines the SQLAlchemy
-model and :class:`~resourcey.v2.sql.resource.SqlResource` infers the DTO from
+model and :class:`~resourcey.v2.sql.sql_resource.SqlResource` infers the DTO from
 it. These tests cover the inference (column types, nullability, defaults, the
 primary key, explicit ``DtoField`` overrides via ``column.info``), and the
 resulting resource round-tripping the standard actions.
@@ -42,7 +42,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from resourcey.v2.core.dto import DtoField
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
-from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
 
 
@@ -339,7 +339,7 @@ async def widget_resources() -> AsyncIterator[tuple[SqlResource[Any, Any], Async
 async def test_model_crud_round_trip(widget_resources):
     resource, session = widget_resources
     dto = resource.get_dto_type()
-    async with resource.get_service({**resource_ctx(session)}) as service:
+    async with await resource.get_service({**resource_ctx(session)}) as service:
         created = await service.create(
             dto(name="w", kind=Kind.ALPHA, payload={"x": 1}, nickname=None)
         )
@@ -371,7 +371,7 @@ async def test_model_values_bind_to_the_right_columns(widget_resources):
     resource, session = widget_resources
     dto = resource.get_dto_type()
     ref = uuid4()
-    async with resource.get_service(resource_ctx(session)) as service:
+    async with await resource.get_service(resource_ctx(session)) as service:
         await service.create(
             dto(name="w", kind=Kind.BETA, payload={"a": 1}, ref=ref, nickname="nick")
         )
@@ -398,7 +398,7 @@ async def test_renamed_identifier_crud():
         dto = resource.get_dto_type()
         async with (
             maker() as session,
-            resource.get_service(resource_ctx(session)) as service,
+            await resource.get_service(resource_ctx(session)) as service,
         ):
             created = await service.create(dto(code="US", name="United States"))
             assert (created.code, created.name) == ("US", "United States")
@@ -450,7 +450,7 @@ async def test_omitted_update_field_is_preserved_and_explicit_null_clears_it(pos
     """PATCH semantics: omission leaves the stored value; an explicit null clears it."""
     resource, session = post_resources
     dto = resource.get_dto_type()
-    async with resource.get_service(resource_ctx(session)) as service:
+    async with await resource.get_service(resource_ctx(session)) as service:
         created = await service.create(dto(code="c", description="original"))
 
         # Omit description -> the stored value must survive.
@@ -465,7 +465,7 @@ async def test_omitted_update_field_is_preserved_and_explicit_null_clears_it(pos
 async def test_update_bumps_updated_but_not_created_timestamps(post_resources):
     resource, session = post_resources
     dto = resource.get_dto_type()
-    async with resource.get_service(resource_ctx(session)) as service:
+    async with await resource.get_service(resource_ctx(session)) as service:
         created = await service.create(dto(code="c", description="d"))
         assert created.created_at is not None
         assert created.touched_at is not None
@@ -481,7 +481,7 @@ async def test_empty_patch_touches_the_row(post_resources):
     """An always-omitted field's update default always fires, so PATCH {} writes."""
     resource, session = post_resources
     dto = resource.get_dto_type()
-    async with resource.get_service(resource_ctx(session)) as service:
+    async with await resource.get_service(resource_ctx(session)) as service:
         created = await service.create(dto(code="c"))
         touched = await service.update(dto(id=created.id))
         assert touched.code == "c"
@@ -491,7 +491,7 @@ async def test_empty_patch_touches_the_row(post_resources):
 async def test_create_defaults_fill_omitted_fields(post_resources):
     resource, session = post_resources
     dto = resource.get_dto_type()
-    async with resource.get_service(resource_ctx(session)) as service:
+    async with await resource.get_service(resource_ctx(session)) as service:
         created = await service.create(dto(code="c"))
         # description is nullable with no client default: the DB/ORM default
         # (None) applies; the create-default factory fills the timestamps.
@@ -515,7 +515,7 @@ async def test_app_generated_identifier_factory_is_honoured():
         async with engine.begin() as conn:
             await conn.run_sync(AdoptedBase.metadata.create_all)
         dto = resource.get_dto_type()
-        async with maker() as session, resource.get_service(resource_ctx(session)) as service:
+        async with maker() as session, await resource.get_service(resource_ctx(session)) as service:
             generated = uuid4()
             created = await service.create(dto(id=generated, name="n"))
             assert created.id == generated
@@ -537,7 +537,7 @@ async def test_db_generated_identifier_is_never_passed_on_insert():
         async with engine.begin() as conn:
             await conn.run_sync(AdoptedBase.metadata.create_all)
         dto = resource.get_dto_type()
-        async with maker() as session, resource.get_service(resource_ctx(session)) as service:
+        async with maker() as session, await resource.get_service(resource_ctx(session)) as service:
             created = await service.create(dto(name="w", kind=Kind.ALPHA, payload={}))
             assert created.id is not None
             # source has a server_default and no create default: the default fires.
@@ -632,7 +632,7 @@ async def test_generated_uuid_id_is_used_on_insert():
         async with engine.begin() as conn:
             await conn.run_sync(AdoptedBase.metadata.create_all)
         dto = resource.get_dto_type()
-        async with maker() as session, resource.get_service(resource_ctx(session)) as service:
+        async with maker() as session, await resource.get_service(resource_ctx(session)) as service:
             created = await service.create(dto(label="n"))
             assert isinstance(created.id, UUID)
     finally:

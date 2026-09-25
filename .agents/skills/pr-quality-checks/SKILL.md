@@ -31,9 +31,12 @@ ensure they are green *before* opening (or updating) a pull request:
 
 2. **specs** (only when behavior changed, per the `quint-specs` skill):
    ```
+   scripts/install_quint_evaluator.sh   # pre-seed the Rust evaluator; see quint-specs
    quint typecheck specs/*.qnt
    quint test specs/<spec>.qnt --main=<spec>
    ```
+   (`make specs` runs the same set.) The pre-seed avoids the CLI's
+   unauthenticated, rate-limited GitHub API download of its evaluator binary.
 
 If any step fails, fix it before opening the PR — do not open the PR and
 address CI failures reactively. If the environment cannot run a step, say so

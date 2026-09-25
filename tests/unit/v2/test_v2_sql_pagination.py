@@ -24,7 +24,7 @@ from resourcey.v2.core.service import ServiceError
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.v2.encryption.encryption_service import EncryptionService
 from resourcey.v2.sql import cursor as cursor_module
-from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.sql.sql_resource import SqlResource
 
 
 class PaginationBase(DeclarativeBase):
@@ -57,7 +57,7 @@ async def resource() -> AsyncIterator[SqlResource[Any, Any]]:
     res = SqlResource(Item, session_factory=maker, encryption_service=_encryption())
     async with engine.begin() as conn:
         await conn.run_sync(res.metadata.create_all)
-    async with res.get_service() as service:
+    async with await res.get_service() as service:
         for i in range(7):
             await service.create(_dto_type()(label=f"item-{i}"))
     yield res
@@ -68,7 +68,7 @@ async def _walk(resource: SqlResource[Any, Any], limit: int) -> list[Any]:
     """Walk every page via ``next_cursor`` and return the collected ids."""
     seen: list[int] = []
     cursor: str | None = None
-    async with resource.get_service() as service:
+    async with await resource.get_service() as service:
         while True:
             page = await service.search(limit=limit, cursor=cursor)
             seen.extend(item.id for item in page.items)
@@ -85,7 +85,7 @@ async def test_paging_walks_every_row_with_no_gaps_or_repeats(resource):
 
 
 async def test_last_page_has_no_next_cursor(resource):
-    async with resource.get_service() as service:
+    async with await resource.get_service() as service:
         page = await service.search(limit=10)
     assert len(page.items) == 7
     assert page.next_cursor is None
@@ -94,7 +94,7 @@ async def test_last_page_has_no_next_cursor(resource):
 async def test_page_does_not_overrun_when_limit_equals_remaining(resource):
     # limit == remaining count on a page: an off-by-one would wrongly advertise
     # a next page.
-    async with resource.get_service() as service:
+    async with await resource.get_service() as service:
         first = await service.search(limit=4)
         second = await service.search(limit=3, cursor=first.next_cursor)
     assert (len(first.items), first.next_cursor is not None) == (4, True)
@@ -105,7 +105,7 @@ async def test_next_cursor_is_opaque_and_kid_tagged(resource):
     import base64
     import json
 
-    async with resource.get_service() as service:
+    async with await resource.get_service() as service:
         page = await service.search(limit=1)
     assert page.next_cursor is not None
     assert page.next_cursor.count(".") == 4
@@ -118,7 +118,7 @@ async def test_next_cursor_is_opaque_and_kid_tagged(resource):
 
 
 async def test_tampered_cursor_is_rejected(resource):
-    async with resource.get_service() as service:
+    async with await resource.get_service() as service:
         page = await service.search(limit=1)
         cursor = page.next_cursor
         assert cursor is not None
@@ -129,7 +129,7 @@ async def test_tampered_cursor_is_rejected(resource):
 
 
 async def test_garbage_cursor_is_rejected(resource):
-    async with resource.get_service() as service:
+    async with await resource.get_service() as service:
         with pytest.raises(InvalidInputError):
             await service.search(limit=1, cursor="not-a-cursor")
 
@@ -140,7 +140,7 @@ async def test_cursor_pagination_requires_an_encryption_service():
     res = SqlResource(Item, session_factory=maker)  # no encryption service
     async with engine.begin() as conn:
         await conn.run_sync(res.metadata.create_all)
-    async with res.get_service() as service:
+    async with await res.get_service() as service:
         await service.create(_dto_type()(label="x"))
         page = await service.search(limit=1)
         assert page.next_cursor is None

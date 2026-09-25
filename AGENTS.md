@@ -182,11 +182,12 @@ Four files, no `__init__.py`:
   (`get_dto_type`, `get_rest_models`, `get_id_field`), `get_resource_path`,
   `get_cache_strategy`, the action declaration (`get_supported_actions`, no
   `actions` property) and exposure (`get_exposed_resource`, whose declaration
-  wins outright), the service seam (`get_service(ctx)` — **sync**, takes an
+  wins outright), the service seam (`get_service(ctx)` — **async**, takes an
   optional call-scoped `MutableMapping`, returns a `Service` that is the async
-  CM), registration (`on_register` / `get_manifest`), and the lifecycle
-  (`__aenter__` / `__aexit__`). Core stays free of storage *and* transport: the
-  per-request FastAPI dependency is built in `v2/http`, not here.
+  CM, so the call site is `async with await get_service(ctx)`), registration
+  (`on_register` / `get_manifest`), and the lifecycle (`__aenter__` /
+  `__aexit__`). Core stays free of storage *and* transport: the per-request
+  FastAPI dependency is built in `v2/http`, not here.
 * `service.py` — `Service` is generic over the DTO `T` and the identifier type
   `K`, declares the eight actions, and *is* the async context manager; a call
   before `__aenter__` raises. `search` / `count` take a standard `SearchFilter`
@@ -207,12 +208,16 @@ Four files, no `__init__.py`:
   `Resource.get_manifest()` reads back (`None` until registered). Sibling
   resources are resolved *lazily, later* through that reference (e.g. to verify
   foreign keys) — never from inside `on_register`, since registration ordering
-  is not a contract.
+  is not a contract. `Manifest(resources, managers=...)` also takes app-lifecycle
+  async context managers (e.g. a `SqlSessionManager`): they are entered **before**
+  the resources and exited **after** them, so a resource can still use a manager
+  while shutting down. The slot is deliberately generic (`AbstractAsyncContextManager`)
+  rather than sql-typed, since `v2/core` must not import `v2/sql`.
 
 HTTP construction (`create_app`) is **not** part of `v2/core` — it belongs to
 the transport layer.
 
-### `v2/sql` — the SQLAlchemy backend (issues #78 / #89)
+### `v2/sql` — the SQLAlchemy backend (issues #78 / #89 / #74)
 
 `src/resourcey/v2/sql/` is the SQL backend on top of `v2/core`, laid out like
 `core` (flat files by role, no `__init__.py`). The workflow is **model-first**:
@@ -221,19 +226,45 @@ framework infers the DTO from it. SQLAlchemy is the schema of record, so
 migrations and foreign-key relations stay SQLAlchemy's / Alembic's concern and
 a developer can drop straight back to SQLAlchemy.
 
-* `resource.py` — `SqlResource` (a `Resource` subclass) is handed the
-  **SQLAlchemy model** it serves plus an async session maker **as a required
-  constructor argument**. It infers the DTO (and hence the REST models) from
-  the model via `sqlalchemy_2_dto`. There is **no** DTO-to-model generation and
-  no declarative base to manage; `model` / `table` / `metadata` / `id_column`
-  properties are the escape hatches back to SQLAlchemy.
-* `service.py` — `SqlService` holds the call-scoped `ctx` and the session
+* `sql_resource.py` — `SqlResource` (a `Resource` subclass) is handed the
+  **SQLAlchemy model** it serves and a session source. It infers the DTO (and
+  hence the REST models) from the model via `sqlalchemy_2_dto`. There is **no**
+  DTO-to-model generation and no declarative base to manage; `model` / `table` /
+  `metadata` / `id_column` properties are the escape hatches back to SQLAlchemy.
+  The session source is one of: an explicit `session_factory=` (the escape
+  hatch, which wins), or a `session_manager=` plus `name=` connection to resolve
+  from — defaulting to the process-wide `get_sql_session_manager()` and its
+  first connection. Because resolving a connection is async,
+  `SqlResource.get_service` is **async**. The file is named `sql_resource.py`
+  (and `sql_service.py`) so it is not confused with `v2/core/resource.py` /
+  `v2/core/service.py`.
+* `sql_service.py` — `SqlService` holds the call-scoped `ctx` and the session
   factory and implements the eight actions. `search` does keyset cursor
   pagination ordered by the identifier, or by a validated `sort` field (with
   the identifier as a stable tie-breaker) when one is requested; `search_filter`
   is pushed into the `WHERE` clause before the page is taken. `batch_edit`
   dispatches over the `Edit` union: a `Create` yields the new DTO, an `Update`
   the updated one, and a `Delete` (or an absent id) yields `None`.
+* `sql_config.py` / `db_config.py` — `SqlConfig` (a `BaseConfig`) holds
+  `sql_connections: list[DbConfig]`, parsed under the process-wide prefix as
+  `APP_SQL_CONNECTIONS_<n>_NAME` / `_URL` / `_PASSWORD`. `DbConfig` is a plain
+  nested `BaseModel` (`name` required, plus `url` and an optional `SecretStr`
+  `password` spliced in by the `database_url` property via SQLAlchemy's URL
+  parser). Blank or duplicate names are rejected at config build
+  (`ResourceyConfigError`); lookup is exact/case-sensitive. The field is
+  `sql_connections`, not `connections`, so a future non-SQL config can use the
+  latter.
+* `session_manager.py` — `SqlSessionManager(config)` hands out a session
+  *maker* per connection, building each engine lazily and disposing every one it
+  built on `__aexit__`; `__aenter__` is an idempotent marker. A lookup with no
+  name uses the first connection; an unknown name or an empty list raises
+  `ResourceyConfigError`. Using the manager un-entered raises, so a caller who
+  forgets `async with manifest` fails loudly instead of leaking engines.
+  `get_sql_session_manager()` / `clear_sql_session_manager_cache()` are the
+  process-wide accessor and its test-only reset. There is deliberately **no**
+  `get_session` — opening a session stays with the code that owns the
+  transaction, so the "whoever opens the storage owns its commit and close" rule
+  remains the only ownership story.
 * `sqlalchemy_2_dto.py` — `sqlalchemy_2_dto(model)` infers a DTO declaration
   from an ORM model: column types map back to Python annotations, the primary
   key becomes `id_field_name`, nullability becomes `ann | None`, and
@@ -544,16 +575,17 @@ It imports only the standard library.
 
 **One sentinel.** `Missing` / `MISSING` from `v2/util/missing.py` is the only
 definition in `v2`; `v2/util/env_parser.py`, `v2/core/dto.py`,
-`v2/config/lazy_field.py`, and `v2/sql/service.py` import it and there is no
+`v2/config/lazy_field.py`, and `v2/sql/sql_service.py` import it and there is no
 re-export. A test pins `env_parser.MISSING is missing.MISSING` so a future
 re-copy of the vendored file cannot quietly reintroduce a second sentinel.
 
-`src/resourcey/v2/config/` ships the generic machinery only: `config_base.py`,
-`config_loader.py` (`load_dotenv`), and `lazy_field.py`. `FrameworkConfig`,
-`DbConfig`, `MigrationConfig`, `AuthConfig`, `IdpConfig`, and
-`DependencyBuilder` are deferred to a later PR, so there is no
-`config_framework.py` / `config_dependency.py` here yet, and no
-`config_runtime` at all.
+`src/resourcey/v2/config/` ships the generic machinery only: `config_base.py`
+and `lazy_field.py`. There is **no** `config_loader.py` — `v2` does no `.env`
+loading of its own (`get_instance()` reads `os.environ` only; use
+`uvicorn --env-file` or a wrapper script). `FrameworkConfig`, `DbConfig`,
+`MigrationConfig`, `AuthConfig`, `IdpConfig`, and `DependencyBuilder` are
+deferred to a later PR, so there is no `config_framework.py` /
+`config_dependency.py` here yet, and no `config_runtime` at all.
 
 `BaseConfig.get_instance()` caches **per class** and is typed to the owning
 class: `MyAppConfig.get_instance()` returns a `MyAppConfig`,
@@ -561,11 +593,19 @@ class: `MyAppConfig.get_instance()` returns a `MyAppConfig`,
 super/subclass acceptance check and therefore no "not a subclass" error, and
 `clear_instance_cache()` clears only the class it is called on — a base and a
 subclass cache independently. The environment is the single source of truth:
-each class parses its own slice under its own `get_prefix()`, so an app config
-can extend a framework config without the framework needing to know the app's
-fields. `ResourceyConfigError` (with `ResourceyError`) lives in
-`v2/core/errors.py` and covers build/parse failures only; `ServiceError` /
-`NotFoundError` stay in `v2/core/service.py`.
+**one process-wide prefix** (`get_config_prefix` / `set_config_prefix`, default
+`APP`) governs every class, so an app config extends a framework config without
+the framework needing to know the app's fields. The first read **latches** — a
+later `set_config_prefix` raises `ResourceyConfigError` (and clears every
+class's instance cache) because a late set would silently reuse configs built
+under the old prefix; `_reset_config_prefix` is the test-only reset. Because
+all classes share one flat namespace, `BaseConfig.__init_subclass__` rejects —
+with a `TypeError` at class creation — a field name declared by two classes
+with **different** types, while a same-name/same-type redeclaration is allowed;
+`ClassVar` entries (`LazyField`) are not fields.
+`ResourceyConfigError` (with `ResourceyError`) lives in `v2/core/errors.py` and
+covers build/parse failures only; `ServiceError` / `NotFoundError` stay in
+`v2/core/service.py`.
 
 The `v2` isolation test is widened to cover **all** of `v2/`: no module under
 `v2/` may make a runtime import of any `resourcey` code outside `v2/`, with no

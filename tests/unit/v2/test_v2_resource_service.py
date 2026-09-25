@@ -17,11 +17,17 @@ import pytest
 import pytest_asyncio
 from pydantic import BaseModel
 from sqlalchemy import Integer, String
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.cache.cache_strategy import ETagCacheStrategy
-from resourcey.v2.core.errors import InvalidInputError
+from resourcey.v2.config.config_base import _reset_config_prefix
+from resourcey.v2.core.errors import InvalidInputError, ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
@@ -37,7 +43,14 @@ from resourcey.v2.core.service import (
 )
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
 from resourcey.v2.http.routes import _service_dependency
-from resourcey.v2.sql.resource import SqlResource
+from resourcey.v2.sql.db_config import DbConfig
+from resourcey.v2.sql.session_manager import (
+    SqlSessionManager,
+    clear_sql_session_manager_cache,
+    get_sql_session_manager,
+)
+from resourcey.v2.sql.sql_config import SqlConfig
+from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.util.search_filter import build_filter
 
 
@@ -98,14 +111,14 @@ def _dummy_factory() -> async_sessionmaker[AsyncSession]:
 
 async def test_service_methods_raise_before_enter(resources):
     _maker, threads, _messages = resources
-    service = threads.get_service()
+    service = await threads.get_service()
     with pytest.raises(ServiceError, match="before entering"):
         await service.read(1)
 
 
 async def test_reentering_an_entered_service_raises(resources):
     _maker, threads, _messages = resources
-    service = threads.get_service()
+    service = await threads.get_service()
     async with service:
         with pytest.raises(ServiceError, match="already entered"):
             await service.__aenter__()
@@ -113,7 +126,7 @@ async def test_reentering_an_entered_service_raises(resources):
 
 async def test_entered_property_tracks_context_manager(resources):
     _maker, threads, _messages = resources
-    service = threads.get_service()
+    service = await threads.get_service()
     assert service.entered is False
     async with service:
         assert service.entered is True
@@ -143,7 +156,7 @@ def test_resource_base_is_abstract():
 async def test_crud_and_count_and_search(resources):
     _maker, threads, _messages = resources
     ctx: dict[Any, Any] = {}
-    async with threads.get_service(ctx) as service:
+    async with await threads.get_service(ctx) as service:
         created = await service.create(_dto_type(Thread)(title="hello"))
         assert created.id is not None
         assert created.title == "hello"
@@ -164,14 +177,14 @@ async def test_crud_and_count_and_search(resources):
 
 async def test_read_absent_raises(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
+    async with await threads.get_service() as service:
         with pytest.raises(NotFoundError):
             await service.read(999)
 
 
 async def test_update_and_delete_absent_raise(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
+    async with await threads.get_service() as service:
         with pytest.raises(NotFoundError):
             await service.update(_dto_type(Thread)(id=999, title="x"))
         with pytest.raises(NotFoundError):
@@ -180,14 +193,14 @@ async def test_update_and_delete_absent_raise(resources):
 
 async def test_update_requires_an_id_on_the_payload(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
+    async with await threads.get_service() as service:
         with pytest.raises(ServiceError, match="identifier"):
             await service.update(_dto_type(Thread)(title="x"))
 
 
 async def test_batch_read_and_batch_edit(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
+    async with await threads.get_service() as service:
         a = await service.create(_dto_type(Thread)(title="a"))
         b = await service.create(_dto_type(Thread)(title="b"))
         assert [x.title for x in await service.batch_read([a.id, b.id])] == ["a", "b"]
@@ -228,7 +241,7 @@ async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources
             )
 
     thread = ReadUpdateThread(Thread, session_factory=_maker)
-    async with thread.get_service() as service:
+    async with await thread.get_service() as service:
         dto = _dto_type(Thread)
         with pytest.raises(InvalidInputError):
             await service.batch_edit([Create(item=dto(title="nope"))])
@@ -241,7 +254,7 @@ async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources
 
 async def test_search_sorts_ascending_and_descending(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
+    async with await threads.get_service() as service:
         await service.create(_dto_type(Thread)(title="b"))
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="c"))
@@ -263,7 +276,7 @@ async def test_search_rejects_an_unknown_sort_field(resources):
 
 async def test_search_and_count_accept_a_filter(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
+    async with await threads.get_service() as service:
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
         filtered = build_filter([("title", "eq", "a")])
@@ -275,7 +288,7 @@ async def test_search_and_count_accept_a_filter(resources):
 
 async def test_search_orders_by_id_ascending(resources):
     _maker, threads, _messages = resources
-    async with threads.get_service() as service:
+    async with await threads.get_service() as service:
         await service.create(_dto_type(Thread)(title="a"))
         await service.create(_dto_type(Thread)(title="b"))
         page = await service.search(limit=10)
@@ -290,7 +303,7 @@ async def test_search_orders_by_id_ascending(resources):
 async def test_owner_opens_and_commits_its_own_storage(resources):
     _maker, threads, _messages = resources
     ctx: dict[Any, Any] = {}
-    service = threads.get_service(ctx)
+    service = await threads.get_service(ctx)
     assert STORAGE_KEY not in ctx
     async with service:
         assert STORAGE_KEY in ctx
@@ -298,7 +311,7 @@ async def test_owner_opens_and_commits_its_own_storage(resources):
     # The opener closed and cleared its storage on exit.
     assert STORAGE_KEY not in ctx
     # And the row was committed.
-    async with threads.get_service() as fresh:
+    async with await threads.get_service() as fresh:
         assert await fresh.count() == 1
 
 
@@ -306,7 +319,7 @@ async def test_reusing_seeded_storage_does_not_commit_or_close(resources):
     maker, threads, _messages = resources
     shared = maker()
     ctx: dict[Any, Any] = {STORAGE_KEY: shared}
-    service = threads.get_service(ctx)
+    service = await threads.get_service(ctx)
     async with service:
         await service.create(_dto_type(Thread)(title="shared"))
         assert ctx[STORAGE_KEY] is shared
@@ -320,23 +333,23 @@ async def test_reusing_seeded_storage_does_not_commit_or_close(resources):
 async def test_session_per_service_shares_one_storage_across_resources(resources):
     _maker, threads, messages = resources
     ctx: dict[Any, Any] = {}
-    async with threads.get_service(ctx) as thread_service:
+    async with await threads.get_service(ctx) as thread_service:
         thread = await thread_service.create(_dto_type(Thread)(title="t"))
-        async with messages.get_service(ctx) as message_service:
+        async with await messages.get_service(ctx) as message_service:
             # The second service adopted the first's session.
             assert message_service._session is thread_service._session
             await message_service.create(_dto_type(Message)(thread_id=thread.id, body="hello"))
-    async with messages.get_service() as fresh:
+    async with await messages.get_service() as fresh:
         assert await fresh.count() == 1
 
 
 async def test_exception_in_owned_storage_rolls_back(resources):
     _maker, threads, _messages = resources
     with pytest.raises(RuntimeError):
-        async with threads.get_service() as service:
+        async with await threads.get_service() as service:
             await service.create(_dto_type(Thread)(title="rolled-back"))
             raise RuntimeError("boom")
-    async with threads.get_service() as fresh:
+    async with await threads.get_service() as fresh:
         assert await fresh.count() == 0
 
 
@@ -427,6 +440,85 @@ async def test_manifest_exits_resources_in_reverse(resources):
     assert order == ["messages", "threads"]
 
 
+async def test_manifest_enters_managers_before_resources_and_exits_after(resources):
+    maker, _threads, _messages = resources
+    order: list[str] = []
+
+    class RecordingManager:
+        async def __aenter__(self) -> RecordingManager:
+            order.append("manager-enter")
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            order.append("manager-exit")
+
+    threads = RecordingResource(Thread, session_factory=maker, order=order)
+    manifest: Manifest = Manifest(resources=[threads], managers=[RecordingManager()])
+    async with manifest:
+        assert order == ["manager-enter"]
+    assert order == ["manager-enter", "threads", "manager-exit"]
+
+
+async def test_manifest_lifecycle_with_a_session_manager(monkeypatch, tmp_path):
+    """A manifest owning a SqlSessionManager disposes its engines on exit."""
+    disposed: list[object] = []
+    original = AsyncEngine.dispose
+
+    async def spy(self: AsyncEngine, close: bool = True) -> None:
+        disposed.append(self)
+        await original(self, close)
+
+    monkeypatch.setattr(AsyncEngine, "dispose", spy)
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'app.db'}"
+    setup_engine = create_async_engine(url)
+    async with setup_engine.begin() as conn:
+        await conn.run_sync(CoreBase.metadata.create_all)
+    await setup_engine.dispose()
+
+    manager = SqlSessionManager(SqlConfig(sql_connections=[DbConfig(name="main", url=url)]))
+    threads = SqlResource(Thread, session_manager=manager)
+    manifest: Manifest = Manifest(resources=[threads], managers=[manager])
+    async with manifest, await threads.get_service() as service:
+        await service.create(_dto_type(Thread)(title="owned"))
+    assert disposed  # the manager's engine was disposed
+    # Un-entered use now fails loudly.
+    with pytest.raises(ResourceyConfigError):
+        await threads.get_service()
+
+
+async def test_sql_resource_uses_the_named_connection(monkeypatch):
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_0_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_1_NAME", "reports")
+    monkeypatch.setenv("APP_SQL_CONNECTIONS_1_URL", "sqlite+aiosqlite:///:memory:")
+
+    _reset_config_prefix()
+    clear_sql_session_manager_cache()
+    try:
+        manager = get_sql_session_manager()
+        default = SqlResource(Thread)
+        reports = SqlResource(Message, name="reports")
+        async with manager:
+            default_maker = await manager.get_session_maker("main")
+            reports_maker = await manager.get_session_maker("reports")
+            assert (await default.get_service())._session_factory is default_maker
+            assert (await reports.get_service())._session_factory is reports_maker
+    finally:
+        clear_sql_session_manager_cache()
+        _reset_config_prefix()
+
+
+async def test_unknown_connection_name_raises_at_first_use():
+    manager = SqlSessionManager(
+        SqlConfig(sql_connections=[DbConfig(name="main", url="sqlite+aiosqlite:///:memory:")])
+    )
+    resource = SqlResource(Thread, session_manager=manager, name="missing")
+    async with manager:
+        with pytest.raises(ResourceyConfigError, match="Unknown SQL connection name"):
+            await resource.get_service()
+
+
 async def test_service_dependency_yields_entered_service(resources):
     _maker, threads, _messages = resources
     dependency = _service_dependency(threads, DefaultDependencyBuilder())
@@ -446,10 +538,10 @@ async def test_service_dependency_yields_entered_service(resources):
 
 async def test_get_service_without_ctx_creates_a_private_context(resources):
     _maker, threads, _messages = resources
-    service = threads.get_service()
+    service = await threads.get_service()
     async with service as entered:
         await entered.create(_dto_type(Thread)(title="private"))
-    async with threads.get_service() as fresh:
+    async with await threads.get_service() as fresh:
         assert await fresh.count() == 1
 
 
@@ -516,7 +608,7 @@ def test_non_integer_identifier_is_a_plain_primary_key(code_resource):
 
 async def test_crud_with_a_custom_identifier(code_resource):
     resource, _maker = code_resource
-    async with resource.get_service() as service:
+    async with await resource.get_service() as service:
         created = await service.create(_dto_type(ByCode)(code="US", name="United States"))
         assert (created.code, created.name) == ("US", "United States")
 
@@ -557,7 +649,7 @@ def test_ctx_is_a_plain_mutable_mapping(resources):
     ctx: MutableMapping[Any, Any] = {}
 
     async def run() -> None:
-        async with threads.get_service(ctx) as service:
+        async with await threads.get_service(ctx) as service:
             await service.count()
             assert isinstance(ctx, dict)
 
