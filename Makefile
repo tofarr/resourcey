@@ -17,6 +17,7 @@ type:
 	uv run mypy src/resourcey
 
 specs:
+	scripts/install_quint_evaluator.sh
 	quint typecheck specs/resource_actions.qnt
 	quint typecheck specs/permissions.qnt
 	quint typecheck specs/exposure.qnt
