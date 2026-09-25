@@ -12,6 +12,8 @@
 //
 // The read-only branch comes first: a surface that cannot change gains nothing
 // from a validator, so it gets a freshness window regardless of its fields.
+// That window is *private*: read-only does not imply the same bytes for every
+// caller (a permission-narrowed search), so a shared cache must not store it.
 //
 // Invariants:
 //   - readOnlyIsOptimistic: a read-only resource always selects Optimistic,
@@ -20,6 +22,8 @@
 //     never read-only, so it selects a validator strategy.
 //   - selectionIsTotal: every (readOnly, hasUpdatedAt) pair maps to exactly one
 //     of the three strategies.
+//   - readOnlyWindowIsPrivate: the read-only default is always caller-scoped,
+//     so a shared cache may not replay it to another caller.
 
 module cache_defaults {
   // The standard actions, as far as read-only detection cares.
@@ -39,11 +43,20 @@ module cache_defaults {
   // strategy requires a positive window, so this must be > 0.
   pure val readOnlyExpireIn: int = 600
 
+  // Whether the read-only freshness window is caller-scoped (a shared cache
+  // must not store it). Read-only does not imply the same bytes per caller.
+  pure val readOnlyIsPrivate: bool = true
+
   // The default selection: read-only first, then updated_at, then ETag.
   pure def defaultStrategy(readOnly: bool, hasUpdatedAt: bool): Strategy =
     if (readOnly) Optimistic
     else if (hasUpdatedAt) LastModified
     else Etag
+
+  // Whether the default selection marks the freshness window private. Only the
+  // read-only branch has a freshness window, and it is always private.
+  pure def defaultIsPrivate(readOnly: bool): bool =
+    readOnly and readOnlyIsPrivate
 
   // Tests
 
@@ -84,6 +97,17 @@ module cache_defaults {
     assert(readOnlyExpireIn > 0)
   }
 
+  run readOnlyWindowIsPrivate = {
+    all {
+      // The read-only default is caller-scoped whatever its fields...
+      assert(defaultIsPrivate(isReadOnly(readOnlyActions))),
+      assert(defaultIsPrivate(isReadOnly(Set()))),
+      // ...while a writable resource selects a validator and no window.
+      assert(not(defaultIsPrivate(isReadOnly(allActions)))),
+      assert(not(defaultIsPrivate(false)))
+    }
+  }
+
   run selectionIsTotal = {
     // Every input pair maps to one of the three strategies (never anything else).
     all {
@@ -115,6 +139,11 @@ module cache_defaults {
       not(isReadOnly(Set(Read, BatchEdit))),
       // selectionIsTotal.
       readOnlyExpireIn > 0,
+      // readOnlyWindowIsPrivate.
+      defaultIsPrivate(isReadOnly(readOnlyActions)),
+      defaultIsPrivate(isReadOnly(Set())),
+      not(defaultIsPrivate(isReadOnly(allActions))),
+      not(defaultIsPrivate(false)),
     }
   }
 }

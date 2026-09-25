@@ -10,7 +10,7 @@ Covers the ``v2`` value objects and strategies, the default selection on
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -89,6 +89,18 @@ def test_has_any():
     assert CacheHeader().has_any() is False
     assert CacheHeader(etag='"x"').has_any() is True
     assert CacheHeader(expire_at=datetime.now(UTC)).has_any() is True
+    assert CacheHeader(private=True).has_any() is True
+
+
+def test_cache_response_headers_prepend_private():
+    from resourcey.v2.http.routes import _cache_response_headers
+
+    fresh = CacheHeader(expire_at=datetime.now(UTC) + timedelta(seconds=30), private=True)
+    assert _cache_response_headers(fresh)["Cache-Control"].startswith("private, max-age=")
+    # A private validator-only header revalidates but also stays out of shared
+    # caches; the freshness branch is not the only place ``private`` applies.
+    revalidating = CacheHeader(etag='"x"', private=True)
+    assert _cache_response_headers(revalidating)["Cache-Control"] == "private, no-cache"
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +174,23 @@ def test_count_cache_header_honours_expire_in():
     assert header.expire_at is not None
 
 
+def test_optimistic_count_cache_header_has_no_validator():
+    # The optimistic contract is "no validators anywhere": the count route gets
+    # freshness only, matching the read routes.
+    header = OptimisticCacheStrategy(expire_in=30).count_cache_header(3)
+    assert header.etag is None
+    assert header.updated_at is None
+    assert header.expire_at is not None
+
+
+def test_private_flag_round_trips_and_reaches_the_header():
+    strategy = OptimisticCacheStrategy(expire_in=30, private=True)
+    assert strategy.get_cache_header([]).private is True
+    assert strategy.count_cache_header(0).private is True
+    assert strategy.model_dump()["private"] is True
+    assert CacheStrategy.model_validate(strategy.model_dump()).private is True
+
+
 def test_strategy_satisfies_the_core_placeholder_seam():
     # ``v2/core`` names the concept; the concrete base extends it so a strategy
     # is usable through the core-level ``get_cache_header`` / ``count_cache_header``.
@@ -231,11 +260,13 @@ def test_default_is_last_modified_with_updated_at():
 
 def test_default_is_optimistic_for_read_only():
     # A read-only surface cannot change, so it gets a freshness window rather
-    # than a validator.
+    # than a validator — scoped ``private`` since read-only does not imply the
+    # same bytes for every caller.
     resource = ReadOnly(NoUpdated, session_factory=_factory())
     strategy = default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions())
     assert isinstance(strategy, OptimisticCacheStrategy)
     assert strategy.expire_in == DEFAULT_READ_ONLY_EXPIRE_IN
+    assert strategy.private is True
 
 
 def test_read_only_wins_over_updated_at():
@@ -243,6 +274,20 @@ def test_read_only_wins_over_updated_at():
     resource = ReadOnly(HasUpdated, session_factory=_factory())
     strategy = default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions())
     assert isinstance(strategy, OptimisticCacheStrategy)
+
+
+def test_mixin_keeps_the_abstract_contract():
+    # The mixin must not drop the two hooks from ``Resource``'s abstract set by
+    # defining concrete overrides: a backend that forgets one fails at
+    # instantiation, not at the first request.
+    from resourcey.v2.core.resource import Resource
+
+    class Incomplete(DefaultCacheStrategyMixin, Resource[Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset({Action.READ})
+
+    with pytest.raises(TypeError, match="get_rest_models"):
+        Incomplete()  # type: ignore[abstract]
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +523,7 @@ async def test_expiring_strategy_emits_cache_control_and_expires():
 
 async def test_read_only_resource_emits_freshness_only():
     # A read-only resource defaults to optimistic caching: no validators, just a
-    # freshness window. It has no write route, so seed a row directly.
+    # caller-scoped freshness window. It has no write route, so seed a row directly.
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     items = ReadOnly(HasUpdated, session_factory=maker, path="/items")
@@ -496,8 +541,34 @@ async def test_read_only_resource_emits_freshness_only():
         assert search.status_code == 200
         assert "etag" not in search.headers
         assert "last-modified" not in search.headers
-        assert search.headers["cache-control"].startswith("max-age=")
+        # ``private`` keeps the caller-scoped window out of shared caches.
+        assert search.headers["cache-control"].startswith("private, max-age=")
         assert "expires" in search.headers
+    await engine.dispose()
+
+
+async def test_read_only_resource_count_has_no_validator():
+    # The ``count`` sub-route must honour the same "no validators" rule as the
+    # read routes; the base count ETag would contradict the optimistic contract.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = ReadOnly(HasUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+    async with maker() as session:
+        session.add(HasUpdated(label="x", updated_at=datetime.now(UTC)))
+        await session.commit()
+
+    from resourcey.v2.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        counted = await client.get("/items/count")
+        assert counted.status_code == 200
+        assert "etag" not in counted.headers
+        assert "last-modified" not in counted.headers
+        assert counted.headers["cache-control"].startswith("private, max-age=")
+        assert "expires" in counted.headers
     await engine.dispose()
 
 

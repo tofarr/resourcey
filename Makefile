@@ -29,7 +29,7 @@ specs:
 	quint typecheck specs/filtering.qnt
 	quint test specs/filtering.qnt --main=filtering --match "^(law1_normalisationPreserves|law2_nullSafeNegation|law3_nullSafeNegationGeneralises|law4_positivePushdownIsSound)$$"
 	quint typecheck specs/cache_defaults.qnt
-	quint test specs/cache_defaults.qnt --main=cache_defaults --match "^(readOnlyIsOptimistic|writeActionForcesValidator|writableWithUpdatedAtGetsLastModified|writableWithoutUpdatedAtGetsEtag|readOnlyDefaultHasPositiveWindow|selectionIsTotal|invariantsHold)$$"
+	quint test specs/cache_defaults.qnt --main=cache_defaults --match "^(readOnlyIsOptimistic|writeActionForcesValidator|writableWithUpdatedAtGetsLastModified|writableWithoutUpdatedAtGetsEtag|readOnlyDefaultHasPositiveWindow|readOnlyWindowIsPrivate|selectionIsTotal|invariantsHold)$$"
 
 clean:
 	rm -rf .mypy_cache .ruff_cache .pytest_cache .coverage htmlcov coverage.xml

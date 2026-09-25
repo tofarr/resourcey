@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from resourcey.v2.cache.cache_defaults import DefaultCacheStrategyMixin
 from resourcey.v2.core.dto import RestModels
 from resourcey.v2.core.resource import Resource, _camel_to_kebab, _pluralize
-from resourcey.v2.core.service import Action, CacheStrategy, Service, ServiceError
+from resourcey.v2.core.service import Action, Service, ServiceError
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.service import SqlService
 from resourcey.v2.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
@@ -71,8 +71,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T]):
         self._encryption_service = encryption_service
         self._entered = False
         self._manifest: Manifest | None = None
-        # Cache policy, resolved lazily by the DefaultCacheStrategyMixin.
-        self._cache_strategy: CacheStrategy | None = None
+        # The cache policy is resolved lazily by DefaultCacheStrategyMixin.
         self._column_for_attr = {
             prop.key: prop.columns[0].name for prop in model.__mapper__.column_attrs
         }
