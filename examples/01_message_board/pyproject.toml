@@ -12,6 +12,9 @@ dependencies = [
     "resourcey @ git+https://github.com/tofarr/resourcey.git@main",
     # SQLite async driver — the example defaults to a local SQLite file.
     "aiosqlite>=0.22",
+    # Alembic is used directly (v2 has no `resourcey migrate` wrapper), so it is
+    # a direct dependency of the example, not only a transitive one.
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +48,9 @@ resourcey = { path = "../..", editable = true }
 target-version = "py311"
 line-length = 100
 extend-exclude = ["migrations"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["resourcey", "message_board"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
