@@ -220,6 +220,7 @@ def test_the_util_files_exist_without_an_init():
         "import_paths.py",
         "missing.py",
         "models.py",
+        "naming.py",
         "search_filter.py",
         "singleton.py",
         "sort_order.py",

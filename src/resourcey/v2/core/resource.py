@@ -43,7 +43,6 @@ per-request service dependency is a transport concern and lives in
 
 from __future__ import annotations
 
-import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, MutableMapping
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
@@ -59,8 +58,6 @@ if TYPE_CHECKING:
     from resourcey.v2.core.manifest import Manifest
 
 T = TypeVar("T", bound=BaseModel)
-
-_CAMEL_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z]{2})(?=[A-Z][a-z])")
 
 
 # ---------------------------------------------------------------------------
@@ -214,20 +211,3 @@ class Resource(ABC, Generic[T]):
     @abstractmethod
     async def __aexit__(self, *exc: object) -> None:
         """Exit the resource's runtime lifecycle."""
-
-
-# ---------------------------------------------------------------------------
-# Name helpers shared by backends
-# ---------------------------------------------------------------------------
-
-
-def _camel_to_kebab(name: str) -> str:
-    """Insert ``-`` boundaries into a CamelCase identifier (kept local to core)."""
-    return _CAMEL_BOUNDARY.sub("-", name)
-
-
-def _pluralize(name: str) -> str:
-    """Append a simple English plural suffix (kept local to core)."""
-    if name.endswith(("s", "x", "z", "ch", "sh")):
-        return name + "es"
-    return name + "s"
