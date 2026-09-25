@@ -210,6 +210,35 @@ async def test_batch_read_and_batch_edit(resources):
         assert (await service.batch_read([b.id]))[0] is None
 
 
+async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources):
+    """The backend guard: a batch cannot create / delete an action the resource omits."""
+    _maker, _threads, _messages = resources
+
+    class ReadUpdateThread(SqlResource[Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset(
+                {
+                    Action.READ,
+                    Action.UPDATE,
+                    Action.SEARCH,
+                    Action.COUNT,
+                    Action.BATCH_READ,
+                    Action.BATCH_EDIT,
+                }
+            )
+
+    thread = ReadUpdateThread(Thread, session_factory=_maker)
+    async with thread.get_service() as service:
+        dto = _dto_type(Thread)
+        with pytest.raises(InvalidInputError):
+            await service.batch_edit([Create(item=dto(title="nope"))])
+        with pytest.raises(InvalidInputError):
+            await service.batch_edit([Delete(id=1)])
+        # An update is still fine and wrote nothing (the id is absent).
+        assert await service.batch_edit([Update(item=dto(id=1, title="u"))]) == [None]
+        assert await service.count() == 0
+
+
 async def test_search_sorts_ascending_and_descending(resources):
     _maker, threads, _messages = resources
     async with threads.get_service() as service:

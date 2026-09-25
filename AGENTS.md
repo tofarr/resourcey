@@ -304,7 +304,9 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   class name, through the `_route` no-clobber escape hatch (a developer's route
   wins). The builder is resolved on the **exposed** resource, so a projection's
   wrapped service is the projection's. It also holds `register_error_handlers`,
-  the projection helper, and the batch-edit body union.
+  the projection helper, and the batch-edit body union — which is narrowed to
+  the `Create` / `Delete` actions the resource declares, so a batch cannot reach
+  an action the declaration omits.
 
 Where the port differs from `v1`: `get_rest_models()` replaces the
 create/update/read model getters, so each action maps explicitly to its shape

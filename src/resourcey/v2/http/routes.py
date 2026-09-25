@@ -55,6 +55,7 @@ from resourcey.v2.core.dto import RestModels, request_to_dto
 from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
+    DEFAULT_LIMIT,
     Action,
     Create,
     Delete,
@@ -130,7 +131,7 @@ def register_routes(
         _add_batch_read_route(router, path, models, id_type, service_dep, strategy)
     if Action.BATCH_EDIT in supported:
         _add_batch_edit_route(
-            router, path, models, dto_model, id_field, id_type, service_dep, strategy
+            router, path, models, dto_model, id_field, id_type, supported, service_dep, strategy
         )
     if Action.CREATE in supported:
         _add_create_route(router, path, models, dto_model, service_dep, strategy)
@@ -386,7 +387,7 @@ def _add_search_route(
 
     async def handler(  # type: ignore[no-untyped-def]
         request,
-        limit=20,
+        limit=DEFAULT_LIMIT,
         cursor=None,
         sort=None,
         desc=False,
@@ -474,6 +475,7 @@ def _add_batch_edit_route(
     dto_model: type[BaseModel],
     id_field: str,
     id_type: Any,
+    supported: frozenset[Action],
     service_dep: Any,
     strategy: Any,
 ) -> None:
@@ -484,8 +486,17 @@ def _add_batch_edit_route(
     folded into the matching :class:`~resourcey.v2.core.service.Edit` node and
     the results align positionally with the input (a delete, or a miss, is
     ``None``).
+
+    ``create`` / ``delete`` are only admitted when the resource *declares* those
+    actions (``supported``), so a batch cannot reach an action the resource
+    never exposed; the corresponding ``kind`` is absent from the body schema and
+    an unexpected one is rejected ``422``.
     """
-    body_model = _batch_edit_body(models.create_request, models.update_request, id_field, id_type)
+    allow_create = Action.CREATE in supported
+    allow_delete = Action.DELETE in supported
+    body_model = _batch_edit_body(
+        models.create_request, models.update_request, id_field, id_type, allow_create, allow_delete
+    )
 
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
         edits = [_batch_edit_node(item, dto_model, id_field) for item in payload]
@@ -688,10 +699,12 @@ def _batch_edit_body(
     update_request: type[BaseModel],
     id_field: str,
     id_type: Any,
+    allow_create: bool,
+    allow_delete: bool,
 ) -> Any:
     """Build the ``batch-edit`` body: a ``kind``-discriminated union of edits.
 
-    Three wire shapes, matching :class:`~resourcey.v2.core.service.Create`,
+    The wire shapes match :class:`~resourcey.v2.core.service.Create`,
     :class:`~resourcey.v2.core.service.Update`, and
     :class:`~resourcey.v2.core.service.Delete`:
 
@@ -701,13 +714,24 @@ def _batch_edit_body(
 
     The update item carries the identifier because the path does not; a create
     item is the create request verbatim (a server-generated id is absent, a
-    natural key is client-supplied).
+    natural key is client-supplied). ``Delete`` carries the identifier directly
+    rather than nesting it under ``item``: there is no payload to nest, and
+    mirroring the other nodes' ``item`` wrapper would only add an empty object.
+
+    ``allow_create`` / ``allow_delete`` narrow the union to the actions the
+    resource declares; ``Update`` is always present, since ``batch_edit`` itself
+    is the update action. A ``kind`` outside the narrowed union is rejected
+    before a node is ever built.
     """
-    create_edit = create_model(
-        f"{create_request.__name__}CreateEdit",
-        kind=(Literal["Create"], ...),
-        item=(create_request, ...),
-    )
+    members: list[Any] = []
+    if allow_create:
+        members.append(
+            create_model(
+                f"{create_request.__name__}CreateEdit",
+                kind=(Literal["Create"], ...),
+                item=(create_request, ...),
+            )
+        )
     update_fields = {
         name: (field.annotation, field) for name, field in update_request.model_fields.items()
     }
@@ -716,17 +740,24 @@ def _batch_edit_body(
         **{id_field: (id_type, ...)},  # the id is required on each update
         **update_fields,
     )
-    update_edit = create_model(
-        f"{update_request.__name__}UpdateEdit",
-        kind=(Literal["Update"], ...),
-        item=(update_item, ...),
+    members.append(
+        create_model(
+            f"{update_request.__name__}UpdateEdit",
+            kind=(Literal["Update"], ...),
+            item=(update_item, ...),
+        )
     )
-    delete_edit = create_model(  # type: ignore[call-overload]
-        f"{create_request.__name__}DeleteEdit",
-        kind=(Literal["Delete"], ...),
-        **{id_field: (id_type, ...)},
-    )
-    edits = create_edit | update_edit | delete_edit
+    if allow_delete:
+        members.append(
+            create_model(  # type: ignore[call-overload]
+                f"{create_request.__name__}DeleteEdit",
+                kind=(Literal["Delete"], ...),
+                **{id_field: (id_type, ...)},
+            )
+        )
+    edits = members[0]
+    for member in members[1:]:
+        edits = edits | member
     return Annotated[edits, Field(discriminator="kind")]
 
 

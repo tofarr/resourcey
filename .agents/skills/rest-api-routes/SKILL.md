@@ -63,6 +63,10 @@ Every generated resource service exposes the **standard actions** over REST:
   `{"kind": "Delete", "<id>": <id>}`. A `Create` / `Update` yields the entity
   (projected onto the create / update response respectively); a `Delete` yields
   `null` (nothing to return), as does an `Update` / `Delete` for an absent id.
+  The union is **narrowed to the actions the resource declares**: a resource
+  that does not expose `create` / `delete` admits only the `Update` kind (the
+  declaration is the single source of truth, so a batch cannot reach an action
+  the resource never exposed).
 * All actions are permission-checked before execution (see `auth-rbac` skill).
 
 ## Error shapes

@@ -124,6 +124,28 @@ module exposure {
     // A resource may narrow its actions, never widen beyond the declaration.
     supported.subseteq(r.actions)
 
+  // The `kind`s a batch-edit body admits, given the actions a resource
+  // declares. `Update` is always present: batch_edit *is* the update action, so
+  // a resource that exposes it can at least update. `Create` / `Delete` are
+  // admitted only when the matching action is declared, so a batch can never
+  // reach an action the resource does not expose.
+  pure def batchEditKinds(supported: Set[Action]): Set[str] =
+    Set("Update")
+      .union(if (supported.contains(Create)) Set("Create") else Set())
+      .union(if (supported.contains(Delete)) Set("Delete") else Set())
+
+  // Every body `kind` a batch_edit admits maps to a declared action: "Create"
+  // to Create, "Delete" to Delete, "Update" to Update (which BatchEdit implies).
+  pure def batchEditKindsAreDeclared(supported: Set[Action]): bool =
+    all {
+      if (supported.contains(Create)) Set("Create").subseteq(batchEditKinds(supported)) else true,
+      if (supported.contains(Delete)) Set("Delete").subseteq(batchEditKinds(supported)) else true,
+      not(supported.contains(Create)) implies
+        not(batchEditKinds(supported).contains("Create")),
+      not(supported.contains(Delete)) implies
+        not(batchEditKinds(supported).contains("Delete")),
+    }
+
   // Tests
 
   run selfIsTheDefault = {
@@ -211,6 +233,20 @@ module exposure {
     }
   }
 
+  run batchEditAdmitsOnlyDeclaredActions = {
+    // A resource exposing batch_edit but not create / delete: its body admits
+    // only the update `kind`.
+    val readUpdate = Set(Read, Update, Search, Count, BatchEdit)
+    // A resource that also declares create / delete admits all three kinds.
+    val allActions = Set(Read, Update, Create, Delete, Search, Count, BatchEdit)
+    all {
+      assert(batchEditKinds(readUpdate) == Set("Update")),
+      assert(batchEditKinds(allActions) == Set("Update", "Create", "Delete")),
+      assert(batchEditKindsAreDeclared(readUpdate)),
+      assert(batchEditKindsAreDeclared(allActions)),
+    }
+  }
+
   run invariantsHold = {
     val r = { fields: Set("id", "name", "secret"), actions: Set(Read, Search) }
     all {
@@ -221,6 +257,7 @@ module exposure {
       assert(wrapperDoesNotDelegate(r, Set("secret"))),
       assert(defaultBuilderIsIdentity(r)),
       assert(wrappedBuilderPreservesTheActionContract(r, Secured)),
+      assert(batchEditKindsAreDeclared(r.actions)),
     }
   }
 }

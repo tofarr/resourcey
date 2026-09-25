@@ -24,9 +24,9 @@ arguments, so the whole operation's inputs are explicit rather than wrapped in
 a request object. ``batch_edit`` takes a list of :class:`Edit` nodes so a single
 batch can create, update, *and* delete.
 
-This module is part of the ``v2/core`` layer: besides Pydantic and the standard
-library it imports only ``v2/util`` (the ``Missing`` sentinel and the filter /
-sort / discriminated-union leaves) — ``core`` imports no other project package.
+This module is part of the ``v2/core`` layer: besides the standard library it
+imports only ``v2/util`` (the filter / sort / discriminated-union leaves) —
+``core`` imports no other project package.
 """
 
 from __future__ import annotations
@@ -42,6 +42,11 @@ from resourcey.v2.util.sort_order import SortOrder
 
 T = TypeVar("T")
 K = TypeVar("K")
+
+# The default page size for ``search`` (and :class:`Page`). The transport's
+# ``limit`` default also reads this, so a direct service call and an HTTP call
+# paginate alike.
+DEFAULT_LIMIT = 20
 
 
 class Action(enum.StrEnum):
@@ -114,7 +119,7 @@ class Page(Generic[T]):
     """
 
     items: list[T] = field(default_factory=list)
-    limit: int = 20
+    limit: int = DEFAULT_LIMIT
     next_cursor: str | None = None
 
 
@@ -224,7 +229,7 @@ class Service(Generic[T, K]):
         search_filter: SearchFilter[T] | None = None,
         sort_order: SortOrder[T] | None = None,
         cursor: str | None = None,
-        limit: int = 100,
+        limit: int = DEFAULT_LIMIT,
     ) -> Page[T]:
         """Return a page of ``T`` matching ``search_filter``, ordered by ``sort_order``.
 

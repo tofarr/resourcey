@@ -27,7 +27,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.service import (
+    DEFAULT_LIMIT,
     STORAGE_KEY,
+    Action,
     Create,
     Delete,
     NotFoundError,
@@ -169,7 +171,7 @@ class SqlService(Service[T, Any]):
         search_filter: SearchFilter[T] | None = None,
         sort_order: SortOrder[T] | None = None,
         cursor: str | None = None,
-        limit: int = 100,
+        limit: int = DEFAULT_LIMIT,
     ) -> Page[T]:
         """Return up to ``limit`` rows, with keyset pagination via ``cursor``.
 
@@ -270,14 +272,24 @@ class SqlService(Service[T, Any]):
         A create / update yields the resulting DTO, a delete yields ``None``
         (nothing to return), and a miss (an absent id on update / delete) also
         yields ``None``.
+
+        A create / delete is refused with :class:`InvalidInputError` unless the
+        resource *declares* the matching action, so a batch can never reach an
+        action the resource does not expose (the transport narrows the body the
+        same way; this is the backend's own guard for direct service callers).
         """
+        supported = self._resource.get_supported_actions()
         results: list[T | None] = []
         for edit in edits:
             if isinstance(edit, Create):
+                if Action.CREATE not in supported:
+                    raise InvalidInputError("batch_edit cannot create: create is not supported")
                 results.append(await self.create(edit.item))
             elif isinstance(edit, Update):
                 results.append(await self._update_or_none(edit.item))
             else:
+                if Action.DELETE not in supported:
+                    raise InvalidInputError("batch_edit cannot delete: delete is not supported")
                 await self._delete_or_none(edit.id)
                 results.append(None)
         return results

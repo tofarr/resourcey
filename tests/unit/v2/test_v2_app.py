@@ -189,6 +189,50 @@ async def test_batch_edit_rejects_an_unknown_kind(client: AsyncClient):
     assert untagged.status_code == 422
 
 
+async def test_batch_edit_narrows_to_declared_actions():
+    """A resource that exposes no create / delete cannot reach them via batch-edit."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    class UpdateOnlyThread(SqlResource[Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset(
+                {
+                    Action.READ,
+                    Action.UPDATE,
+                    Action.SEARCH,
+                    Action.COUNT,
+                    Action.BATCH_READ,
+                    Action.BATCH_EDIT,
+                }
+            )
+
+    threads = UpdateOnlyThread(Thread, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(AppBase.metadata.create_all)
+
+    manifest: Manifest = Manifest(resources=[threads])
+    async for c in _make_client(manifest, create_app(manifest)):
+        # The create / delete routes are correctly not mounted...
+        assert (await c.post("/threads", json={"title": "t"})).status_code == 405
+        # ...and neither kind is accepted through batch-edit.
+        assert (
+            await c.post("/threads/batch-edit", json=[{"kind": "Create", "item": {"title": "x"}}])
+        ).status_code == 422
+        assert (
+            await c.post("/threads/batch-edit", json=[{"kind": "Delete", "id": 1}])
+        ).status_code == 422
+        # An update of a missing id is a no-op (never a write), so nothing was
+        # created and nothing exists.
+        assert (
+            await c.post(
+                "/threads/batch-edit", json=[{"kind": "Update", "item": {"id": 1, "title": "u"}}]
+            )
+        ).json() == [None]
+        assert (await c.get("/threads/count")).json() == 0
+    await engine.dispose()
+
+
 async def test_second_resource_serves_its_own_derived_models(client: AsyncClient):
     thread = (await client.post("/threads", json={"title": "t"})).json()
     message = await client.post("/messages", json={"thread_id": thread["id"], "body": "hi"})
