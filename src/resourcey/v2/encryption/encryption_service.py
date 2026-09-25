@@ -16,10 +16,14 @@ The symmetric key is SHA-256 derived from the configured secret. The key
 ``id`` is carried in the JWE ``kid`` header so the correct decryption key can
 be selected on read, enabling key rotation.
 
-Unlike ``v1``, this ``v2`` copy is **config-free**: there is no env-parsing
-singleton. A service is constructed from an injected
+Unlike ``v1``, ``v2``'s ``EncryptionService`` is **not** a singleton and has no
+env-parsing of its own: it stays a plain class built from an injected
 :class:`~resourcey.v2.encryption.encryption_config.EncryptionKeysConfig`
-instance, so how a caller obtains the config is the caller's concern.
+instance, so how a caller obtains the config is the caller's concern. The
+process-wide *lookup* is a module-level function
+(:func:`get_encryption_service`), symmetric with
+``sql.session_manager.get_sql_session_manager`` — it reads the environment via
+``EncryptionKeysConfig.get_instance()`` and caches the result.
 
 This module is part of ``v2/``: it imports no ``resourcey`` code outside
 ``v2/``.
@@ -197,3 +201,28 @@ class EncryptionService:
             raise ValueError("Decryption produced no plaintext")
         payload: dict[str, Any] = json.loads(result.plaintext)
         return str(payload["v"])
+
+
+_cached_service: EncryptionService | None = None
+
+
+def get_encryption_service() -> EncryptionService:
+    """The process-wide service, built from ``EncryptionKeysConfig.get_instance()``.
+
+    Symmetric with ``get_sql_session_manager``: cached so repeated calls return
+    the same instance; call :func:`clear_encryption_service_cache` to pick up a
+    different config (tests that flip the encryption env vars between cases).
+    """
+    global _cached_service
+    if _cached_service is None:
+        _cached_service = EncryptionService(EncryptionKeysConfig.get_instance())
+    return _cached_service
+
+
+def clear_encryption_service_cache() -> None:
+    """Drop the cached process-wide service so the next call rebuilds it.
+
+    Test-only, mirroring ``clear_sql_session_manager_cache``.
+    """
+    global _cached_service
+    _cached_service = None

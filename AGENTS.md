@@ -291,12 +291,22 @@ the framework's own in-memory models.
 `EncryptionService` (`encrypt_value` / `decrypt_value`, the cursor path, plus
 `create_jwe_token` / `decrypt_jwe_token`, the auth-token path) and the key
 config (`EncryptionKeysConfig` / `EncryptionKeyConfig`, with the
-`encryption_key` + `decryption_keys` rotation model and the `kid` header). It
-is built from an **injected config object** — an instance is passed into the
-`SqlResource` — so `v2` stays free of the env-parsing singleton; how a caller
-obtains the config is the caller's concern. It sits in its own package (not
-`core`, which stays crypto-free, and not `sql`, so a future `v2` auth can use
-it without reaching into `sql`).
+`encryption_key` + `decryption_keys` rotation model and the `kid` header). The
+service itself is built from an **injected config object** and is *not* a
+singleton; the env-driven *edge* is a module-level lookup
+(`get_encryption_service()` / `clear_encryption_service_cache()`), symmetric
+with `get_sql_session_manager()`. `EncryptionKeysConfig` is a `BaseConfig`
+(issue #111) parsing `APP_ENCRYPTION_KEY_ID` / `_VALUE` and
+`APP_DECRYPTION_KEYS_<n>_*`, so `SqlResource` resolves the service at
+construction and cursor pagination works without a caller wiring one in; the
+`encryption_service=` argument remains the escape hatch, and
+`EncryptionKeyConfig` stays a nested `BaseModel` (mirroring `DbConfig` under
+`SqlConfig`). An absent key degrades to a loud dev default
+(`EncryptionKeyConfig(value="changeme")` plus a warning) instead of a build
+failure; a partially specified key (an id with no value) stays a hard
+`ResourceyConfigError`. It sits in its own package (not `core`, which stays
+crypto-free, and not `sql`, so a future `v2` auth can use it without reaching
+into `sql`).
 
 ### `v2/http` — the transport layer (issue #87)
 
@@ -561,7 +571,8 @@ to `v2/core/resource.py`.
 
 `src/resourcey/v2/util/singleton.py` (issue #95) is a second, non-vendored
 leaf: a small `Singleton` mixin for the process-wide pieces the framework
-keeps accruing (encryption service, dependency builders, caches). Constructing
+keeps accruing (a dependency builder, a cache, the search-filter leaves like
+`AllFilter` / `NoMatchFilter`). Constructing
 a subclass twice returns the same instance, and each concrete class's `__init__`
 runs **exactly once** on first construction, so the first construction wins —
 later calls with other arguments do not reset it. Each concrete subclass caches
@@ -582,10 +593,18 @@ re-copy of the vendored file cannot quietly reintroduce a second sentinel.
 `src/resourcey/v2/config/` ships the generic machinery only: `config_base.py`
 and `lazy_field.py`. There is **no** `config_loader.py` — `v2` does no `.env`
 loading of its own (`get_instance()` reads `os.environ` only; use
-`uvicorn --env-file` or a wrapper script). `FrameworkConfig`, `DbConfig`,
-`MigrationConfig`, `AuthConfig`, `IdpConfig`, and `DependencyBuilder` are
-deferred to a later PR, so there is no `config_framework.py` /
-`config_dependency.py` here yet, and no `config_runtime` at all.
+`uvicorn --env-file` or a wrapper script). `FrameworkConfig`, `MigrationConfig`,
+`AuthConfig`, `IdpConfig`, and `DependencyBuilder` are deferred to a later PR,
+so there is no `config_framework.py` / `config_dependency.py` here yet, and no
+`config_runtime` at all (`v2` gains no `RESOURCEY_CONFIG_CLASS` selector). The
+framework config *blocks* that do exist live with what they configure
+(`SqlConfig` in `v2/sql/`, `EncryptionKeysConfig` in `v2/encryption/`), and an
+app composes them by inheritance — `class AppConfig(SqlConfig,
+EncryptionKeysConfig)` — so one `AppConfig.get_instance()` exposes every block
+and `generate_env_template()` covers them all. The app calls
+`AppConfig.get_instance()` at its entry point; framework internals keep
+resolving their own block, and the per-class caches stay independent while the
+values agree because all read the one env namespace.
 
 `BaseConfig.get_instance()` caches **per class** and is typed to the owning
 class: `MyAppConfig.get_instance()` returns a `MyAppConfig`,

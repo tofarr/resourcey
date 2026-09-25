@@ -231,6 +231,43 @@ over the request-scoped `ctx`). `v2/util` is the bottom layer: an isolation
 test pins the layer ranks `util < core < {sql, http, config, cache,
 encryption}`, so no module imports a higher layer at runtime.
 
+### `v2` configuration — env-driven edges
+
+`v2/core` stays config-free (a service is built from the objects it is handed),
+while the two env-driven *edges* — SQL connections and encryption keys — are
+`BaseConfig` blocks that live with what they configure: `SqlConfig` in
+`v2/sql/`, `EncryptionKeysConfig` in `v2/encryption/`. All read the one
+process-wide prefix, `APP` by default, so connection `n` is
+`APP_SQL_CONNECTIONS_<n>_NAME` / `_URL` / `_PASSWORD` and the key is
+`APP_ENCRYPTION_KEY_ID` / `_VALUE` (plus `APP_DECRYPTION_KEYS_<n>_*` for
+rotation). An absent encryption key degrades to a loud dev default
+(`changeme` plus a warning); a partially specified one is a hard
+`ResourceyConfigError`.
+
+An app composes the blocks by inheritance and calls the composed config once at
+its entry point:
+
+```python
+from resourcey.v2.encryption.encryption_config import EncryptionKeysConfig
+from resourcey.v2.sql.sql_config import SqlConfig
+
+
+class AppConfig(SqlConfig, EncryptionKeysConfig):
+    """The app's single config object, composed from the framework blocks."""
+
+
+config = AppConfig.get_instance()  # reads APP_* from os.environ
+print(config.generate_env_template())  # a commented .env skeleton, secrets redacted
+```
+
+`get_instance()` caches **per class**, so `AppConfig.get_instance()` and
+`SqlConfig.get_instance()` are distinct instances whose values agree (both read
+the same env namespace). Framework internals resolve their own block;
+`SqlResource` uses `get_encryption_service()` / `get_sql_session_manager()` by
+default and accepts an explicit `encryption_service=` / `session_factory=` to
+override. `v2` does no `.env` loading — use `uvicorn --env-file` or a wrapper
+script to populate the environment.
+
 ## Stack
 
 | Concern | Tool |

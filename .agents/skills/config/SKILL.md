@@ -22,8 +22,30 @@ New configuration work goes in `v2`, which runs parallel to v1:
 exactly one sentinel in `v2`. Nothing under `v2/` may import `resourcey` code
 outside `v2/` at runtime.
 
-There is no `FrameworkConfig` / `DbConfig` / `DependencyBuilder` in `v2` yet,
-and no `config_runtime` — those come in a later PR.
+There is no `FrameworkConfig` / `MigrationConfig` / `DependencyBuilder` in `v2`
+yet, and no `config_runtime` / `RESOURCEY_CONFIG_CLASS` — those come in a later
+PR. The framework config *blocks* that do exist live with what they configure:
+`resourcey.v2.sql.sql_config.SqlConfig` and
+`resourcey.v2.encryption.encryption_config.EncryptionKeysConfig`.
+
+## Composing an app config
+
+An app composes the framework blocks by inheritance and calls the composed
+config once at its entry point:
+
+```python
+class AppConfig(SqlConfig, EncryptionKeysConfig):
+    """The app's single config object, composed from the framework blocks."""
+
+
+config = AppConfig.get_instance()
+```
+
+Per-class caches are independent, so `AppConfig.get_instance()` and
+`SqlConfig.get_instance()` are distinct instances whose values agree (both read
+the same env namespace). `AppConfig(...).generate_env_template()` emits a
+skeleton covering every block. Framework internals keep resolving their own
+block.
 
 ## BaseConfig
 
@@ -73,6 +95,23 @@ resolves a connection by name (default: the first) and hands out an async
 session maker, building engines lazily and disposing them on exit; an unknown
 name or empty list raises `ResourceyConfigError`. `SqlResource(Model, name=...)`
 uses it (or an explicit `session_factory=` escape hatch).
+
+## Encryption keys (issue #111)
+
+`resourcey.v2.encryption.encryption_config.EncryptionKeysConfig` (a
+`BaseConfig`) parses `APP_ENCRYPTION_KEY_ID` / `_VALUE` and
+`APP_DECRYPTION_KEYS_<n>_ID` / `_VALUE`. The `encryption_key` field has a
+default factory, so an absent key degrades to a loud dev default
+(`EncryptionKeyConfig(value="changeme")` plus a warning naming
+`APP_ENCRYPTION_KEY_VALUE`); a *partially* specified key (an id with no value)
+raises `ResourceyConfigError` whose message names `encryption_key.value`.
+`EncryptionKeyConfig` stays a nested `BaseModel` (mirroring `DbConfig`).
+
+`get_encryption_service()` / `clear_encryption_service_cache()` (in
+`encryption_service.py`) are the process-wide accessor pair, symmetric with
+`get_sql_session_manager()` / `clear_sql_session_manager_cache()`.
+`SqlResource` resolves the service at construction, so cursor pagination works
+without wiring one in; `encryption_service=` overrides.
 
 ## env_parser
 

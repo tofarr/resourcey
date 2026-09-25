@@ -314,13 +314,7 @@ class SqlService(Service[T, K]):
     # ------------------------------------------------------------------
 
     def _encryption(self) -> EncryptionService:
-        service = self._resource._encryption_service
-        if service is None:
-            raise ServiceError(
-                "This SqlResource has no EncryptionService, so cursor pagination is "
-                "unavailable; pass encryption_service= to the SqlResource."
-            )
-        return service
+        return self._resource._encryption_service
 
     def _apply_sort(self, stmt: Any, sort_order: SortOrder[Any] | None) -> Any:
         """Order ``stmt`` by ``sort_order`` (default: the identifier ascending)."""

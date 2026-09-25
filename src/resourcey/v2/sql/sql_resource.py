@@ -31,6 +31,7 @@ from resourcey.v2.core.dto import RestModels
 from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, Service, ServiceError
+from resourcey.v2.encryption.encryption_service import get_encryption_service
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.session_manager import SqlSessionManager, get_sql_session_manager
 from resourcey.v2.sql.sort_converter import SqlSortContext, SqlSortConverter
@@ -65,7 +66,9 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
             the first configured connection).
         path: An explicit REST path segment (defaults to the model name, pluralized).
         encryption_service: The service used to encrypt/decrypt pagination
-            cursors; when omitted, cursors are unsupported.
+            cursors. Defaults to the process-wide
+            :func:`~resourcey.v2.encryption.encryption_service.get_encryption_service`
+            (built from ``APP_ENCRYPTION_KEY_*``); pass one to override.
     """
 
     def __init__(
@@ -84,7 +87,9 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         self._session_factory = session_factory
         self._session_manager = session_manager
         self._connection_name = name
-        self._encryption_service = encryption_service
+        # Resolved eagerly so cursor pagination works out of the box; the
+        # explicit argument remains the escape hatch.
+        self._encryption_service = encryption_service or get_encryption_service()
         self._entered = False
         self._manifest: Manifest | None = None
         # The cache policy is resolved lazily by DefaultCacheStrategyMixin.

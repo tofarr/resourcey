@@ -19,10 +19,13 @@ from sqlalchemy import String
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from resourcey.v2.config.config_base import _reset_config_prefix
 from resourcey.v2.core.errors import InvalidInputError
-from resourcey.v2.core.service import ServiceError
 from resourcey.v2.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
-from resourcey.v2.encryption.encryption_service import EncryptionService
+from resourcey.v2.encryption.encryption_service import (
+    EncryptionService,
+    clear_encryption_service_cache,
+)
 from resourcey.v2.sql import cursor as cursor_module
 from resourcey.v2.sql.sql_resource import SqlResource
 
@@ -134,20 +137,36 @@ async def test_garbage_cursor_is_rejected(resource):
             await service.search(limit=1, cursor="not-a-cursor")
 
 
-async def test_cursor_pagination_requires_an_encryption_service():
+async def test_cursor_pagination_uses_the_process_wide_encryption_service(monkeypatch):
+    """A resource with no explicit service resolves the process-wide one early.
+
+    Cursor pagination therefore works out of the box (issue #111): the resource
+    reads ``APP_ENCRYPTION_KEY_*`` via ``get_encryption_service()`` at
+    construction instead of failing at paging time.
+    """
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_ID", "test")
+    monkeypatch.setenv("APP_ENCRYPTION_KEY_VALUE", "test-secret-key-for-cursors")
+    _reset_config_prefix()
+    clear_encryption_service_cache()
+    EncryptionKeysConfig.clear_instance_cache()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
-    res = SqlResource(Item, session_factory=maker)  # no encryption service
-    async with engine.begin() as conn:
-        await conn.run_sync(res.metadata.create_all)
-    async with await res.get_service() as service:
-        await service.create(_dto_type()(label="x"))
-        page = await service.search(limit=1)
-        assert page.next_cursor is None
-        # A cursor cannot be encoded, so asking for the next page fails clearly.
-        with pytest.raises(ServiceError, match="no EncryptionService"):
-            await service.search(limit=1, cursor="anything")
-    await engine.dispose()
+    res = SqlResource(Item, session_factory=maker)  # no explicit encryption service
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(res.metadata.create_all)
+        async with await res.get_service() as service:
+            await service.create(_dto_type()(label="a"))
+            await service.create(_dto_type()(label="b"))
+            page = await service.search(limit=1)
+            assert page.next_cursor is not None
+            page2 = await service.search(limit=1, cursor=page.next_cursor)
+            assert page2.items[0].label == "b"
+        await engine.dispose()
+    finally:
+        clear_encryption_service_cache()
+        EncryptionKeysConfig.clear_instance_cache()
+        _reset_config_prefix()
 
 
 # ---------------------------------------------------------------------------
