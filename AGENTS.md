@@ -74,26 +74,36 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
   `DiscriminatedUnionMixin`.
 * `pr-review-checklist` — checklist for agents reviewing PRs.
 
-### `auth2` replaces `auth`
+### `auth2` / `auth` and the `v2/auth` successor
 
-`src/resourcey/auth2/` is the successor to `src/resourcey/auth/` (issue #63)
-and **must never import it**. New authentication work goes in `auth2`; the old
-package is deleted once the replacement is complete. The first piece is
-`auth2_api_key.py`: `ApiKeyDependencyBuilder` (a `DependencyBuilder`) accepts
-any of a list of env-configured API keys and composes the check with each
-resource's service dependency, with `api_key_dependency` reusable in any
-router.
+`src/resourcey/auth2/` (issue #63) split authentication out of
+`src/resourcey/auth/` and **must never import it**. It is the **v1**
+predecessor of the `v2` authentication seam: `auth2_api_key.py`'s
+`ApiKeyDependencyBuilder` subclasses the v1
+`resourcey.config.config_dependency.DependencyBuilder`, and
+`auth2_api_key_resource.py`'s `ApiKey` subclasses the v1 `SqlResource`. Because
+`v2`'s isolation test forbids a `v2` module importing `resourcey` code outside
+`v2/`, none of it is importable from a `v2` API.
 
-The next rung up is the stored API key: `auth2_api_key_resource.py` declares
-`ApiKey` (UUID id, optional `name`, generated `key`, timestamps) and
-`auth2_api_key_service.py` reveals a minted key exactly once. The key is
-`creatable=False` / `updatable=False` / `readable=False`, so the generated
-create, update, and read models omit it and — because the query surface is
-derived from the read model — `?sort=key` and `?key__eq=` are rejected too.
-`ApiKeyService.create` widens the read model with the minted value for the
-`201` only; `specs/api_key.qnt` pins that contract. The column stores the key
-in plaintext so a later lookup-based authenticator can match a presented key;
-moving to a digest column is the hardening step when that lands.
+The port lives in **`src/resourcey/v2/auth/`** (issue #118) and is the new
+home for authentication work: `auth_api_key.py` (the `v2` `DependencyBuilder`),
+`auth_api_key_resource.py` (the DB-backed ORM `ApiKey` + inner `SqlResource`,
+the config-list inner `ListResource`, the exposed `ResourceView`s, and the
+key-generation helpers), `auth_api_key_service.py` (`StoredApiKeyService` /
+`ConfigApiKeyService`, both exposing `find_by_key`), and `auth_config.py`
+(`ApiKeysConfig` / `ApiKeyConfig`). It imports **only `v2`**, and `v2/http`
+must not import `v2/auth` (the app supplies the builder), so no cycle exists.
+The v1-shaped `auth2` (plus `auth`) is deleted once the port is complete;
+until then `auth2` remains and must still never import `auth`.
+
+Key semantics: the key is a `SecretStr` and is stored **only as a SHA-256
+digest** in both variants; a presented key is validated by hashing it and
+searching for the digest (`find_by_key`), never through the public query
+surface. The raw key is disclosed exactly once, in the `201` create response,
+through the `expose_secrets` serialization context — see
+`specs/api_key.qnt` / `specs/auth.qnt`. Selection is the explicit
+`dependency_builder=` argument on `create_app` / `add_to_app` (config-driven
+builder selection is a later rung).
 
 ### Storage backends and the shared paging base
 
@@ -161,7 +171,10 @@ Four files, no `__init__.py`:
   expose a free-form `metadata: dict[str, Any]` that `core` never reads: class
   metadata is inherited/merged down the MRO (keyword or body, and not a field),
   field metadata is per-field and excluded from `DtoField` equality/hash so it
-  never churns the derived models.
+  never churns the derived models. A `SecretStr` field in a generated model
+  gains the secret serializer / validator (`_secret_base`, issue #118), so it
+  redacts by default, reveals under `expose_secrets`, and encrypts under an
+  `encryption_service` — uniformly across every generated REST shape.
 * `id_field_name` — `DTO.id_field_name` is the identifier: `id` by default,
   selectable with the `id_field_name=` class keyword (or a body attribute) to
   make another declared field the identifier (a natural key). Validated at
@@ -209,7 +222,10 @@ Four files, no `__init__.py`:
   session-per-operation are both expressible and core privileges neither. The
   shared rule is *whoever opens the storage owns its commit and close; a
   resource that finds storage already in `ctx` reuses it and neither commits nor
-  closes it*.
+  closes it*. It also carries the `serialization_context()` seam (issue #118):
+  `None` by default (redacting), a service overrides it (e.g.
+  `{"expose_secrets": True}`) for the one response that should reveal a secret,
+  and the transport threads it through `model_dump` / `model_validate`.
 * `manifest.py` — `Manifest` owns the resource set and lifecycle, and asserts
   at construction that every `get_supported_actions()` names only real
   `Action` members (a typo would otherwise silently drop a route). Construction
@@ -418,7 +434,11 @@ return DTO instances, so the response is **projected** onto the REST model
 through the configured `DependencyBuilder` behind the one private helper
 (`_service_dependency`). The error envelope maps only what
 `v2` has now — `NotFoundError`→404, `IntegrityError`→409, `ServiceError`→500,
-pydantic→422 (kept by FastAPI) — and #83 extends the same function.
+pydantic→422 (kept by FastAPI) — and #83 extends the same function. The
+service's `serialization_context()` (issue #118) is threaded into
+`_project` / `_dump` / `_header_for`, so the wire body (and the ETag that
+hashes it) reflects the secret-serialization convention rather than always
+redacting.
 
 ### `v2/util/search_filter.py` and `v2/sql/filter_converter.py` — filtering (issue #79)
 
@@ -746,18 +766,17 @@ duplicate routes). The layer ranks gain `view` at the backend rank.
 
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/encryption`,
-`v2/util`,
-`v2/config`,
-`v2/cache`, and `v2/http` are **parallel** to the existing packages — nothing
+`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/auth`,
+`v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and `v2/http` are
+**parallel** to the existing packages — nothing
 existing is removed by them and they are not a refactor. The old `v1`
 packages/modules (and the old `resourcey.encryption`) stay in place until a
 follow-up removal. A test asserts that no module under `v2/` makes a **runtime**
 import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
 v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
 pins the **layer ranks**
-`util < core < {sql, mongo, list, view, http, config, cache, encryption}`: no
-module imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`,
+`util < core < {sql, mongo, list, view, http, config, cache, encryption, auth}`:
+no module imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`,
 and `v2/list` implement whatever small helpers they need locally rather than
 reaching for `resourcey.util`.
 
@@ -774,9 +793,20 @@ They are copies, not moves — v1 `resourcey/util/` is untouched until it is
 removed. `v2/util` imports **no project package** at all (not even `v2/core`),
 so the layer ranks are a clean
 
-    util < core < {sql, mongo, list, http, config, cache, encryption}
+    util < core < {sql, mongo, list, http, config, cache, encryption, auth}
 
 and `v2/core` may import `v2/util` — the dependency runs one way.
+
+`src/resourcey/v2/util/secret_serialization.py` (issue #118) is the `v2` port of
+v1's context-driven secret convention: `dump_secret_str` / `load_secret_str` read
+an `encryption_service` (encrypt / decrypt at the storage boundary) or
+`expose_secrets` (plaintext) from the pydantic context, and otherwise **redact**;
+encryption wins over exposure. It is wired onto generated models by
+`v2/core/dto.py` (`_secret_base`, so every generated REST shape carries the
+serializer / validator), a service supplies its context through
+`Service.serialization_context()` in `v2/core/service.py`, and
+`v2/http/routes.py` threads it through `_project` / `_dump`.
+`specs/secret_serialization.qnt` pins the precedence.
 
 `src/resourcey/v2/util/cursor.py` (issue #80) is the storage-agnostic half of
 the pagination cursor: the tamper-proof, type-tagged codec

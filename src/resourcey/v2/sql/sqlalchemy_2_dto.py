@@ -32,9 +32,10 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any
+from typing import Any, get_args, get_origin, get_type_hints
 from uuid import UUID
 
+from pydantic import SecretStr
 from sqlalchemy import (
     JSON,
     Boolean,
@@ -104,9 +105,10 @@ def _field_declarations(mapper: Mapper[Any]) -> dict[str, tuple[Any, DtoField]]:
     """
     declarations: dict[str, tuple[Any, DtoField]] = {}
     id_field_name = _primary_key_attr(mapper)
+    hints = _resolved_hints(mapper)
     for attr in mapper.column_attrs:
         column = attr.columns[0]
-        annotation = _annotation_for_column(column)
+        annotation = _annotation_for_column(column, hints.get(attr.key))
         explicit = column.info.get(DTO_FIELD_INFO_KEY)
         if isinstance(explicit, DtoField):
             config, is_explicit = explicit, True
@@ -190,10 +192,56 @@ def _primary_key_attr(mapper: Mapper[Any]) -> str:
     return str(mapper.get_property_by_column(mapper.primary_key[0]).key)
 
 
-def _annotation_for_column(column: Any) -> Any:
-    """The Python annotation corresponding to a column (nullable widens it)."""
-    annotation = _scalar_annotation(column.type)
+def _annotation_for_column(column: Any, declared: Any = None) -> Any:
+    """The Python annotation corresponding to a column (nullable widens it).
+
+    The column *type* is the schema of record, so it drives the annotation; the
+    one exception is a :class:`~pydantic.SecretStr` column, whose Python type
+    carries behaviour (redaction / encryption on serialization) the SQL type
+    cannot express. Such a column is recognized from the mapped attribute's
+    declared annotation and projects as ``SecretStr`` — the stored digest stays a
+    ``String``.
+    """
+    annotation = SecretStr if _is_secret_column(declared) else _scalar_annotation(column.type)
     return annotation | None if column.nullable else annotation
+
+
+def _resolved_hints(mapper: Mapper[Any]) -> dict[str, Any]:
+    """The model's resolved annotations (``include_extras``), or ``{}`` if unresolved.
+
+    SQLAlchemy keeps ``Mapped[...]`` unresolved in ``__annotations__``, so the
+    hints are resolved to reach the inner type (``Mapped[SecretStr]`` ->
+    ``SecretStr``). A forward reference that cannot be resolved degrades to no
+    hints rather than failing the whole inference.
+    """
+    try:
+        return get_type_hints(mapper.class_, include_extras=True)
+    except Exception:
+        return {}
+
+
+def _is_secret_column(declared: Any) -> bool:
+    """Whether the mapped attribute was declared ``Mapped[SecretStr]``.
+
+    Only the annotation carries that intent (the SQL type is ``String``), so this
+    unwraps ``Mapped[...]`` / ``Optional[...]`` and checks for ``SecretStr``.
+    """
+    return _unwrap_mapped(declared) is SecretStr
+
+
+def _unwrap_mapped(annotation: Any) -> Any:
+    """Reduce a ``Mapped[T]`` annotation to ``T``, following the declared union."""
+    if annotation is None:
+        return None
+    origin = get_origin(annotation)
+    if origin is not None and getattr(origin, "__name__", "") == "Mapped":
+        args = get_args(annotation)
+        return _unwrap_mapped(args[0]) if args else None
+    if origin is not None:
+        for arg in get_args(annotation):
+            if arg is not type(None) and _unwrap_mapped(arg) is SecretStr:
+                return SecretStr
+    return annotation
 
 
 def _scalar_annotation(column_type: Any) -> Any:

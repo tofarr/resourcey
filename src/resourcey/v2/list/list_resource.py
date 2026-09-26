@@ -252,7 +252,16 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
         items = mapping.get(STORAGE_KEY)
         if items is None:
             items = self._models
-        return ListService(self, mapping, items)
+        return self.make_service(mapping, items)
+
+    def make_service(self, ctx: MutableMapping[Any, Any], items: list[Any]) -> Service[T, K]:
+        """Build the service for this resource — the subclass seam.
+
+        A variant (e.g. the auth config-key resource, which adds ``find_by_key``)
+        overrides this rather than :meth:`get_service`, so the item-resolution
+        logic is written once.
+        """
+        return ListService(self, ctx, items)
 
     # ------------------------------------------------------------------
     # Registration / lifecycle

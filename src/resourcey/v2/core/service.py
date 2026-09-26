@@ -174,6 +174,27 @@ class Service(Generic[T, K]):
 
     def __init__(self) -> None:
         self._entered = False
+        self._serialization_ctx: dict[str, Any] | None = None
+
+    # ------------------------------------------------------------------
+    # Serialization context
+    # ------------------------------------------------------------------
+
+    def serialization_context(self) -> dict[str, Any] | None:
+        """The context threaded into ``model_dump`` / ``model_validate``, or ``None``.
+
+        The transport passes this to the projection / serialization of every
+        response, so a secret-bearing field serializes exactly as the context
+        dictates (redacted by default; plaintext under ``expose_secrets``; JWE
+        under an ``encryption_service``). ``None`` means "no context" — the
+        redacting default. A service that must reveal a secret (e.g. a one-time
+        minted key) returns ``{"expose_secrets": True}`` here.
+        """
+        return self._serialization_ctx
+
+    def set_serialization_context(self, ctx: dict[str, Any] | None) -> None:
+        """Set the serialization context this service supplies to the transport."""
+        self._serialization_ctx = ctx
 
     # ------------------------------------------------------------------
     # Lifecycle (the service is the async context manager)

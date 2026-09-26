@@ -44,6 +44,12 @@ jobs:
         run: quint test specs/exposure.qnt --main=exposure --match "^(selfIsTheDefault|hiddenRegistersNoRoutesTest|wrapperHidesAnExposedResource|wrapperNarrowsTheQuerySurface|delegatedWrapperWouldLeak|builderDoesNotChangeExposure|narrowingIsAllowedWideningIsRejected|batchEditAdmitsOnlyDeclaredActions|batchActionsRequireTheirSingularTest|defaultBuilderIsIdentityTest|wrappedBuilderPreservesTheActionContractTest|invariantsHold)$"
       - name: Run DTO-defaults spec tests
         run: quint test specs/dto_defaults.qnt --main=dto_defaults --match "^(bareUuidIdIsGenerated|customIdentifierStaysClientSupplied|explicitIntentIsHonouredVerbatim|columnDefaultWins|timestampsAreFrameworkOwnedTest|contradictoryDefaultsAreRejected|invariantsHold)$"
+      - name: Run API-key spec tests
+        run: quint test specs/api_key.qnt --main=api_key --match "^(keyIsAbsentFromTheWriteModels|keyIsAbsentFromTheReadModel|onlyCreateDisclosesTheKey|querySurfaceExcludesTheKey|storedValueIsOnlyTheDigest|createRevealsTheStoredKey|presentedKeyAuthenticatesByDigest|updateCannotRotateTheKey|invariantsHold)$"
+      - name: Run auth spec tests
+        run: quint test specs/auth.qnt --main=auth --match "^(emptyStoreDeniesEverything|absentAndInvalidAreIndistinguishable|aValidKeyGrantsAccess|theCheckRunsBeforeTargetStorage|theKeyServiceOwnsItsOwnContext|invariantsHold)$"
+      - name: Run secret-serialization spec tests
+        run: quint test specs/secret_serialization.qnt --main=secret_serialization --match "^(defaultRedacts|exposeRevealsThePlaintext|encryptionTakesPrecedence|outputDependsOnlyOnTheContext|encryptionRoundTrips|invariantsHold)$"
       - name: Run filtering spec tests
         run: quint test specs/filtering.qnt --main=filtering --match "^(law1_normalisationPreserves|law2_nullSafeNegation|law3_nullSafeNegationGeneralises|law4_positivePushdownIsSound)$"
       - name: Run sorting spec tests
