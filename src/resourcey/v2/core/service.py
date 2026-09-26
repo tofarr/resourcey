@@ -273,3 +273,33 @@ def assert_real_actions(name: str, actions: frozenset[Any]) -> None:
             f"{name}.get_supported_actions() contained {unknown}; every member must be an "
             "Action (a typo would otherwise silently drop a route)."
         )
+
+
+# The singular actions a batch action is a batch *of*. A batch action cannot
+# outlive the singular action it batches: batch_read reads, so it needs read;
+# batch_edit edits, so it needs at least one of create / update / delete.
+_BATCH_PREREQUISITES: dict[Action, frozenset[Action]] = {
+    Action.BATCH_READ: frozenset({Action.READ}),
+    Action.BATCH_EDIT: frozenset({Action.CREATE, Action.UPDATE, Action.DELETE}),
+}
+
+
+def normalize_actions(actions: frozenset[Action]) -> frozenset[Action]:
+    """Drop any batch action whose singular action is absent.
+
+    A batch action is only meaningful when the singular action it batches is
+    also exposed: ``batch_read`` reads (so it requires ``read``), and
+    ``batch_edit`` creates / updates / deletes (so it requires at least one of
+    those). Normalising here — rather than raising — means a caller who narrows
+    a surface by removing, say, only ``read`` or only ``update`` gets a coherent
+    action set without having to remember to also remove the batch action.
+
+    Idempotent, so it is safe to apply at every layer that consumes a narrowed
+    action set (the route builder, the backends' ``batch_edit``, and a
+    ``ResourceView``).
+    """
+    normalized = set(actions)
+    for batch_action, prerequisites in _BATCH_PREREQUISITES.items():
+        if batch_action in normalized and normalized.isdisjoint(prerequisites):
+            normalized.discard(batch_action)
+    return frozenset(normalized)

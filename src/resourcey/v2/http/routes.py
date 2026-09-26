@@ -63,6 +63,7 @@ from resourcey.v2.core.service import (
     Service,
     ServiceError,
     Update,
+    normalize_actions,
 )
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
 from resourcey.v2.util.missing import MISSING
@@ -117,7 +118,7 @@ def register_routes(
     id_field = exposed.get_id_field()
     id_type = _id_python_type(models, id_field)
     service_dep = _service_dependency(exposed, builder)
-    supported = exposed.get_supported_actions()
+    supported = normalize_actions(exposed.get_supported_actions())
     strategy = exposed.get_cache_strategy()
 
     # Static sub-paths (search / count / batch-read / batch-edit) are registered
@@ -493,9 +494,16 @@ def _add_batch_edit_route(
     an unexpected one is rejected ``422``.
     """
     allow_create = Action.CREATE in supported
+    allow_update = Action.UPDATE in supported
     allow_delete = Action.DELETE in supported
     body_model = _batch_edit_body(
-        models.create_request, models.update_request, id_field, id_type, allow_create, allow_delete
+        models.create_request,
+        models.update_request,
+        id_field,
+        id_type,
+        allow_create,
+        allow_update,
+        allow_delete,
     )
 
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
@@ -700,6 +708,7 @@ def _batch_edit_body(
     id_field: str,
     id_type: Any,
     allow_create: bool,
+    allow_update: bool,
     allow_delete: bool,
 ) -> Any:
     """Build the ``batch-edit`` body: a ``kind``-discriminated union of edits.
@@ -718,10 +727,14 @@ def _batch_edit_body(
     rather than nesting it under ``item``: there is no payload to nest, and
     mirroring the other nodes' ``item`` wrapper would only add an empty object.
 
-    ``allow_create`` / ``allow_delete`` narrow the union to the actions the
-    resource declares; ``Update`` is always present, since ``batch_edit`` itself
-    is the update action. A ``kind`` outside the narrowed union is rejected
-    before a node is ever built.
+    ``allow_create`` / ``allow_update`` / ``allow_delete`` narrow the union to
+    the actions the resource declares, so a batch can never reach an action the
+    resource does not expose: the corresponding ``kind`` is absent from the body
+    schema and an unexpected one is rejected before a node is ever built. A
+    ``kind`` with no allowed member would make an empty union, so when none of
+    the three is allowed ``batch_edit`` itself was dropped by
+    :func:`~resourcey.v2.core.service.normalize_actions` and this function is
+    never reached.
     """
     members: list[Any] = []
     if allow_create:
@@ -732,21 +745,22 @@ def _batch_edit_body(
                 item=(create_request, ...),
             )
         )
-    update_fields = {
-        name: (field.annotation, field) for name, field in update_request.model_fields.items()
-    }
-    update_item = create_model(  # type: ignore[call-overload]
-        f"{update_request.__name__}BatchUpdateItem",
-        **{id_field: (id_type, ...)},  # the id is required on each update
-        **update_fields,
-    )
-    members.append(
-        create_model(
-            f"{update_request.__name__}UpdateEdit",
-            kind=(Literal["Update"], ...),
-            item=(update_item, ...),
+    if allow_update:
+        update_fields = {
+            name: (field.annotation, field) for name, field in update_request.model_fields.items()
+        }
+        update_item = create_model(  # type: ignore[call-overload]
+            f"{update_request.__name__}BatchUpdateItem",
+            **{id_field: (id_type, ...)},  # the id is required on each update
+            **update_fields,
         )
-    )
+        members.append(
+            create_model(
+                f"{update_request.__name__}UpdateEdit",
+                kind=(Literal["Update"], ...),
+                item=(update_item, ...),
+            )
+        )
     if allow_delete:
         members.append(
             create_model(  # type: ignore[call-overload]
@@ -754,6 +768,11 @@ def _batch_edit_body(
                 kind=(Literal["Delete"], ...),
                 **{id_field: (id_type, ...)},
             )
+        )
+    if not members:
+        raise ServiceError(
+            "batch-edit body has no members: batch_edit must be dropped when no write "
+            "action is exposed (normalize_actions)."
         )
     edits = members[0]
     for member in members[1:]:

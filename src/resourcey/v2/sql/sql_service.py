@@ -275,10 +275,11 @@ class SqlService(Service[T, K]):
         (nothing to return), and a miss (an absent id on update / delete) also
         yields ``None``.
 
-        A create / delete is refused with :class:`InvalidInputError` unless the
-        resource *declares* the matching action, so a batch can never reach an
-        action the resource does not expose (the transport narrows the body the
-        same way; this is the backend's own guard for direct service callers).
+        A create / update / delete is refused with :class:`InvalidInputError`
+        unless the resource *declares* the matching action, so a batch can never
+        reach an action the resource does not expose (the transport narrows the
+        body the same way; this is the backend's own guard for direct service
+        callers).
         """
         supported = self._resource.get_supported_actions()
         results: list[T | None] = []
@@ -288,6 +289,8 @@ class SqlService(Service[T, K]):
                     raise InvalidInputError("batch_edit cannot create: create is not supported")
                 results.append(await self.create(edit.item))
             elif isinstance(edit, Update):
+                if Action.UPDATE not in supported:
+                    raise InvalidInputError("batch_edit cannot update: update is not supported")
                 results.append(await self._update_or_none(edit.item))
             else:
                 if Action.DELETE not in supported:

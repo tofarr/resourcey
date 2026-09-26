@@ -27,7 +27,7 @@ from sqlalchemy import Column
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.v2.cache.cache_defaults import DefaultCacheStrategyMixin
-from resourcey.v2.core.dto import RestModels
+from resourcey.v2.core.dto import DTO, RestModels
 from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, Service, ServiceError
@@ -109,6 +109,10 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def get_rest_models(self) -> RestModels:
         """The six REST models derived from the inferred DTO's ``in_*`` flags."""
         return self._dto.get_rest_models()
+
+    def get_dto_declaration(self) -> type[DTO]:
+        """The DTO declaration class this resource serves (the escape hatch)."""
+        return self._dto
 
     def get_id_field(self) -> str:
         """The identifier field name (the model's primary-key attribute)."""

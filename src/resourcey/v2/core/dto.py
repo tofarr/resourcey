@@ -46,7 +46,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import reduce
-from typing import Any, ClassVar, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, ClassVar, get_args, get_origin, get_type_hints
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, create_model
@@ -588,6 +588,67 @@ def _build_update_request_model(
         if config.in_update_request
     }
     return create_model(name, **model_fields)
+
+
+def derive_dto(
+    dto: type[DTO],
+    *,
+    field_overrides: Mapping[str, Mapping[str, Any]] | None = None,
+    name: str | None = None,
+) -> type[DTO]:
+    """Derive a new DTO declaration from ``dto`` with per-field overrides applied.
+
+    Every field of ``dto`` is re-declared with its *resolved* :class:`DtoField`
+    (from :meth:`DTO.get_fields`) made explicit, then merged with that field's
+    override mapping via :meth:`DtoField.with_overrides`. Because each field is
+    now explicit, the :class:`DTO` conventions do **not** re-run — a bare ``id``
+    is not given a fresh ``uuid4`` factory and timestamps are not re-decorated,
+    so the derived declaration projects exactly what the source declared plus
+    the requested changes. This is the mechanism behind a ``ResourceView``'s
+    ``exposed_field_overrides``.
+
+    The stored annotation is reduced to its base type before the merged
+    ``DtoField`` is attached. A declaration in the ``Annotated[T, DtoField(...)]``
+    form stores a ``DtoField`` *inside* its annotation, and Pydantic flattens
+    nested ``Annotated``, so wrapping that annotation directly would leave the
+    source field's ``DtoField`` ahead of the merged one and :func:`_config_from`
+    (which takes the first) would silently ignore every override. Reducing first
+    makes the merged field the only one.
+
+    Args:
+        dto: The declaration to derive from.
+        field_overrides: ``{field_name: {DtoField attribute: value}}``. A partial
+            mapping: unmentioned attributes keep the source field's value, so an
+            override cannot *silently* re-widen a flag the source had turned off
+            (a full ``DtoField(...)`` replacement would reset the rest to their
+            ``True`` defaults). An unknown field name raises ``KeyError``.
+        name: The derived class name (defaults to ``<dto name>View``).
+
+    The identifier (``id_field_name``) and class ``metadata`` are carried across
+    unchanged.
+    """
+    overrides = field_overrides or {}
+    resolved = dto.__dto_fields__
+    unknown = sorted(set(overrides) - set(resolved))
+    if unknown:
+        raise KeyError(f"{dto.__name__} has no field(s) {unknown} to override")
+    namespace: dict[str, Any] = {
+        "__annotations__": {
+            field_name: Annotated[
+                _strip_annotated(annotation),
+                config.with_overrides(**overrides.get(field_name, {})),
+            ]
+            for field_name, (annotation, config) in resolved.items()
+        },
+        "__module__": dto.__module__,
+    }
+    return type(
+        name or f"{dto.__name__}View",
+        (DTO,),
+        namespace,
+        metadata=dict(dto.metadata),
+        id_field_name=dto.id_field_name,
+    )
 
 
 def apply_operation_defaults(
