@@ -470,4 +470,5 @@ class TestErrors:
             "ResourceyConfigError",
             "InvalidInputError",
             "UnsupportedFilterError",
+            "ConflictError",
         }

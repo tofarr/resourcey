@@ -21,6 +21,7 @@ from httpx import AsyncClient
 from resourcey.v2.config.config_base import _reset_config_prefix
 from resourcey.v2.core.dto import DTO, DtoField
 from resourcey.v2.core.errors import (
+    ConflictError,
     InvalidInputError,
     ResourceyConfigError,
     UnsupportedFilterError,
@@ -106,6 +107,13 @@ class SecretDTO(DTO):
     secret: str = DtoField(in_read_response=False, in_search_response=False)
 
 
+class KeyedDTO(DTO, id_field_name="sku"):
+    """A DTO with a client-supplied natural key (a duplicate must conflict)."""
+
+    sku: str
+    label: str = ""
+
+
 class IndexedResource(MongoResource[WidgetDTO, UUID]):
     """A resource declaring a secondary index."""
 
@@ -178,6 +186,43 @@ async def widgets() -> AsyncIterator[MongoResource[Any, Any]]:
 async def _seed(resource: MongoResource[Any, Any], **values: Any) -> Any:
     async with await resource.get_service() as service:
         return await service.create(resource.get_dto_type()(**values))
+
+
+class _ClosingClient:
+    """An embedded client whose collections refuse use after ``close()``.
+
+    Mirrors ``motor``'s ``Cannot use MongoClient after close`` so a test can
+    observe a lifecycle bug that ``mongomock``'s no-op ``close`` would hide.
+    ``client[db]`` returns a proxy whose every attribute access re-checks the
+    flag before delegating to the real collection.
+    """
+
+    def __init__(self) -> None:
+        from resourcey.v2.mongo.embedded import AsyncEmbeddedClient
+
+        self._client = AsyncEmbeddedClient()
+        self._closed = False
+
+    def __getitem__(self, database: str) -> Any:
+        database_proxy = self._client[database]
+        client = self
+
+        class _GuardedDatabase:
+            def __getitem__(self, name: str) -> Any:
+                collection = database_proxy[name]
+
+                class _GuardedCollection:
+                    def __getattr__(self, attribute: str) -> Any:
+                        if client._closed:
+                            raise RuntimeError("Cannot use MongoClient after close")
+                        return getattr(collection, attribute)
+
+                return _GuardedCollection()
+
+        return _GuardedDatabase()
+
+    def close(self) -> None:
+        self._closed = True
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +320,28 @@ class TestClientManager:
         async with manager:
             await manager.get_client()
         assert manager._clients == {}
+
+    async def test_re_entry_does_not_reuse_the_closed_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A second lifespan must re-resolve, not reuse the closed client's collection.
+
+        ``mongomock.close()`` is a no-op, so the embedded client cannot show the
+        bug; this builds a client that, like ``motor``, refuses use after
+        ``close``. Without the ``__aexit__`` reset the cached collection would
+        still point at the closed client and the first operation would raise.
+        """
+        monkeypatch.setattr(
+            "resourcey.v2.mongo.mongo_client._build_client", lambda connection: _ClosingClient()
+        )
+        manager, resource = await _resource(WidgetDTO)
+        async with manager, resource:
+            await _seed(resource, label="first")
+        assert resource.collection is None  # dropped on exit, not left on the closed client
+
+        async with manager, resource, await resource.get_service() as service:
+            created = await service.create(resource.get_dto_type()(label="second"))
+            assert (await service.read(created.id)).label == "second"
 
     async def test_embedded_url_builds_the_embedded_client(self) -> None:
         from resourcey.v2.mongo.embedded import AsyncEmbeddedClient
@@ -474,6 +541,28 @@ class TestActions:
             with pytest.raises(NotFoundError):
                 await service.read(uuid4())
 
+    async def test_duplicate_identifier_raises_conflict(self) -> None:
+        """A duplicate natural key is translated to :class:`ConflictError` (409)."""
+        manager, resource = await _resource(KeyedDTO)
+        async with manager, resource, await resource.get_service() as service:
+            await service.create(resource.get_dto_type()(sku="A1", label="one"))
+            with pytest.raises(ConflictError, match="Duplicate Key"):
+                await service.create(resource.get_dto_type()(sku="A1", label="two"))
+
+    async def test_a_non_duplicate_insert_error_is_not_mislabelled(self) -> None:
+        """Only a duplicate key becomes ``ConflictError``; anything else propagates."""
+        from resourcey.v2.core.service import STORAGE_KEY
+
+        class ExplodingCollection:
+            async def insert_one(self, document: dict[str, Any]) -> Any:
+                raise RuntimeError("transport blew up")
+
+        manager, resource = await _resource(WidgetDTO)
+        async with manager, resource:
+            service = await resource.get_service({STORAGE_KEY: ExplodingCollection()})
+            with pytest.raises(RuntimeError, match="transport blew up"):
+                await service.create(resource.get_dto_type()(label="x"))
+
     async def test_update_is_a_partial_merge(self, widgets) -> None:
         created = await _seed(widgets, label="old", size=5)
         payload = widgets.get_dto_type()(id=created.id, label="new")
@@ -662,6 +751,25 @@ class TestFiltering:
             assert await service.count(NoMatchFilter()) == 0
             assert (await service.search(search_filter=NoMatchFilter())).items == []
 
+    async def test_no_match_excludes_a_null_identifier(self) -> None:
+        """The match-nothing sentinel must not match a document with a null ``_id``.
+
+        A client-supplied natural key may be null, so ``{"_id": None}`` would
+        wrongly match it; ``{"$nor": [{}]}`` matches nothing unconditionally.
+        """
+
+        class NullableKeyDTO(DTO, id_field_name="sku"):
+            sku: str | None = None
+            label: str = ""
+
+        manager, resource = await _resource(NullableKeyDTO)
+        async with manager, resource, await resource.get_service() as service:
+            await service.create(resource.get_dto_type()(sku=None, label="nullkey"))
+            await service.create(resource.get_dto_type()(sku="A1", label="keyed"))
+            assert await service.count(NoMatchFilter()) == 0
+            assert (await service.search(search_filter=NoMatchFilter())).items == []
+            assert await service.count(not_(AllFilter())) == 0
+
     async def test_unknown_field_raises_unsupported(self, widgets) -> None:
         async with await widgets.get_service() as service:
             with pytest.raises(UnsupportedFilterError, match="not a queryable field"):
@@ -729,7 +837,7 @@ class TestFilterConverter:
     def test_all_and_no_match(self) -> None:
         converter = self._converter()
         assert converter.condition(AllFilter()) is None
-        assert converter.condition(NoMatchFilter()) == {"_id": None}
+        assert converter.condition(NoMatchFilter()) == {"$nor": [{}]}
 
     def test_eq_is_a_bare_value(self) -> None:
         converter = self._converter()
@@ -798,8 +906,8 @@ class TestFilterConverter:
     def test_empty_and_or_nodes(self) -> None:
         converter = self._converter()
         assert converter.condition(AndFilter(filters=())) is None
-        assert converter.negated_condition(AndFilter(filters=())) == {"_id": None}
-        assert converter.condition(OrFilter(filters=())) == {"_id": None}
+        assert converter.negated_condition(AndFilter(filters=())) == {"$nor": [{}]}
+        assert converter.condition(OrFilter(filters=())) == {"$nor": [{}]}
         assert converter.negated_condition(OrFilter(filters=())) is None
 
     def test_or_with_an_all_child_is_unrestricted(self) -> None:
@@ -1194,3 +1302,21 @@ class TestHttpTransport:
 
     async def test_non_sortable_field_is_400(self, client: AsyncClient) -> None:
         assert (await client.get("/widget-dtos", params={"sort": "bogus"})).status_code == 400
+
+    async def test_duplicate_natural_key_is_409(self) -> None:
+        from httpx import ASGITransport, AsyncClient
+
+        from resourcey.v2.http.app import create_app
+
+        manager = _manager()
+        resource = MongoResource(KeyedDTO, client_manager=manager, encryption_service=_encryption())
+        manifest = Manifest(resources=[resource], managers=[manager])
+        app = create_app(manifest)
+        async with manifest:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as http:
+                first = await http.post("/keyed-dtos", json={"sku": "A1", "label": "one"})
+                assert first.status_code == 201
+                duplicate = await http.post("/keyed-dtos", json={"sku": "A1", "label": "two"})
+        assert duplicate.status_code == 409
+        assert duplicate.json()["error"]["code"] == "conflict"

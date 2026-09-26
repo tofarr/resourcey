@@ -573,18 +573,23 @@ framework-owned.
   (`InvalidInputError` → 400). `DefaultCacheStrategyMixin` supplies the shared
   cache default. Indexes are opt-in (`get_indexes()` / `ensure_indexes()`, run
   from `__aenter__`) and `migrate_document(doc) -> doc` is the manual
-  migration-on-read hook (default no-op) invoked on every read path.
+  migration-on-read hook (default no-op) invoked on every read path. `__aexit__`
+  drops the cached collection (the manager closes its clients on exit), so a
+  re-entered lifecycle re-resolves from the rebuilt client rather than handing
+  out a collection bound to the closed one.
 * `mongo_service.py` — `MongoService` implements the eight actions against a
   duck-typed async collection (`insert_one`, `find_one`, `find`,
   `find_one_and_update`, `delete_one`, `count_documents`, `create_index`) so
   `mongomock` substitutes for `motor`. `create` / `update` apply the DTO's
   create / update defaults (through the shared `apply_operation_defaults`), a
   UUID is stored as its string under `_id`, and a miss raises `NotFoundError`.
-  `search` pushes the filter into `find`, appends `_id` ascending as the stable
-  tie-breaker, and pages with the shared keyset cursor (`limit + 1` to detect
-  the next page). `batch_edit` dispatches over the `Create` / `Update` /
-  `Delete` union, refusing create / delete when the resource does not declare
-  them.
+  A duplicate key (`insert_one` raising pymongo's `DuplicateKeyError`) is
+  translated to `ConflictError` — the storage-neutral 409 — so the transport
+  maps it without importing the driver. `search` pushes the filter into `find`,
+  appends `_id` ascending as the stable tie-breaker, and pages with the shared
+  keyset cursor (`limit + 1` to detect the next page). `batch_edit` dispatches
+  over the `Create` / `Update` / `Delete` union, refusing create / delete when
+  the resource does not declare them.
 * `mongo_filter_converter.py` / `mongo_sort_converter.py` — three registries
   (logical / attribute / operator) and a type-keyed sort registry, each with an
   import-time completeness assert, mirroring the SQL converters. Every operator
@@ -596,6 +601,8 @@ framework-owned.
   **sortable** fields, and Mongo's fixed NULL ordering (`NULLS FIRST` ascending,
   `NULLS LAST` descending) must agree with the in-memory `compare` and the
   keyset predicate.
+  The match-nothing sentinel is `{"$nor": [{}]}` (never `{"_id": None}`, which
+  would match a document whose client-supplied nullable identifier is null).
 * `mongo_client.py` / `mongo_config.py` / `embedded.py` — `MongoClientManager`
   is the `SqlSessionManager` analogue: it hands out a client/database per
   connection, built lazily, disposed on `__aexit__`, and entered through
@@ -719,7 +726,10 @@ with **different** types, while a same-name/same-type redeclaration is allowed;
 `ClassVar` entries (`LazyField`) are not fields.
 `ResourceyConfigError` (with `ResourceyError`) lives in `v2/core/errors.py` and
 covers build/parse failures only; `ServiceError` / `NotFoundError` stay in
-`v2/core/service.py`.
+`v2/core/service.py`. `InvalidInputError` / `UnsupportedFilterError` /
+`ConflictError` also live there — the storage-neutral errors a backend raises and
+the transport maps (`ConflictError` is what a backend's duplicate-key failure
+becomes, so the 409 mapping needs no driver import).
 
 The `v2` isolation test is widened to cover **all** of `v2/`: no module under
 `v2/` may make a runtime import of any `resourcey` code outside `v2/`, with no

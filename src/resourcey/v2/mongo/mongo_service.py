@@ -30,7 +30,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from resourcey.v2.core.dto import apply_operation_defaults
-from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
+from resourcey.v2.core.errors import ConflictError, InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.service import (
     DEFAULT_LIMIT,
     STORAGE_KEY,
@@ -58,6 +58,20 @@ K = TypeVar("K")
 # A Mongo query dict (``None`` = no restriction) and sort spec, both as ``motor`` expects.
 Query = dict[str, Any] | None
 SortSpec = list[tuple[str, int]]
+
+
+def _is_duplicate_key_error(exc: Exception) -> bool:
+    """Whether ``exc`` is pymongo's ``DuplicateKeyError``.
+
+    Imported lazily: ``pymongo`` ships with the ``mongodb`` extra and the dev
+    extra, but this module stays import-safe (like ``mongo_client``) when only
+    a bare install is present.
+    """
+    try:
+        from pymongo.errors import DuplicateKeyError
+    except ImportError:  # pragma: no cover - the driver is absent
+        return False
+    return isinstance(exc, DuplicateKeyError)
 
 
 def _encode_value(value: Any) -> Any:
@@ -104,12 +118,23 @@ class MongoService(Service[T, K]):
     # ------------------------------------------------------------------
 
     async def create(self, payload: T) -> T:
-        """Insert a DTO, filling omitted fields from create defaults; return the DTO."""
+        """Insert a DTO, filling omitted fields from create defaults; return the DTO.
+
+        A duplicate identifier (or a unique index declared in ``get_indexes``)
+        is translated from pymongo's ``DuplicateKeyError`` to
+        :class:`ConflictError`, so the transport's ``409`` mapping does not need
+        to know the driver.
+        """
         data = apply_operation_defaults(
             self._resource.get_dto_declaration(), _payload_values(payload), "create"
         )
         document = self._to_document(data)
-        result = await self._collection.insert_one(document)
+        try:
+            result = await self._collection.insert_one(document)
+        except Exception as exc:
+            if _is_duplicate_key_error(exc):
+                raise ConflictError(str(exc)) from exc
+            raise
         document.setdefault("_id", getattr(result, "inserted_id", None))
         return self._from_document(document)
 

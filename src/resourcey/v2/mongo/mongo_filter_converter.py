@@ -64,9 +64,12 @@ Query = dict[str, Any] | None
 LogicalHandler = Callable[["MongoFilterConverter", SearchFilter[Any]], Query]
 OperatorHandler = Callable[["MongoFilterContext", str, Any], Query]
 
-# A query that matches no document: ``_id`` is always present and non-null, so a
-# query for a null ``_id`` never matches. Mongo has no dedicated "false".
-_MATCH_NONE: Query = {"_id": None}
+# A query that matches no document. ``{"$nor": [{}]}`` negates the
+# matches-everything empty document, so it matches nothing unconditionally —
+# including a document whose ``_id`` is itself null (a client-supplied nullable
+# identifier), which ``{"_id": None}`` would wrongly match. Mongo has no
+# dedicated "false" literal.
+_MATCH_NONE: Query = {"$nor": [{}]}
 
 
 def _encode(value: Any) -> Any:

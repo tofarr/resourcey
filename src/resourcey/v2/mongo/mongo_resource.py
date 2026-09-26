@@ -327,7 +327,14 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        """Exit the lifecycle (the collection stays resolved for the next entry)."""
+        """Exit the lifecycle, dropping the resolved collection.
+
+        The manager closes its clients on exit, so the cached collection would
+        reference a closed client on the next entry; clearing it forces
+        :meth:`_resolve_collection` to re-resolve from the rebuilt client. (A
+        collection seeded on ``ctx`` is unaffected — it is never cached here.)
+        """
+        self._collection = None
         self._entered = False
 
     # ------------------------------------------------------------------
