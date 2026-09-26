@@ -1,73 +1,89 @@
-"""Smoke tests for the API-key-auth example app.
+"""Smoke tests for the v2 API-key-auth example app.
 
-The whole example is one posture: a single environment-configured API key
-secures every resource. These tests pin the three outcomes a client can get —
-correct key (allowed), incorrect key (403), missing key (403) — against an
-in-memory SQLite database via httpx's ASGI transport, plus one happy-path CRUD
+The whole example is one posture: environment-configured API keys secure every
+resource. These tests pin the outcomes a client can get — correct key (allowed),
+incorrect key (401), missing key (401), an empty key list (fail-closed) — against
+an in-memory SQLite database via httpx's ASGI transport, plus one happy-path CRUD
 round trip to show the key gates a working API rather than a broken one.
 
-The builder is selected exactly as ``.env`` selects it: by resolving
-``FrameworkConfig.dependency_builder`` through the ``DEPENDENCY_BUILDER_CLASS``
-env var, so the tests exercise the config-driven wiring, not a hand-injected
-object.
+The app is assembled through :func:`api_key_auth.app.build_auth` and the real
+``create_app`` wiring, so the tests exercise the shipped posture rather than a
+hand-injected dependency.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import Any
 
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from resourcey.app_context import AppContext
-from resourcey.config.config_framework import FrameworkConfig
-from resourcey.config.config_runtime import clear_config_cache, get_config_as
-from resourcey.manifest import ResourceManifest
-from resourcey.resource.errors import ResourceyConfigError
-from resourcey.resource.sql import _SESSION_FACTORY_KEY, ResourceyBase
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from api_key_auth.message import Message
-from api_key_auth.thread import Thread
+from api_key_auth.app import build_auth
+from api_key_auth.message import MessageResource
+from api_key_auth.models import Base, Message, Thread
+from resourcey.v2.auth.auth_api_key import (
+    API_KEY_CHALLENGE,
+    API_KEY_HEADER_NAME,
+    ApiKeyDependencyBuilder,
+)
+from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.v2.core.errors import ResourceyConfigError
+from resourcey.v2.core.manifest import Manifest
+from resourcey.v2.http.app import create_app
+from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
+from resourcey.v2.sql.sql_resource import SqlResource
 
-# The key the tests present; the same env var ``.env`` sets.
+# The key the tests present; the same value ``.env`` sets.
 _API_KEY = "example-api-key"
-_KEY_HEADER = "X-API-Key"
+
+
+def _keys(*values: str) -> ApiKeysConfig:
+    """A key list as the environment would supply it (ids are placeholders)."""
+    return ApiKeysConfig(
+        api_keys=[
+            ApiKeyConfig(id=f"k{i}", name=None, key=SecretStr(value))
+            for i, value in enumerate(values)
+        ]
+    )
+
+
+def _manifest(session_factory: Any, keys: ApiKeysConfig) -> tuple[Manifest, Any]:
+    """The example's resources over an injected session factory and key list."""
+    builder, key_view = build_auth(keys)
+    manifest = Manifest(
+        resources=[
+            SqlResource(Thread, session_factory=session_factory),
+            MessageResource(Message, session_factory=session_factory),
+            key_view,
+        ]
+    )
+    return manifest, builder
 
 
 @pytest_asyncio.fixture
-async def app(monkeypatch) -> AsyncIterator[FastAPI]:
-    """The example app with an in-memory SQLite db and the env-selected builder."""
-    monkeypatch.setenv(
-        "DEPENDENCY_BUILDER_CLASS",
-        "resourcey.auth2.auth2_api_key.ApiKeyDependencyBuilder",
-    )
-    monkeypatch.setenv("DEPENDENCY_BUILDER_API_KEYS_0", _API_KEY)
-    # Each test resolves the builder from these vars rather than a cached config.
-    clear_config_cache()
-    FrameworkConfig.clear_instance_cache()
-
-    manifest = ResourceManifest(resources=(Thread(), Message()))
-    manifest.materialize()
-
+async def app() -> AsyncIterator[FastAPI]:
+    """The example app over a shared in-memory SQLite db and a known key list."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
-        await conn.run_sync(ResourceyBase.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+        await conn.run_sync(Base.metadata.create_all)
 
-    ctx = AppContext(FrameworkConfig())
-    ctx.set(_SESSION_FACTORY_KEY, factory)
-    built = manifest.create_app(app_context=ctx)
-    # ASGITransport does not run the lifespan; enter the manifest manually so
-    # each instance's __aenter__ copies the pre-seeded factory.
+    manifest, builder = _manifest(maker, _keys(_API_KEY))
+    built: FastAPI = create_app(manifest, dependency_builder=builder)
+    # ASGITransport does not run the lifespan; enter the manifest manually so the
+    # resources' runtime lifecycle is active for the requests below.
     await manifest.__aenter__()
-    yield built
-    await manifest.__aexit__(None, None, None)
-    await engine.dispose()
-    clear_config_cache()
-    FrameworkConfig.clear_instance_cache()
+    try:
+        yield built
+    finally:
+        await manifest.__aexit__(None, None, None)
+        await engine.dispose()
 
 
 @pytest_asyncio.fixture
@@ -79,7 +95,7 @@ async def client(app: FastAPI) -> AsyncIterator[AsyncClient]:
 
 async def test_correct_key_allows_crud(client: AsyncClient) -> None:
     """A valid key in ``X-API-Key`` unlocks the full CRUD path."""
-    headers = {_KEY_HEADER: _API_KEY}
+    headers = {API_KEY_HEADER_NAME: _API_KEY}
 
     created = await client.post("/threads", json={"title": "Authed"}, headers=headers)
     assert created.status_code == 201, created.text
@@ -106,7 +122,7 @@ async def test_correct_key_via_bearer(client: AsyncClient) -> None:
 
 async def test_incorrect_key_is_rejected(client: AsyncClient) -> None:
     """A wrong key is a 401 on read and on write alike."""
-    headers = {_KEY_HEADER: "not-the-key"}
+    headers = {API_KEY_HEADER_NAME: "not-the-key"}
 
     read = await client.get("/threads", headers=headers)
     assert read.status_code == 401
@@ -124,58 +140,50 @@ async def test_missing_key_is_rejected(client: AsyncClient) -> None:
     assert write.status_code == 401
 
 
-async def test_rejection_carries_authentication_challenge(client: AsyncClient) -> None:
-    """A 401 carries a ``WWW-Authenticate`` challenge, as HTTP requires."""
-    resp = await client.get("/threads")
-    assert resp.status_code == 401
-    assert resp.headers["www-authenticate"].startswith("Bearer")
+async def test_absent_and_invalid_keys_are_indistinguishable(client: AsyncClient) -> None:
+    """A 401 carries a ``WWW-Authenticate`` challenge and no key-vs-missing tell."""
+    missing = await client.get("/threads")
+    wrong = await client.get("/threads", headers={API_KEY_HEADER_NAME: "not-the-key"})
+    assert missing.status_code == wrong.status_code == 401
+    assert missing.headers["www-authenticate"] == API_KEY_CHALLENGE
+    assert wrong.headers["www-authenticate"] == API_KEY_CHALLENGE
+    assert missing.json() == wrong.json()
 
 
-async def test_empty_key_list_denies_everything(monkeypatch) -> None:
+async def test_empty_key_list_denies_everything() -> None:
     """An empty configured key list fails closed rather than opening the API."""
-    monkeypatch.setenv(
-        "DEPENDENCY_BUILDER_CLASS",
-        "resourcey.auth2.auth2_api_key.ApiKeyDependencyBuilder",
-    )
-    # A set-but-empty key list: nothing can authenticate.
-    monkeypatch.setenv("DEPENDENCY_BUILDER_API_KEYS", "[]")
-    monkeypatch.delenv("DEPENDENCY_BUILDER_API_KEYS_0", raising=False)
-    clear_config_cache()
-    FrameworkConfig.clear_instance_cache()
-
-    manifest = ResourceManifest(resources=(Thread(), Message()))
-    manifest.materialize()
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
-        await conn.run_sync(ResourceyBase.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    ctx = AppContext(FrameworkConfig())
-    ctx.set(_SESSION_FACTORY_KEY, factory)
-    built: FastAPI = manifest.create_app(app_context=ctx)
+        await conn.run_sync(Base.metadata.create_all)
+
+    manifest, builder = _manifest(maker, _keys())
+    built: FastAPI = create_app(manifest, dependency_builder=builder)
     await manifest.__aenter__()
     try:
         transport = ASGITransport(app=built)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
             # Even the correct key is rejected when the accepted list is empty.
-            resp = await c.get("/threads", headers={_KEY_HEADER: _API_KEY})
+            resp = await c.get("/threads", headers={API_KEY_HEADER_NAME: _API_KEY})
             assert resp.status_code == 401
     finally:
         await manifest.__aexit__(None, None, None)
         await engine.dispose()
-        clear_config_cache()
-        FrameworkConfig.clear_instance_cache()
 
 
-def test_empty_posture_class_var_is_rejected(monkeypatch) -> None:
-    """A set-but-empty DEPENDENCY_BUILDER_CLASS raises instead of disabling auth."""
-    from resourcey.resource.errors import ResourceyConfigError
+def test_build_auth_wires_the_api_key_builder() -> None:
+    """The factory always builds the API-key authenticator."""
+    builder, _view = build_auth(_keys(_API_KEY))
+    assert isinstance(builder, ApiKeyDependencyBuilder)
 
-    monkeypatch.setenv("DEPENDENCY_BUILDER_CLASS", "")
-    clear_config_cache()
-    FrameworkConfig.clear_instance_cache()
-    try:
-        with pytest.raises(ResourceyConfigError, match="DEPENDENCY_BUILDER_CLASS"):
-            _ = get_config_as(FrameworkConfig).dependency_builder
-    finally:
-        clear_config_cache()
-        FrameworkConfig.clear_instance_cache()
+
+def test_posture_guard_rejects_a_non_api_key_builder() -> None:
+    """The guard refuses the no-auth default, so the app cannot be silently open.
+
+    ``create_app`` falls back to ``DefaultDependencyBuilder`` when no builder is
+    supplied; this is what stops a future edit from passing one.
+    """
+    from api_key_auth.app import _verify_posture
+
+    with pytest.raises(ResourceyConfigError, match="API-key posture"):
+        _verify_posture(DefaultDependencyBuilder())
