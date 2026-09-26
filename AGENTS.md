@@ -41,8 +41,14 @@ until the first release.
   (issue #80): DTO-first `MongoResource` over an embedded (`mongomock`) client,
   a shared `MongoClientManager` in the manifest's `managers=`, `create_app`, a
   declared `BaseObjectFilter`, and no migration step (the schema is implicit and
-  `migrate_document` is the opt-in hook). `v2` does no `.env` loading, so its
-  run/debug commands pass `uvicorn --env-file .env` / `uv run --env-file .env`.
+  `migrate_document` is the opt-in hook). `03_api_key_auth` is the **`v2`
+  authentication app** (issue #124): the same model-first message board as 01,
+  secured by `ApiKeyDependencyBuilder` passed to `create_app`, over a config-list
+  key resource (`ApiKeysConfig` → `config_api_key_resource` / `config_api_key_view`)
+  built from `APP_API_KEYS_*` — no auth table, no `DEPENDENCY_BUILDER_CLASS`
+  (the builder is constructed explicitly in `app.py`), and a `build_app` posture
+  guard. `v2` does no `.env` loading, so its run/debug commands pass
+  `uvicorn --env-file .env` / `uv run --env-file .env`.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:

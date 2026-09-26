@@ -1,61 +1,42 @@
-"""The ``Message`` resource (example 03).
+"""The ``Message`` resource — the child side of the message board.
 
-A message belongs to a ``Thread`` via ``thread_id``, a real foreign-key column
-to ``threads.id``. A ``MessageSearchFilter`` declares ``thread_id__eq`` so a
-client can list a thread's messages via ``GET /messages?thread_id__eq=<id>``.
+``v2`` is model-first: ``Message`` the ORM model (in
+:mod:`api_key_auth.models`) is the schema of record, and
+:class:`~resourcey.v2.sql.sql_resource.SqlResource` infers the DTO and the REST
+models from it.
+
+The example opts into a **declared** filter surface: a
+:class:`~resourcey.v2.util.search_filter.BaseObjectFilter` returned from
+``get_search_filter_type``. Its ``<attribute>__<op>`` fields are the whole
+surface, so ``GET /messages?thread_id__eq=<id>`` lists a thread's messages, and
+``?text__contains=`` does a substring search on the body. Without it, ``v2``
+would derive a wider surface from the read model (every readable field with its
+type's operators).
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Annotated
+from typing import Any
 
-from pydantic import Field
-from resourcey.resource.field import ResourceyField
-from resourcey.resource.sql import SqlResource
-from resourcey.util.search_filter import BaseSearchFilter
-from sqlalchemy import Column, ForeignKey, Integer
+from api_key_auth.models import Message
+from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.v2.util.search_filter import BaseObjectFilter
 
 
-class Message(SqlResource):
-    """A message belonging to a thread.
+class MessageSearchFilter(BaseObjectFilter[Message]):
+    """Optional filter clauses for ``Message.search``.
 
-    Fields:
-        id: Auto-incrementing primary key.
-        thread_id: FK to ``threads.id`` (one-to-many, required).
-        text: The message body (required).
-        created_at: Set automatically on create; never creatable/updatable.
-        updated_at: Refreshed automatically on update; never creatable/updatable.
-    """
-
-    id: int
-    thread_id: Annotated[
-        int,
-        ResourceyField(
-            column=Column(
-                "thread_id", Integer, ForeignKey("threads.id"), nullable=False, index=True
-            )
-        ),
-    ]
-    text: str
-    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-
-    @classmethod
-    def get_search_filter_type(cls) -> type[MessageSearchFilter]:
-        """Expose ``thread_id__eq`` so a thread's messages can be listed."""
-        return MessageSearchFilter
-
-
-_MessageModel = Message.get_sql_alchemy_model()
-
-
-class MessageSearchFilter(BaseSearchFilter[_MessageModel]):  # type: ignore[valid-type]
-    """Filter clauses for ``Message.search``.
-
-    ``thread_id__eq`` lists a thread's messages; ``text__contains`` supports
+    ``thread_id__eq`` lists a thread's messages; ``text__contains`` does a
     substring search on the body.
     """
 
     thread_id__eq: int | None = None
     text__contains: str | None = None
+
+
+class MessageResource(SqlResource[Any, Any]):
+    """The ``Message`` ORM model exposed with the declared search filter above."""
+
+    def get_search_filter_type(self) -> type[MessageSearchFilter]:
+        """Expose ``thread_id__eq`` / ``text__contains`` and nothing else."""
+        return MessageSearchFilter
