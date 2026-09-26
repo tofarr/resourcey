@@ -49,9 +49,17 @@ from functools import reduce
 from typing import Annotated, Any, ClassVar, get_args, get_origin, get_type_hints
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, create_model
+from pydantic import (
+    BaseModel,
+    Field,
+    SecretStr,
+    create_model,
+    field_serializer,
+    field_validator,
+)
 
 from resourcey.v2.util.missing import MISSING, Missing
+from resourcey.v2.util.secret_serialization import dump_secret_str, load_secret_str
 
 _UNSET: Any = object()
 _NO_DEFAULT: Any = object()
@@ -500,6 +508,83 @@ def _missing_field() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Secret-field serialization
+# ---------------------------------------------------------------------------
+
+
+def _is_secret_annotation(annotation: Any) -> bool:
+    """Whether ``annotation`` is (or reduces to) a :class:`~pydantic.SecretStr`.
+
+    A ``Mapped[SecretStr]`` / ``Optional[SecretStr]`` annotation reduces to
+    ``SecretStr`` through the same ``_strip_annotated`` the model builder uses,
+    so a secret column is recognized however it was declared.
+    """
+    return _strip_annotated(annotation) is SecretStr
+
+
+def _secret_field_names(
+    fields: Mapping[str, tuple[Any, DtoField]], flag: str | None = None
+) -> set[str]:
+    """The secret fields among ``fields`` (optionally only those the ``flag`` includes)."""
+    return {
+        field_name
+        for field_name, (annotation, config) in fields.items()
+        if _is_secret_annotation(annotation) and (flag is None or getattr(config, flag))
+    }
+
+
+def _secret_base(secret_names: set[str]) -> type[BaseModel]:
+    """Build a transient base class carrying secret serializers / validators.
+
+    For each name in ``secret_names`` a ``field_serializer`` (dump via
+    :func:`dump_secret_str`) and a ``before`` ``field_validator`` (load via
+    :func:`load_secret_str`, rewrapped in :class:`SecretStr`) are attached.
+    ``check_fields=False`` lets the decorators be defined on the base class
+    before the fields exist (they are added by ``create_model``). The base class
+    is fresh per call so distinct generated models never share decorator
+    bindings. With no secret fields the plain :class:`BaseModel` is returned, so
+    a model without a secret is byte-for-byte what it was before.
+    """
+    if not secret_names:
+        return BaseModel
+    namespace: dict[str, Any] = {}
+    for name in secret_names:
+        namespace[f"_serialize_secret_{name}"] = field_serializer(name, check_fields=False)(
+            _make_secret_serializer()
+        )
+        namespace[f"_validate_secret_{name}"] = field_validator(
+            name, mode="before", check_fields=False
+        )(_make_secret_validator())
+    return type("_SecretFieldsBase", (BaseModel,), namespace)
+
+
+def _make_secret_serializer() -> Any:
+    """A ``field_serializer`` function: dump a secret per the context convention."""
+
+    def _serialize(self: Any, value: Any, info: Any) -> Any:
+        if value is None or value is MISSING:
+            return value
+        if isinstance(value, SecretStr):
+            return dump_secret_str(value, info)
+        return dump_secret_str(SecretStr(str(value)), info)
+
+    return _serialize
+
+
+def _make_secret_validator() -> Any:
+    """A ``field_validator`` function: load a secret per the context convention."""
+
+    def _validate(value: Any, info: Any) -> Any:
+        if value is None or value is MISSING:
+            return value
+        if isinstance(value, SecretStr):
+            return value
+        return SecretStr(load_secret_str(str(value), info))
+
+    return _validate
+
+
+# ---------------------------------------------------------------------------
 # Model generation
 # ---------------------------------------------------------------------------
 
@@ -510,7 +595,7 @@ def _build_dto_model(name: str, fields: Mapping[str, tuple[Any, DtoField]]) -> t
         field_name: (_with_missing(_strip_annotated(annotation)), _missing_field())
         for field_name, (annotation, _config) in fields.items()
     }
-    return create_model(name, **model_fields)
+    return create_model(name, __base__=_secret_base(_secret_field_names(fields)), **model_fields)
 
 
 def _build_rest_models(name: str, fields: Mapping[str, tuple[Any, DtoField]]) -> RestModels:
@@ -535,12 +620,16 @@ def _build_response_model(
     name: str, fields: Mapping[str, tuple[Any, DtoField]], flag: str
 ) -> type[BaseModel]:
     """A response model: the flagged fields, required, with concrete (never-``Missing``) types."""
-    model_fields: dict[str, Any] = {
-        field_name: (_strip_annotated(annotation), ...)
+    selected = {
+        field_name: (annotation, config)
         for field_name, (annotation, config) in fields.items()
         if getattr(config, flag)
     }
-    return create_model(name, **model_fields)
+    model_fields: dict[str, Any] = {
+        field_name: (_strip_annotated(annotation), ...)
+        for field_name, (annotation, _config) in selected.items()
+    }
+    return create_model(name, __base__=_secret_base(_secret_field_names(selected)), **model_fields)
 
 
 def _build_create_request_model(
@@ -555,6 +644,7 @@ def _build_create_request_model(
     ``default_factory`` (so it is actually used) rather than a concrete ``None``.
     """
     model_fields: dict[str, Any] = {}
+    secret_names: set[str] = set()
     for field_name, (annotation, config) in fields.items():
         if not config.in_create_request:
             continue
@@ -568,7 +658,9 @@ def _build_create_request_model(
             model_fields[field_name] = (concrete, config.default_for_create)
         else:
             model_fields[field_name] = (concrete, ...)
-    return create_model(name, **model_fields)
+        if _is_secret_annotation(annotation):
+            secret_names.add(field_name)
+    return create_model(name, __base__=_secret_base(secret_names), **model_fields)
 
 
 def _build_update_request_model(
@@ -587,7 +679,11 @@ def _build_update_request_model(
         for field_name, (annotation, config) in fields.items()
         if config.in_update_request
     }
-    return create_model(name, **model_fields)
+    return create_model(
+        name,
+        __base__=_secret_base(_secret_field_names(fields, "in_update_request")),
+        **model_fields,
+    )
 
 
 def derive_dto(

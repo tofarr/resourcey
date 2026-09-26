@@ -295,9 +295,12 @@ def _add_create_route(
 ) -> None:
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
         created = await service.create(request_to_dto(dto_model, payload))
-        projected = _project(created, models.create_response)
-        header = _header_for(strategy, [projected])
-        return _cached_json_response(request, _dump(projected), header, status.HTTP_201_CREATED)
+        context = service.serialization_context()
+        projected = _project(created, models.create_response, context)
+        header = _header_for(strategy, [projected], context)
+        return _cached_json_response(
+            request, _dump(projected, context), header, status.HTTP_201_CREATED
+        )
 
     handler.__annotations__ = {
         "request": Request,
@@ -317,9 +320,10 @@ def _add_read_route(
 ) -> None:
     async def handler(request, id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.read(id)
-        projected = _project(found, models.read_response)
-        header = _header_for(strategy, [projected])
-        return _cached_json_response(request, _dump(projected), header)
+        context = service.serialization_context()
+        projected = _project(found, models.read_response, context)
+        header = _header_for(strategy, [projected], context)
+        return _cached_json_response(request, _dump(projected, context), header)
 
     handler.__annotations__ = {"request": Request, "id": id_type, "service": Service}
     _route(router, f"{path}/{{id}}", ["GET"], handler)
@@ -337,9 +341,10 @@ def _add_update_route(
 ) -> None:
     async def handler(request, id, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         updated = await service.update(_update_dto(dto_model, id_field, id, payload))
-        projected = _project(updated, models.update_response)
-        header = _header_for(strategy, [projected])
-        return _cached_json_response(request, _dump(projected), header)
+        context = service.serialization_context()
+        projected = _project(updated, models.update_response, context)
+        header = _header_for(strategy, [projected], context)
+        return _cached_json_response(request, _dump(projected, context), header)
 
     handler.__annotations__ = {
         "request": Request,
@@ -402,8 +407,9 @@ def _add_search_route(
             cursor=cursor,
             limit=limit,
         )
-        body, items = _page_body(page, models.search_response)
-        header = _header_for(strategy, items)
+        context = service.serialization_context()
+        body, items = _page_body(page, models.search_response, context)
+        header = _header_for(strategy, items, context)
         return _cached_json_response(request, body, header)
 
     handler.__annotations__ = {
@@ -461,9 +467,10 @@ def _add_batch_read_route(
 ) -> None:
     async def handler(request, id=Query(default=[]), service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.batch_read(list(id))
-        items = [_project(item, models.search_response) for item in found]
-        header = _header_for(strategy, items)
-        return _cached_json_response(request, _dump(items), header)
+        context = service.serialization_context()
+        items = [_project(item, models.search_response, context) for item in found]
+        header = _header_for(strategy, items, context)
+        return _cached_json_response(request, _dump(items, context), header)
 
     handler.__annotations__ = {"request": Request, "id": list[id_type], "service": Service}
     _route(router, f"{path}/batch-read", ["GET"], handler)
@@ -509,12 +516,13 @@ def _add_batch_edit_route(
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
         edits = [_batch_edit_node(item, dto_model, id_field) for item in payload]
         edited = await service.batch_edit(edits)
+        context = service.serialization_context()
         items = [
-            _project_edit_result(edit, result, models)
+            _project_edit_result(edit, result, models, context)
             for edit, result in zip(edits, edited, strict=True)
         ]
-        header = _header_for(strategy, items)
-        return _cached_json_response(request, _dump(items), header)
+        header = _header_for(strategy, items, context)
+        return _cached_json_response(request, _dump(items, context), header)
 
     handler.__annotations__ = {
         "request": Request,
@@ -547,12 +555,19 @@ def _route(
     router.add_api_route(path, handler, methods=methods, response_model=None, **kwargs)
 
 
-def _project(instance: Any, model: type[BaseModel]) -> BaseModel | None:
+def _project(
+    instance: Any, model: type[BaseModel], context: dict[str, Any] | None = None
+) -> BaseModel | None:
     """Project a DTO instance onto a derived REST model (dropping ``MISSING``).
 
     The DTO is the internal type; the wire body is the projection. Fields the
     service left ``MISSING`` are omitted so the REST model's own defaults apply.
     ``None`` (a ``batch_read`` / ``batch_edit`` miss) projects to ``None``.
+
+    ``context`` is the service's serialization context; it is threaded into
+    ``model_validate`` so a secret-bearing field loads per the convention
+    (decrypted under an ``encryption_service``, plaintext under
+    ``expose_secrets``).
 
     Returns the validated model instance (not a dict) so the cache strategy can
     hash exactly the representation that will be serialised.
@@ -560,27 +575,33 @@ def _project(instance: Any, model: type[BaseModel]) -> BaseModel | None:
     if instance is None:
         return None
     values = {name: value for name, value in vars(instance).items() if value is not MISSING}
-    return model.model_validate(values)
+    return model.model_validate(values, context=context)
 
 
-def _dump(projected: Any) -> Any:
-    """Serialise a projected model / list / scalar to a JSON-ready value."""
+def _dump(projected: Any, context: dict[str, Any] | None = None) -> Any:
+    """Serialise a projected model / list / scalar to a JSON-ready value.
+
+    ``context`` is the service's serialization context, threaded into
+    ``model_dump`` so the wire body reflects it rather than always redacting.
+    """
     if isinstance(projected, BaseModel):
-        return projected.model_dump(mode="json")
+        return projected.model_dump(mode="json", context=context)
     if isinstance(projected, list):
-        return [_dump(item) for item in projected]
+        return [_dump(item, context) for item in projected]
     return projected
 
 
-def _page_body(page: Any, search_response: type[BaseModel]) -> tuple[dict[str, Any], list[Any]]:
+def _page_body(
+    page: Any, search_response: type[BaseModel], context: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], list[Any]]:
     """Serialise a :class:`~resourcey.v2.core.service.Page`; return body + projected items.
 
     The projected items are returned alongside the body so the cache strategy
     hashes the same representations the response carries.
     """
-    items = [_project(item, search_response) for item in page.items]
+    items = [_project(item, search_response, context) for item in page.items]
     return {
-        "items": [_dump(item) for item in items],
+        "items": [_dump(item, context) for item in items],
         "limit": page.limit,
         "next_cursor": page.next_cursor,
     }, items
@@ -591,15 +612,19 @@ def _page_body(page: Any, search_response: type[BaseModel]) -> tuple[dict[str, A
 # ---------------------------------------------------------------------------
 
 
-def _header_for(strategy: Any, items: list[Any]) -> CacheHeader | None:
+def _header_for(
+    strategy: Any, items: list[Any], context: dict[str, Any] | None = None
+) -> CacheHeader | None:
     """Compute the cache header for ``items`` via the resource's strategy.
 
     ``None`` when the resource declares no strategy or the strategy yields
     nothing (no validators and no freshness), so the response is uncached.
+    ``context`` is the service's serialization context, so a secret-bearing ETag
+    hashes exactly the bytes the response carries.
     """
     if strategy is None:
         return None
-    header = strategy.get_cache_header(items)
+    header = strategy.get_cache_header(items, context=context)
     return header if header.has_any() else None
 
 
@@ -791,7 +816,7 @@ def _batch_edit_node(item: BaseModel, dto_model: type[BaseModel], id_field: str)
 
 
 def _project_edit_result(
-    edit: Any, result: BaseModel | None, models: RestModels
+    edit: Any, result: BaseModel | None, models: RestModels, context: dict[str, Any] | None = None
 ) -> BaseModel | None:
     """Project a batch-edit result onto the shape for its edit.
 
@@ -802,8 +827,8 @@ def _project_edit_result(
     if isinstance(edit, Delete) or result is None:
         return None
     if isinstance(edit, Create):
-        return _project(result, models.create_response)
-    return _project(result, models.update_response)
+        return _project(result, models.create_response, context)
+    return _project(result, models.update_response, context)
 
 
 def _update_dto(

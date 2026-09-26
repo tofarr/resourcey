@@ -285,13 +285,25 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         An explicit ``session_factory`` wins (the escape hatch); otherwise the
         session maker is resolved from ``session_manager`` — the injected one,
         else the process-wide :func:`get_sql_session_manager` — by
-        ``connection_name``. Resolving by name makes this method async.
+        ``connection_name``. Resolving by name makes this method async. The
+        service itself is built by :meth:`make_service`, the subclass seam.
         """
         maker = self._session_factory
         if maker is None:
             manager = self._session_manager or get_sql_session_manager()
             maker = await manager.get_session_maker(self._connection_name)
-        return SqlService(self, ctx if ctx is not None else {}, maker)
+        return self.make_service(ctx if ctx is not None else {}, maker)
+
+    def make_service(
+        self, ctx: MutableMapping[Any, Any], session_factory: async_sessionmaker[AsyncSession]
+    ) -> Service[T, K]:
+        """Build the service for this resource — the subclass seam.
+
+        A backend variant (e.g. the auth key resource, which adds
+        ``find_by_key``) overrides this rather than :meth:`get_service`, so the
+        session-resolution logic is written once.
+        """
+        return SqlService(self, ctx, session_factory)
 
     # ------------------------------------------------------------------
     # Registration / lifecycle

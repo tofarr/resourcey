@@ -408,9 +408,16 @@ class SqlService(Service[T, K]):
         return apply_operation_defaults(self._resource._dto, data, operation)
 
     def _to_columns(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Rename DTO field (attribute) keys to their table column names."""
+        """Rename DTO field (attribute) keys to their table column names.
+
+        A :class:`~pydantic.SecretStr` value is unwrapped to its plaintext at this
+        storage boundary: the DBAPI cannot bind a ``SecretStr``, and the stored
+        value is the secret's at-rest form (a digest, or ciphertext when the
+        caller encrypted it).
+        """
         return {
-            self._resource._column_for_attr.get(name, name): value for name, value in data.items()
+            self._resource._column_for_attr.get(name, name): _unbind_secret(value)
+            for name, value in data.items()
         }
 
     def _to_dto(self, row: Any) -> T:
@@ -421,6 +428,13 @@ class SqlService(Service[T, K]):
 def _row_values(resource: Any, row: Any) -> dict[str, Any]:
     """Map a result row's column names back to DTO attribute names."""
     return {resource._attr_for_column.get(name, name): value for name, value in row.items()}
+
+
+def _unbind_secret(value: Any) -> Any:
+    """Unwrap a :class:`~pydantic.SecretStr` to its plaintext for DBAPI binding."""
+    from pydantic import SecretStr
+
+    return value.get_secret_value() if isinstance(value, SecretStr) else value
 
 
 def _payload_values(payload: Any) -> dict[str, Any]:

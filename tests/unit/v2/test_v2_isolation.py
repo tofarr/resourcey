@@ -11,7 +11,7 @@ inside a ``TYPE_CHECKING`` guard.
 
 It also pins the **layer ranks** inside ``v2``:
 
-    util < core < {sql, mongo, list, http, config, cache, encryption}
+    util < core < {sql, mongo, list, http, config, cache, encryption, auth, view}
 
 no module may import a strictly-higher project layer at runtime. This subsumes
 both "``util`` imports nothing project-level" (it is the bottom layer) and
@@ -43,6 +43,7 @@ _LAYER_RANK = {
     "list": 2,
     "sql": 2,
     "view": 2,
+    "auth": 2,
 }
 
 
@@ -159,7 +160,7 @@ def test_v2_imports_flow_upward_only():
             violations[str(path.relative_to(V2_DIR))] = imports
     assert violations == {}, (
         "v2 layers are ranked util < core < {sql, mongo, list, http, config, cache, "
-        "encryption}; these modules import a strictly-higher layer: " + str(violations)
+        "encryption, auth, view}; these modules import a strictly-higher layer: " + str(violations)
     )
 
 
@@ -236,6 +237,7 @@ def test_the_util_files_exist_without_an_init():
         "models.py",
         "naming.py",
         "search_filter.py",
+        "secret_serialization.py",
         "singleton.py",
         "sort_order.py",
     }
@@ -273,6 +275,34 @@ def test_the_view_files_exist_without_an_init():
     names = {p.name for p in sorted(view.glob("*.py"))}
     assert names == {"resource_view.py", "view_service.py"}
     assert not (view / "__init__.py").exists()
+
+
+def test_the_auth_files_exist_without_an_init():
+    auth = V2_DIR / "auth"
+    names = {p.name for p in sorted(auth.glob("*.py"))}
+    assert names == {
+        "auth_api_key.py",
+        "auth_api_key_resource.py",
+        "auth_api_key_service.py",
+        "auth_config.py",
+    }
+    assert not (auth / "__init__.py").exists()
+
+
+def test_v2_auth_never_imports_the_legacy_auth_packages():
+    """``v2/auth`` is the replacement; it must not reach the v1 ``auth`` seam."""
+    offenders: dict[str, list[str]] = {}
+    for path in sorted((V2_DIR / "auth").rglob("*.py")):
+        modules = [
+            m
+            for m in _runtime_resourcey_imports(path)
+            if m in {"resourcey.auth", "resourcey.auth2"}
+        ]
+        if modules:
+            offenders[str(path.relative_to(V2_DIR))] = sorted(set(modules))
+    assert offenders == {}, (
+        "v2/auth must not import the v1 auth / auth2 packages at runtime: " + str(offenders)
+    )
 
 
 def test_v2_view_never_imports_a_backend():

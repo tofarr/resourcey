@@ -16,7 +16,7 @@ This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``
 
 from __future__ import annotations
 
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.service import (
@@ -60,6 +60,20 @@ class ViewService(Service[T, K], Generic[T, K]):
     async def __aexit__(self, *exc: object) -> None:
         await self._inner.__aexit__(*exc)
         await super().__aexit__(*exc)
+
+    # ------------------------------------------------------------------
+    # Serialization context (delegated to the inner service)
+    # ------------------------------------------------------------------
+
+    def serialization_context(self) -> dict[str, Any] | None:
+        """The inner service's serialization context.
+
+        Delegated, not the wrapper's own: the inner service is what decides a
+        response's context (e.g. an auth key service asking for the one-time
+        reveal), and the transport reads it off the service it was handed — the
+        view. Without this the reveal would be silently dropped.
+        """
+        return self._inner.serialization_context()
 
     # ------------------------------------------------------------------
     # Standard actions (forwarded)
