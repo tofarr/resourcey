@@ -268,6 +268,25 @@ def test_the_list_files_exist_without_an_init():
     assert not (list_dir / "__init__.py").exists()
 
 
+def test_the_view_files_exist_without_an_init():
+    view = V2_DIR / "view"
+    names = {p.name for p in sorted(view.glob("*.py"))}
+    assert names == {"resource_view.py", "view_service.py"}
+    assert not (view / "__init__.py").exists()
+
+
+def test_v2_view_never_imports_a_backend():
+    """``v2/view`` is storage-agnostic: it wraps any backend but imports none."""
+    backends = ("resourcey.v2.sql", "resourcey.v2.mongo", "resourcey.v2.list")
+    offenders = [
+        str(p.relative_to(V2_DIR))
+        for p in sorted((V2_DIR / "view").rglob("*.py"))
+        for backend in backends
+        if _imports_module(p, backend)
+    ]
+    assert offenders == []
+
+
 def _imports_module(path: pathlib.Path, module: str) -> bool:
     """Whether ``path`` imports ``module`` (or a submodule) at runtime."""
     tree = ast.parse(path.read_text(), filename=str(path))
