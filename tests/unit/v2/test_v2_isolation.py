@@ -42,6 +42,7 @@ _LAYER_RANK = {
     "mongo": 2,
     "list": 2,
     "sql": 2,
+    "view": 2,
 }
 
 

@@ -671,9 +671,76 @@ framework-owned.
 fails with an actionable `ImportError` naming `resourcey[mongodb]`. `mongomock`
 / `pymongo` remain dev-only for the embedded path and tests.
 
+### `v2/view` — the configured wrapper (issue #121)
+
+`src/resourcey/v2/view/` holds `ResourceView`, the `v2` successor to `v1`'s
+`WrapperResourceBase` (#62), but **configuration-driven** rather than
+subclass-driven, so a projection is an instance:
+
+```python
+public_secrets = ResourceView(
+    resource=secrets,
+    exposed_field_overrides={"value": {"in_read_response": False,
+                                       "in_search_response": False,
+                                       "in_update_request": False,
+                                       "in_update_response": False}},
+    exposed_actions=frozenset(Action) - {Action.UPDATE},
+)
+```
+
+It is the general-purpose **least-privilege** tool: declare a resource once with
+its full storage truth, then narrow the public surface without touching the
+storage class. The premise "delegate everything except `get_exposed_resource`"
+is *almost* right — field overrides force the whole exposed surface to be
+recomputed, because the query surface and cache policy derive from the DTO /
+REST models and the action set:
+
+* **Field projection** — the DTO is re-derived from the inner declaration via a
+  new `derive_dto(dto, field_overrides=...)` in `v2/core/dto.py`. It re-declares
+  every field with its *resolved* `DtoField` made explicit and merges the
+  per-field override onto it with `DtoField.with_overrides`, so the `DTO`
+  conventions do **not** re-run (a bare `id` keeps its `uuid4` factory; an
+  override cannot silently re-widen a flag the inner turned off). An unknown
+  field or an override of the identifier is rejected at construction.
+* **Query / sort surface** — `get_queryable_fields`, `get_filter_operators`,
+  `get_sortable_fields`, and `resolve_sort_order` are recomputed from the view's
+  read model. Load-bearing, not cosmetic: delegating them to the inner would let
+  `?secret__eq=` / `?sort=secret` pass the transport's validation and reach the
+  inner service, which pushes them down against the inner's (wider) column set —
+  leaking the hidden value or its relative order. `get_search_filter_type()` is
+  carried across only when the view does not narrow; hiding fields while the
+  inner declares an object filter is refused at construction (the declared
+  filter still names every inner field).
+* **Cache policy** — recomputed when the view narrows, so a view that becomes
+  read-only selects the optimistic, `private` strategy rather than inheriting a
+  writable inner's shared-cacheable validator; a pure pass-through delegates.
+  `cache_strategy=` is the escape hatch.
+* **Actions** — normalized (`normalize_actions`), and `exposed_actions` must be a
+  subset of the inner's: a view **narrows**, never widens.
+
+`v2/core/service.py` gains `normalize_actions(actions)` — a batch action is
+dropped when its singular action is absent (`batch_read` needs `read`;
+`batch_edit` needs at least one of create / update / delete). It is applied
+where actions are consumed: `register_routes` (so routes and the batch body
+agree), the SQL / Mongo `batch_edit` (which now guards `Update` like create /
+delete), and the view. The `batch-edit` body's `Update` kind is now gated on
+`Action.UPDATE` (previously always present), closing a latent hole where a
+resource exposing `batch_edit` while hiding `update` could update through the
+batch. `specs/exposure.qnt` pins both.
+
+`view_service.py` holds `ViewService`, a `Service` proxy that forwards every
+action to the inner but re-asserts the **view's** actions on `batch_edit` —
+defense in depth for a direct service caller, since the inner service consults
+the inner (wider) action set. The view's `get_service` wraps the inner's, and
+`__aenter__` / `__aexit__` / `on_register` delegate to the inner so its
+lifecycle (e.g. `MongoResource.ensure_indexes()`) still runs; register the
+**view**, not the inner (registering both double-enters the inner and mounts
+duplicate routes). The layer ranks gain `view` at the backend rank.
+
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/encryption`, `v2/util`,
+`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/encryption`,
+`v2/util`,
 `v2/config`,
 `v2/cache`, and `v2/http` are **parallel** to the existing packages — nothing
 existing is removed by them and they are not a refactor. The old `v1`
@@ -682,9 +749,9 @@ follow-up removal. A test asserts that no module under `v2/` makes a **runtime**
 import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
 v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
 pins the **layer ranks**
-`util < core < {sql, mongo, list, http, config, cache, encryption}`: no module
-imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`, and
-`v2/list` implement whatever small helpers they need locally rather than
+`util < core < {sql, mongo, list, view, http, config, cache, encryption}`: no
+module imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`,
+and `v2/list` implement whatever small helpers they need locally rather than
 reaching for `resourcey.util`.
 
 ### `v2/util` and `v2/config` — the config rung

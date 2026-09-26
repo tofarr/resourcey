@@ -24,9 +24,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.core.dto import DtoField
+from resourcey.v2.core.errors import InvalidInputError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
-from resourcey.v2.core.service import Action, NotFoundError, ServiceError
+from resourcey.v2.core.service import Action, NotFoundError, ServiceError, Update
 from resourcey.v2.http.app import add_to_app, create_app
 from resourcey.v2.http.dependency_builder import (
     DefaultDependencyBuilder,
@@ -187,6 +188,63 @@ async def test_batch_edit_rejects_an_unknown_kind(client: AsyncClient):
     # ``kind`` is required, so an untagged item is rejected too.
     untagged = await client.post("/threads/batch-edit", json=[{"item": {"title": "x"}}])
     assert untagged.status_code == 422
+
+
+async def test_batch_edit_rejects_update_when_update_is_not_declared():
+    """A resource declaring batch_edit without update cannot update through it.
+
+    The ``Update`` kind is gated on ``Action.UPDATE`` (like create / delete), so
+    a resource that hides ``update`` cannot reach it via ``batch-edit`` — the
+    latent hole this closes.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    class CreateOnlyThread(SqlResource[Any, Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset(
+                {Action.CREATE, Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_EDIT}
+            )
+
+    threads = CreateOnlyThread(Thread, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(AppBase.metadata.create_all)
+
+    manifest: Manifest = Manifest(resources=[threads])
+    async for c in _make_client(manifest, create_app(manifest)):
+        created = (await c.post("/threads", json={"title": "t"})).json()
+        # The update route is correctly not mounted...
+        assert (await c.patch(f"/threads/{created['id']}", json={"title": "x"})).status_code == 405
+        # ...and the Update kind is not admitted through batch-edit.
+        rejected = await c.post(
+            "/threads/batch-edit",
+            json=[{"kind": "Update", "item": {"id": created["id"], "title": "x"}}],
+        )
+        assert rejected.status_code == 422
+        # Create still works through batch-edit.
+        ok = await c.post("/threads/batch-edit", json=[{"kind": "Create", "item": {"title": "u"}}])
+        assert ok.status_code == 200
+    await engine.dispose()
+
+
+async def test_batch_edit_rejects_update_at_the_service_level():
+    """The backend's own guard refuses an ``Update`` when the resource hides it."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    class CreateOnlyThread(SqlResource[Any, Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset({Action.CREATE, Action.READ, Action.BATCH_EDIT})
+
+    threads = CreateOnlyThread(Thread, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(AppBase.metadata.create_all)
+
+    async with threads, await threads.get_service() as service:
+        dto = threads.get_dto_type().model_validate({"title": "t"})
+        with pytest.raises(InvalidInputError, match="update is not supported"):
+            await service.batch_edit([Update(item=dto)])
+    await engine.dispose()
 
 
 async def test_batch_edit_narrows_to_declared_actions():
