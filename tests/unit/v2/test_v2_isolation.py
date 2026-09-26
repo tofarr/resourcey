@@ -11,7 +11,7 @@ inside a ``TYPE_CHECKING`` guard.
 
 It also pins the **layer ranks** inside ``v2``:
 
-    util < core < {sql, mongo, http, config, cache, encryption}
+    util < core < {sql, mongo, list, http, config, cache, encryption}
 
 no module may import a strictly-higher project layer at runtime. This subsumes
 both "``util`` imports nothing project-level" (it is the bottom layer) and
@@ -40,6 +40,7 @@ _LAYER_RANK = {
     "encryption": 2,
     "http": 2,
     "mongo": 2,
+    "list": 2,
     "sql": 2,
 }
 
@@ -156,8 +157,8 @@ def test_v2_imports_flow_upward_only():
         if imports:
             violations[str(path.relative_to(V2_DIR))] = imports
     assert violations == {}, (
-        "v2 layers are ranked util < core < {sql, mongo, http, config, cache, encryption}; "
-        f"these modules import a strictly-higher layer: {violations}"
+        "v2 layers are ranked util < core < {sql, mongo, list, http, config, cache, "
+        "encryption}; these modules import a strictly-higher layer: " + str(violations)
     )
 
 
@@ -255,6 +256,17 @@ def test_the_mongo_files_exist_without_an_init():
     assert not (mongo / "__init__.py").exists()
 
 
+def test_the_list_files_exist_without_an_init():
+    list_dir = V2_DIR / "list"
+    names = {p.name for p in sorted(list_dir.glob("*.py"))}
+    assert names == {
+        "list_resource.py",
+        "list_service.py",
+        "pydantic_2_dto.py",
+    }
+    assert not (list_dir / "__init__.py").exists()
+
+
 def _imports_module(path: pathlib.Path, module: str) -> bool:
     """Whether ``path`` imports ``module`` (or a submodule) at runtime."""
     tree = ast.parse(path.read_text(), filename=str(path))
@@ -280,6 +292,16 @@ def test_v2_mongo_never_imports_sqlalchemy():
     assert offenders == []
 
 
+def test_v2_list_never_imports_sqlalchemy():
+    """``v2/list`` is the dependency-free proof: it must not drag SQLAlchemy in."""
+    offenders = [
+        str(p.relative_to(V2_DIR))
+        for p in sorted((V2_DIR / "list").rglob("*.py"))
+        if _imports_module(p, "sqlalchemy")
+    ]
+    assert offenders == []
+
+
 def test_the_cache_files_exist_without_an_init():
     cache = V2_DIR / "cache"
     names = {p.name for p in sorted(cache.glob("*.py"))}
@@ -289,6 +311,25 @@ def test_the_cache_files_exist_without_an_init():
         "cache_strategy.py",
     }
     assert not (cache / "__init__.py").exists()
+
+
+def _imports_module(path: pathlib.Path, module: str) -> bool:
+    """Whether ``path`` imports ``module`` (or a submodule) at runtime.
+
+    Checks actual import statements, not the raw text, so a docstring may
+    legitimately *mention* a module without tripping the check.
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            continue
+        if any(name == module or name.startswith(module + ".") for name in names):
+            return True
+    return False
 
 
 def _imports_openhands(path: pathlib.Path) -> bool:

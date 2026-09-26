@@ -289,12 +289,57 @@ a developer can drop straight back to SQLAlchemy.
   columns only**: a FK column is a plain scalar field; `relationship()`s are
   not projected (a known limitation — nested projection is its own future
   issue).
-* `cursor.py` — tamper-proof keyset cursor encode/decode plus the keyset
-  `WHERE` predicate; the cursor is a JWE from `v2/encryption`.
+* `cursor.py` — the SQL keyset `WHERE` predicate (`keyset_predicate`); it
+  re-exports the storage-agnostic cursor *codec* (`encode_cursor` /
+  `decode_cursor`) from `v2/util/cursor.py` so the tamper-proof encoding is
+  shared with the non-SQL backends while SQLAlchemy stays out of them. The
+  cursor is a JWE from `v2/encryption`.
 
 There is no `v2/sql/migration.py`: with SQLAlchemy as the schema of record,
 migrations are delegated to SQLAlchemy and Alembic rather than generated from
 the framework's own in-memory models.
+
+### `v2/list` — the read-only list backend (issue #116)
+
+`src/resourcey/v2/list/` is a `v2` backend alongside `v2/sql`: a resource built
+from an application-supplied list of Pydantic models and served **read-only**,
+for in-process reference data (country codes, feature flags, catalog entries)
+that should be exposed over the same REST surface without being copied into a
+table. The list *is* the storage — no table, no migration, no external
+dependency — which makes it the simplest backend and the proof that a new
+backend subclasses `Resource`/`Service` and inherits the rest.
+
+* `list_resource.py` — `ListResource(models, *, model=None, dto=None, path=None,
+  defensive=True)`. The served Pydantic model is projected onto a `DTO`
+  declaration (via `pydantic_2_dto`); an explicit `dto=` wins (the escape
+  hatch). It holds the list **by reference**, mixes in
+  `DefaultCacheStrategyMixin` (a read-only resource therefore resolves to
+  `OptimisticCacheStrategy(expire_in=600, private=True)` with no per-backend
+  code), and narrows `get_supported_actions()` to exactly
+  `{read, search, count, batch_read}`. Because `v2/http/routes.py` mounts a
+  route only for a declared action, **no write route exists** — a write is a
+  `405`, not an unimplemented handler. `defensive=True` deep-copies every
+  output (`model_copy(deep=True)`); `defensive=False` serves the stored object
+  itself. The query / sort surface derives from `read_response`, the same
+  security gate as SQL / Mongo. `get_service(ctx)` is async and adopts items
+  seeded on `ctx` under `STORAGE_KEY`, else the resource's own list.
+* `list_service.py` — `ListService` implements the read subset over the
+  resolved items: `read` (a miss raises `NotFoundError` → 404), `search`
+  (filters via `SearchFilter.matches`, orders via `SortOrder.compare` with the
+  identifier appended as a tie-breaker, then keyset-pages), `count`, and
+  `batch_read` (positionally aligned, `None` for a miss). Paging reuses the
+  shared `v2/util/cursor.py` codec and mirrors the SQL `keyset_predicate` in
+  memory (NULLs first ascending / last descending; only the sort-key comparison
+  mirrors for descending); a cursor reused under a different `(sort_field,
+  ascending)` is rejected (`InvalidInputError` → 400). Write methods keep the
+  raising `Service` defaults and are never routed.
+* `pydantic_2_dto.py` — `pydantic_2_dto(model)` infers a `DTO` declaration from
+  a plain Pydantic model, mirroring `sqlalchemy_2_dto`: field order and
+  nullability carry across, the identifier is `id` (or an explicit
+  `id_field_name=`), and an explicit `DtoField` (an `Annotated` tag or
+  `Field(json_schema_extra={"dto_field": ...})`) is honoured verbatim. Other
+  fields are left bare so the `v2/core` conventions apply; a read-only resource
+  never exercises the create path, so those defaults are simply unused.
 
 ### `v2/encryption` — the migrated encryption service (issue #78)
 
@@ -628,7 +673,8 @@ fails with an actionable `ImportError` naming `resourcey[mongodb]`. `mongomock`
 
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/mongo`, `v2/encryption`, `v2/util`, `v2/config`,
+`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/encryption`, `v2/util`,
+`v2/config`,
 `v2/cache`, and `v2/http` are **parallel** to the existing packages — nothing
 existing is removed by them and they are not a refactor. The old `v1`
 packages/modules (and the old `resourcey.encryption`) stay in place until a
@@ -636,10 +682,10 @@ follow-up removal. A test asserts that no module under `v2/` makes a **runtime**
 import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
 v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
 pins the **layer ranks**
-`util < core < {sql, mongo, http, config, cache, encryption}`: no module imports
-a strictly-higher project layer at runtime. `v2/sql` and `v2/mongo` implement
-whatever small helpers they need locally rather than reaching for
-`resourcey.util`.
+`util < core < {sql, mongo, list, http, config, cache, encryption}`: no module
+imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`, and
+`v2/list` implement whatever small helpers they need locally rather than
+reaching for `resourcey.util`.
 
 ### `v2/util` and `v2/config` — the config rung
 
@@ -647,11 +693,14 @@ whatever small helpers they need locally rather than reaching for
 the dependency-free vendored leaves now live: `models.py`
 (`DiscriminatedUnionMixin`), `import_paths.py` (dotted-path resolution),
 `env_parser.py`, and `missing.py` (the `Missing` / `MISSING` sentinel, moved
-here by issue #86). They are copies, not moves — v1 `resourcey/util/` is
-untouched until it is removed. `v2/util` imports **no project package** at all
-(not even `v2/core`), so the layer ranks are a clean
+here by issue #86), plus the non-vendored `cursor.py` (the storage-agnostic
+keyset cursor codec, extracted from `v2/sql` by issue #116) and the shared
+`naming.py` / `singleton.py` / `search_filter.py` / `sort_order.py` leaves.
+They are copies, not moves — v1 `resourcey/util/` is untouched until it is
+removed. `v2/util` imports **no project package** at all (not even `v2/core`),
+so the layer ranks are a clean
 
-    util < core < {sql, mongo, http, config, cache, encryption}
+    util < core < {sql, mongo, list, http, config, cache, encryption}
 
 and `v2/core` may import `v2/util` — the dependency runs one way.
 
