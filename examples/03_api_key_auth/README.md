@@ -22,17 +22,21 @@ every resource from one object.
 
 ## Resources
 
-Only two plain `SqlResource`s — the same message board as example 01. Nothing in
-either file mentions authentication; the key check is composed in by the
-`DependencyBuilder`.
+Two plain `SqlResource`s — the same message board as example 01 — plus a
+read-only key resource. Nothing in the two message-board files mentions
+authentication; the key check is composed in by the `DependencyBuilder`.
 
 | Resource | Fields | Notes |
 | -------- | ------ | ----- |
 | `Thread` | `id: int`, `title`, `description`, timestamps | Parent of a message. |
 | `Message` | `id: int`, `thread_id` (FK → `threads.id`), `text`, timestamps | `thread_id__eq` is filterable so a thread's messages can be listed. |
+| API keys | `id`, `name` | Built from `APP_API_KEYS_*` and registered read-only; the key digest is never served. |
 
-Both are **SQLAlchemy ORM models** in `api_key_auth/models.py` (v2 is
-model-first); the resources are thin `SqlResource` subclasses over them.
+The two message-board resources are **SQLAlchemy ORM models** in
+`api_key_auth/models.py` (v2 is model-first); the resources are thin
+`SqlResource` subclasses over them. The key resource is a `ListResource` built
+from config, with a `ResourceView` hiding the digest — see
+[How it works](#how-it-works).
 
 ## Layout
 
@@ -123,6 +127,12 @@ builder = ApiKeyDependencyBuilder(key_resource=key_inner)
 manifest = Manifest(resources=[..., config_api_key_view(key_inner)], managers=[manager])
 app = create_app(manifest, dependency_builder=builder)
 ```
+
+The authenticator holds the **inner** key resource because validating a key
+means calling `find_by_key` on it. The manifest registers the **view** over that
+inner resource instead: the view projects the key digest away, so it is never
+served and never queryable. One object authenticates; the other is what clients
+can read.
 
 `.env`:
 
