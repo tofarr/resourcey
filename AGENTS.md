@@ -680,10 +680,14 @@ subclass-driven, so a projection is an instance:
 ```python
 public_secrets = ResourceView(
     resource=secrets,
-    exposed_field_overrides={"value": {"in_read_response": False,
-                                       "in_search_response": False,
-                                       "in_update_request": False,
-                                       "in_update_response": False}},
+    exposed_field_overrides={
+        "value": {
+            "in_read_response": False,
+            "in_search_response": False,
+            "in_update_request": False,
+            "in_update_response": False,
+        }
+    },
     exposed_actions=frozenset(Action) - {Action.UPDATE},
 )
 ```
@@ -699,9 +703,12 @@ REST models and the action set:
   new `derive_dto(dto, field_overrides=...)` in `v2/core/dto.py`. It re-declares
   every field with its *resolved* `DtoField` made explicit and merges the
   per-field override onto it with `DtoField.with_overrides`, so the `DTO`
-  conventions do **not** re-run (a bare `id` keeps its `uuid4` factory; an
-  override cannot silently re-widen a flag the inner turned off). An unknown
-  field or an override of the identifier is rejected at construction.
+  conventions do **not** re-run (a bare `id` keeps its `uuid4` factory). The
+  stored annotation is reduced to its base type before the merged field is
+  attached, so the `Annotated[T, DtoField(...)]` (DTO-first) form overrides
+  identically to the class-attribute (SQL) form. An unknown field, an override
+  of the identifier, or an override that turns an inner-`False` projection flag
+  back on is rejected at construction.
 * **Query / sort surface** — `get_queryable_fields`, `get_filter_operators`,
   `get_sortable_fields`, and `resolve_sort_order` are recomputed from the view's
   read model. Load-bearing, not cosmetic: delegating them to the inner would let

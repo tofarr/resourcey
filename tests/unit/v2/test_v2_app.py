@@ -190,6 +190,28 @@ async def test_batch_edit_rejects_an_unknown_kind(client: AsyncClient):
     assert untagged.status_code == 422
 
 
+def test_batch_edit_body_refuses_an_empty_union():
+    """The defensive guard fires if ``batch_edit`` reaches the body builder with no writes.
+
+    ``register_routes`` drops ``batch_edit`` when ``normalize_actions`` finds no
+    write action, so this is unreachable through the transport; the guard keeps a
+    future direct caller from building an empty ``kind`` union.
+    """
+    from resourcey.v2.http.routes import _batch_edit_body
+
+    models = SqlResource(Thread, session_factory=_dummy_maker()).get_rest_models()
+    with pytest.raises(ServiceError, match="no members"):
+        _batch_edit_body(
+            models.create_request,
+            models.update_request,
+            "id",
+            int,
+            allow_create=False,
+            allow_update=False,
+            allow_delete=False,
+        )
+
+
 async def test_batch_edit_rejects_update_when_update_is_not_declared():
     """A resource declaring batch_edit without update cannot update through it.
 

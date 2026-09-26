@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import pytest
@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.cache.cache_strategy import ETagCacheStrategy, OptimisticCacheStrategy
+from resourcey.v2.core.dto import DTO, DtoField, derive_dto
 from resourcey.v2.core.errors import InvalidInputError, ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.service import (
@@ -40,6 +41,8 @@ from resourcey.v2.core.service import (
     normalize_actions,
 )
 from resourcey.v2.http.app import create_app
+from resourcey.v2.mongo.embedded import AsyncEmbeddedClient
+from resourcey.v2.mongo.mongo_resource import MongoResource
 from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.util.search_filter import BaseObjectFilter
 from resourcey.v2.util.sort_order import AttrSortOrder
@@ -98,6 +101,18 @@ class TestConstruction:
         inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
         with pytest.raises(ResourceyConfigError, match="identifier"):
             ResourceView(inner, exposed_field_overrides={"id": {"in_read_response": False}})
+
+    def test_rewidening_an_inner_hidden_field_is_rejected(self) -> None:
+        # A view whose own DTO already hides ``value`` from the read model.
+        inner = SqlResource(Secret, session_factory=_maker())
+        inner_view = ResourceView(inner, exposed_field_overrides=SECRET_HIDING)
+        # A second view may not turn that flag back on.
+        with pytest.raises(ResourceyConfigError, match="cannot re-widen"):
+            ResourceView(inner_view, exposed_field_overrides={"value": {"in_read_response": True}})
+        # Narrowing further is fine.
+        ResourceView(
+            inner_view, exposed_field_overrides={"description": {"in_read_response": False}}
+        )
 
     def test_widening_actions_is_rejected(self) -> None:
         class ReadOnly(SqlResource[Any, Any]):
@@ -177,6 +192,76 @@ class TestFieldProjection:
         view = ResourceView(inner)
         assert view.get_rest_models() is inner.get_rest_models()
         assert view.get_dto_declaration() is inner.get_dto_declaration()
+
+
+# ---------------------------------------------------------------------------
+# DTO-first resources (``Annotated[T, DtoField(...)]`` declarations)
+#
+# The SQL backend passes a ``DtoField`` as a *class attribute*; the DTO-first
+# backends (Mongo / list) declare it *inside* ``Annotated``. Both must project
+# identically: the ``Annotated`` form stores the inner ``DtoField`` in the
+# annotation, and Pydantic flattens a nested ``Annotated``, so ``derive_dto``
+# must reduce to the base type or the override is silently ignored.
+# ---------------------------------------------------------------------------
+
+
+class AnnotatedDTO(DTO, metadata={"collection": "annotated"}):
+    id: Annotated[
+        UUID,
+        DtoField(
+            in_create_request=False, in_update_request=False, default_factory_for_create=uuid4
+        ),
+    ]
+    description: Annotated[str | None, DtoField(default_for_create=None)]
+    value: Annotated[str, DtoField()]
+
+
+class TestAnnotatedDeclarations:
+    def test_derive_dto_applies_overrides_on_the_annotated_form(self) -> None:
+        derived = derive_dto(
+            AnnotatedDTO,
+            field_overrides={"value": {"in_read_response": False, "in_search_response": False}},
+        )
+        fields = derived.get_fields()
+        assert fields["value"].in_read_response is False
+        assert fields["value"].in_search_response is False
+        assert "value" not in derived.get_rest_models().read_response.model_fields
+        assert "value" not in derived.get_rest_models().search_response.model_fields
+        # Unmentioned flags keep the inner's value (the merge, not a replacement).
+        assert fields["value"].in_create_request is True
+
+    def test_derive_dto_keeps_unmentioned_annotated_fields_intact(self) -> None:
+        derived = derive_dto(
+            AnnotatedDTO,
+            field_overrides={"description": {"in_read_response": False}},
+        )
+        # The convention-generated ``uuid4`` factory survives (conventions do
+        # not re-run) and the untouched optional field keeps its annotation.
+        assert derived.get_fields()["id"].default_factory_for_create is uuid4
+        assert "description" not in derived.get_rest_models().read_response.model_fields
+        assert derived.get_fields()["value"].in_read_response is True
+
+    def test_derive_dto_carries_class_metadata(self) -> None:
+        derived = derive_dto(AnnotatedDTO, field_overrides={"value": {"in_read_response": False}})
+        assert derived.metadata == {"collection": "annotated"}
+
+    def test_an_annotated_view_narrows_the_query_surface(self) -> None:
+        inner = MongoResource(AnnotatedDTO, client=AsyncEmbeddedClient(), path="annotated")
+        view = ResourceView(
+            inner,
+            exposed_field_overrides={
+                "value": {"in_read_response": False, "in_search_response": False}
+            },
+        )
+        assert "value" not in view.get_rest_models().read_response.model_fields
+        assert "value" not in view.get_queryable_fields()
+        assert "value" not in view.get_sortable_fields()
+        assert "value" not in view.get_filter_operators()
+        with pytest.raises(InvalidInputError):
+            view.resolve_sort_order("value", False)
+        # A still-exposed field sorts normally.
+        order = view.resolve_sort_order("description", True)
+        assert order == AttrSortOrder(attribute="description", descending=True)
 
 
 # ---------------------------------------------------------------------------

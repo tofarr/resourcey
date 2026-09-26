@@ -607,16 +607,25 @@ def derive_dto(
     the requested changes. This is the mechanism behind a ``ResourceView``'s
     ``exposed_field_overrides``.
 
+    The stored annotation is reduced to its base type before the merged
+    ``DtoField`` is attached. A declaration in the ``Annotated[T, DtoField(...)]``
+    form stores a ``DtoField`` *inside* its annotation, and Pydantic flattens
+    nested ``Annotated``, so wrapping that annotation directly would leave the
+    source field's ``DtoField`` ahead of the merged one and :func:`_config_from`
+    (which takes the first) would silently ignore every override. Reducing first
+    makes the merged field the only one.
+
     Args:
         dto: The declaration to derive from.
         field_overrides: ``{field_name: {DtoField attribute: value}}``. A partial
             mapping: unmentioned attributes keep the source field's value, so an
-            override can never silently re-widen a flag the source had turned
-            off (a full ``DtoField(...)`` replacement would reset the rest to
-            their ``True`` defaults). An unknown field name raises ``KeyError``.
+            override cannot *silently* re-widen a flag the source had turned off
+            (a full ``DtoField(...)`` replacement would reset the rest to their
+            ``True`` defaults). An unknown field name raises ``KeyError``.
         name: The derived class name (defaults to ``<dto name>View``).
 
-    The identifier (``id_field_name``) is carried across unchanged.
+    The identifier (``id_field_name``) and class ``metadata`` are carried across
+    unchanged.
     """
     overrides = field_overrides or {}
     resolved = dto.__dto_fields__
@@ -626,13 +635,20 @@ def derive_dto(
     namespace: dict[str, Any] = {
         "__annotations__": {
             field_name: Annotated[
-                annotation, config.with_overrides(**overrides.get(field_name, {}))
+                _strip_annotated(annotation),
+                config.with_overrides(**overrides.get(field_name, {})),
             ]
             for field_name, (annotation, config) in resolved.items()
         },
         "__module__": dto.__module__,
     }
-    return type(name or f"{dto.__name__}View", (DTO,), namespace, id_field_name=dto.id_field_name)
+    return type(
+        name or f"{dto.__name__}View",
+        (DTO,),
+        namespace,
+        metadata=dict(dto.metadata),
+        id_field_name=dto.id_field_name,
+    )
 
 
 def apply_operation_defaults(

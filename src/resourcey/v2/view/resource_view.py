@@ -148,6 +148,7 @@ class ResourceView(Resource[T, K], Generic[T, K]):
 
         inner_dto = _dto_declaration(resource)
         self._validate_field_overrides(inner_dto)
+        self._validate_no_rewidening(inner_dto)
         self._dto = (
             derive_dto(inner_dto, field_overrides=self._field_overrides)
             if self._field_overrides
@@ -184,6 +185,28 @@ class ResourceView(Resource[T, K], Generic[T, K]):
                 f"{type(self).__name__} cannot override the identifier field "
                 f"{inner_dto.id_field_name!r}: the transport needs a readable identifier."
             )
+
+    def _validate_no_rewidening(self, inner_dto: type[DTO]) -> None:
+        """Reject an override that turns an inner-``False`` projection flag back on.
+
+        A view **narrows**, never widens — the same rule ``exposed_actions``
+        enforces. ``derive_dto`` merges an override onto the inner field, so an
+        override naming a flag the inner had turned off would otherwise
+        re-expose a field (or operation) the inner deliberately hid.
+        """
+        inner_fields = inner_dto.get_fields()
+        for field_name, override in self._field_overrides.items():
+            inner_field = inner_fields[field_name]
+            for flag, value in override.items():
+                if (
+                    flag.startswith("in_")
+                    and value is True
+                    and getattr(inner_field, flag, True) is False
+                ):
+                    raise ResourceyConfigError(
+                        f"{type(self).__name__} cannot re-widen {field_name!r}.{flag}: the inner "
+                        "field turned it off and a view narrows, never widens."
+                    )
 
     def _validate_declared_filter(self) -> None:
         """Fail loudly when field hiding meets a declared object-filter class.
