@@ -294,8 +294,9 @@ def normalize_actions(actions: frozenset[Action]) -> frozenset[Action]:
     a surface by removing, say, only ``read`` or only ``update`` gets a coherent
     action set without having to remember to also remove the batch action.
 
-    Idempotent, so it is safe to apply at every layer that narrows actions
-    (the manifest and a ``ResourceView``).
+    Idempotent, so it is safe to apply at every layer that consumes a narrowed
+    action set (the route builder, the backends' ``batch_edit``, and a
+    ``ResourceView``).
     """
     normalized = set(actions)
     for batch_action, prerequisites in _BATCH_PREREQUISITES.items():
