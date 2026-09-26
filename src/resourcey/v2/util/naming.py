@@ -38,6 +38,15 @@ def camel_to_kebab(name: str) -> str:
     return _CAMEL_BOUNDARY.sub("-", name)
 
 
+def camel_to_snake(name: str) -> str:
+    """Insert ``_`` boundaries into a CamelCase / PascalCase identifier.
+
+    The same boundaries as :func:`camel_to_kebab`, with ``_`` as the separator.
+    Does not lowercase; the caller applies case as needed.
+    """
+    return _CAMEL_BOUNDARY.sub("_", name)
+
+
 def pluralize(name: str) -> str:
     """Append a simple English plural suffix to ``name``, preserving its case.
 

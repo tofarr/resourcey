@@ -37,8 +37,12 @@ until the first release.
   in the manifest's `managers=`, `create_app`, a declared `BaseObjectFilter`,
   `APP_*` config, and Alembic driven directly against `Base.metadata` (there is
   no `resourcey migrate` in `v2` — that CLI reads the `v1` `ResourceyBase` /
-  `FrameworkConfig.manifest`). `v2` does no `.env` loading, so its run/debug
-  commands pass `uvicorn --env-file .env` / `uv run --env-file .env`.
+  `FrameworkConfig.manifest`). `02_mongodb` is its **`v2` Mongo counterpart**
+  (issue #80): DTO-first `MongoResource` over an embedded (`mongomock`) client,
+  a shared `MongoClientManager` in the manifest's `managers=`, `create_app`, a
+  declared `BaseObjectFilter`, and no migration step (the schema is implicit and
+  `migrate_document` is the opt-in hook). `v2` does no `.env` loading, so its
+  run/debug commands pass `uvicorn --env-file .env` / `uv run --env-file .env`.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
@@ -93,12 +97,13 @@ moving to a digest column is the hardening step when that lands.
 
 ### Storage backends and the shared paging base
 
-Three backends implement the same action contract: `SqlResource`/`SqlService`,
-`MongoResource`/`MongoService`, and `ListResource`/`ListService`. Storage-agnostic
-paging/sort/cursor/cache logic lives in
-`src/resourcey/resource/paged_service.py` (`PagedService`) — a new backend
-subclasses it and implements only its data access, never a copy of the cursor
-or sort-validation code.
+*(The `v1` packages.)* Three backends implement the same action contract:
+`SqlResource`/`SqlService`, `MongoResource`/`MongoService`, and
+`ListResource`/`ListService`. Storage-agnostic paging/sort/cursor/cache logic
+lives in `src/resourcey/resource/paged_service.py` (`PagedService`) — a new
+backend subclasses it and implements only its data access, never a copy of the
+cursor or sort-validation code. The `v2` counterparts are `v2/sql` (see below)
+and `v2/mongo` (issue #80); `v2` has no `ListResource` yet.
 
 `ListResource` is **read-only**: it narrows `actions` to
 `read`/`search`/`count`/`batch_read` so no write route is ever mounted. It is
@@ -541,18 +546,99 @@ the freshness directive. `specs/cache_defaults.qnt` pins the selection and the
 Only the projected REST representation is hashed, so the ETag validates exactly
 the bytes sent.
 
+### `v2/mongo` — the MongoDB backend (issue #80)
+
+`src/resourcey/v2/mongo/` is the non-SQL proof of the `v2` seams, laid out like
+`sql` (flat files by role, no `__init__.py`) and sitting at the same layer rank.
+The workflow is **DTO-first**: Mongo has no schema of record, so the developer
+declares a `DTO` and hands it to the resource —
+`MongoResource(ThreadDTO, name="main")`. The DTO declaration drives the six REST
+models, the identifier, and the query surface (the read model *is* the filter /
+sort surface — the same security gate `SqlResource` uses). A bare `id: UUID`
+gets a server-side `uuid4` create default from the `v2/core` conventions, so
+`v1`'s `_make_id_optional` hack is gone, and `created_at` / `updated_at` are
+framework-owned.
+
+* `mongo_resource.py` — `MongoResource` (a `Resource` subclass) serves a DTO
+  declaration. The session source mirrors `SqlResource`'s escape hatches: an
+  explicit `client=` (or a `ctx`-preseeded client) wins; otherwise the collection
+  is resolved from `client_manager` by `name`, defaulting to the process-wide
+  `get_mongo_client_manager()` and its first connection. Because resolving a
+  connection is async, `get_service` is async. `get_resource_path` / `get_id_field`
+  derive from the DTO, and `get_queryable_fields` / `get_filter_operators` /
+  `get_sortable_fields` derive from the read model (a field projected away is
+  neither filterable nor sortable). `get_search_filter_type()` /
+  `get_sort_order_type()` return `None` (derive) by default, and
+  `resolve_sort_order(sort, desc)` validates against the sortable surface
+  (`InvalidInputError` → 400). `DefaultCacheStrategyMixin` supplies the shared
+  cache default. Indexes are opt-in (`get_indexes()` / `ensure_indexes()`, run
+  from `__aenter__`) and `migrate_document(doc) -> doc` is the manual
+  migration-on-read hook (default no-op) invoked on every read path. `__aexit__`
+  drops the cached collection (the manager closes its clients on exit), so a
+  re-entered lifecycle re-resolves from the rebuilt client rather than handing
+  out a collection bound to the closed one.
+* `mongo_service.py` — `MongoService` implements the eight actions against a
+  duck-typed async collection (`insert_one`, `find_one`, `find`,
+  `find_one_and_update`, `delete_one`, `count_documents`, `create_index`) so
+  `mongomock` substitutes for `motor`. `create` / `update` apply the DTO's
+  create / update defaults (through the shared `apply_operation_defaults`), a
+  UUID is stored as its string under `_id`, and a miss raises `NotFoundError`.
+  A duplicate key (`insert_one` raising pymongo's `DuplicateKeyError`) is
+  translated to `ConflictError` — the storage-neutral 409 — so the transport
+  maps it without importing the driver. `search` pushes the filter into `find`,
+  appends `_id` ascending as the stable tie-breaker, and pages with the shared
+  keyset cursor (`limit + 1` to detect the next page). `batch_edit` dispatches
+  over the `Create` / `Update` / `Delete` union, refusing create / delete when
+  the resource does not declare them.
+* `mongo_filter_converter.py` / `mongo_sort_converter.py` — three registries
+  (logical / attribute / operator) and a type-keyed sort registry, each with an
+  import-time completeness assert, mirroring the SQL converters. Every operator
+  registers a `(positive, negated)` pair whose negated form reproduces the
+  in-memory `matches` complement on absent / null fields (`$ne` alone drops
+  absent documents, which `EqFilter` on `None` matches). Pushdown is
+  all-or-nothing: an unconvertible node raises `UnsupportedFilterError` unless
+  the resource sets `allow_filter_iteration`. The sort context carries only
+  **sortable** fields, and Mongo's fixed NULL ordering (`NULLS FIRST` ascending,
+  `NULLS LAST` descending) must agree with the in-memory `compare` and the
+  keyset predicate.
+  The match-nothing sentinel is `{"$nor": [{}]}` (never `{"_id": None}`, which
+  would match a document whose client-supplied nullable identifier is null).
+* `mongo_client.py` / `mongo_config.py` / `embedded.py` — `MongoClientManager`
+  is the `SqlSessionManager` analogue: it hands out a client/database per
+  connection, built lazily, disposed on `__aexit__`, and entered through
+  `Manifest(managers=[...])`. A lookup with no name uses the first connection;
+  an unknown name or an empty list raises `ResourceyConfigError`; using it
+  un-entered raises. `get_mongo_client_manager()` /
+  `clear_mongo_client_manager_cache()` are the process-wide accessor and its
+  test-only reset. `MongoConfig` (`BaseConfig`) parses
+  `APP_MONGO_CONNECTIONS_<n>_NAME` / `_URL` / `_PASSWORD` (field
+  `mongo_connections`, with `connections` as a read-only alias, because the env
+  parser derives the variable from the field name); `MongoConnectionConfig` is a
+  plain nested `BaseModel` with `is_embedded` / `mongo_database_name` /
+  `mongo_password`. Blank or duplicate names are rejected at config build.
+  `embedded://<db>` (and the bare `embedded` marker) builds the in-process
+  `AsyncEmbeddedClient` over `mongomock`; a `mongodb://` URL builds a real
+  `motor` client, with the password passed as a client kwarg **only when set**
+  (`password=None` would clear a URL-embedded password).
+
+`mongodb = ["motor>=3.6"]` stays the only place `motor` is required:
+`v2/mongo` is import-safe without it, and building a real client without it
+fails with an actionable `ImportError` naming `resourcey[mongodb]`. `mongomock`
+/ `pymongo` remain dev-only for the embedded path and tests.
+
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and
-`v2/http` are **parallel** to the existing packages — nothing existing is
-removed by them and they are not a refactor. The old `v1` packages/modules (and the old
-`resourcey.encryption`) stay in place until a follow-up removal. A test asserts
-that no module under `v2/` makes a **runtime** import of any `resourcey` code
-*outside* `v2/` (a static AST walk covering every v2 layer in one rule),
-`if TYPE_CHECKING:` imports still allowed. A second test pins the **layer
-ranks** `util < core < {sql, http, config, cache, encryption}`: no module
-imports a strictly-higher project layer at runtime. `v2/sql` implements
-whatever small helpers it needs locally rather than reaching for
+`v2/core`, `v2/sql`, `v2/mongo`, `v2/encryption`, `v2/util`, `v2/config`,
+`v2/cache`, and `v2/http` are **parallel** to the existing packages — nothing
+existing is removed by them and they are not a refactor. The old `v1`
+packages/modules (and the old `resourcey.encryption`) stay in place until a
+follow-up removal. A test asserts that no module under `v2/` makes a **runtime**
+import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
+v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
+pins the **layer ranks**
+`util < core < {sql, mongo, http, config, cache, encryption}`: no module imports
+a strictly-higher project layer at runtime. `v2/sql` and `v2/mongo` implement
+whatever small helpers they need locally rather than reaching for
 `resourcey.util`.
 
 ### `v2/util` and `v2/config` — the config rung
@@ -565,15 +651,25 @@ here by issue #86). They are copies, not moves — v1 `resourcey/util/` is
 untouched until it is removed. `v2/util` imports **no project package** at all
 (not even `v2/core`), so the layer ranks are a clean
 
-    util < core < {sql, http, config, cache, encryption}
+    util < core < {sql, mongo, http, config, cache, encryption}
 
 and `v2/core` may import `v2/util` — the dependency runs one way.
 
+`src/resourcey/v2/util/cursor.py` (issue #80) is the storage-agnostic half of
+the pagination cursor: the tamper-proof, type-tagged codec
+(`encode_cursor` / `decode_cursor` over the JWE from `v2/encryption`) that both
+`v2/sql` and `v2/mongo` share. `keyset_predicate` — the ``WHERE`` clause — stays
+in `v2/sql/cursor.py` because it imports SQLAlchemy, and that module re-exports
+the codec so existing `resourcey.v2.sql.cursor` importers keep working; `v2/mongo`
+builds its own Mongo keyset query.
+
 `src/resourcey/v2/util/naming.py` holds the shared name helpers `camel_to_kebab`
-(inserts `-` boundaries without lowercasing) and `pluralize` (a small `s` / `es`
-rule preserving case), public and reusable by any backend — e.g. `SqlResource`
-composes them for its default `get_resource_path`. They were formerly private
-to `v2/core/resource.py`.
+(inserts `-` boundaries without lowercasing), `camel_to_snake` (the same
+boundaries with `_`), and `pluralize` (a small `s` / `es` rule preserving case),
+public and reusable by any backend — e.g. `SqlResource` composes
+`camel_to_kebab` + `pluralize` for its default `get_resource_path` and
+`MongoResource` composes `camel_to_snake` + `pluralize` for its collection name.
+They were formerly private to `v2/core/resource.py`.
 
 `src/resourcey/v2/util/singleton.py` (issue #95) is a second, non-vendored
 leaf: a small `Singleton` mixin for the process-wide pieces the framework
@@ -630,7 +726,10 @@ with **different** types, while a same-name/same-type redeclaration is allowed;
 `ClassVar` entries (`LazyField`) are not fields.
 `ResourceyConfigError` (with `ResourceyError`) lives in `v2/core/errors.py` and
 covers build/parse failures only; `ServiceError` / `NotFoundError` stay in
-`v2/core/service.py`.
+`v2/core/service.py`. `InvalidInputError` / `UnsupportedFilterError` /
+`ConflictError` also live there — the storage-neutral errors a backend raises and
+the transport maps (`ConflictError` is what a backend's duplicate-key failure
+becomes, so the 409 mapping needs no driver import).
 
 The `v2` isolation test is widened to cover **all** of `v2/`: no module under
 `v2/` may make a runtime import of any `resourcey` code outside `v2/`, with no

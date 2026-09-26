@@ -52,7 +52,7 @@ from sqlalchemy.exc import IntegrityError
 
 from resourcey.v2.cache.cache_header import CacheHeader
 from resourcey.v2.core.dto import RestModels, request_to_dto
-from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
+from resourcey.v2.core.errors import ConflictError, InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import (
     DEFAULT_LIMIT,
@@ -819,7 +819,7 @@ def register_error_handlers(app: FastAPI) -> None:
     * ``NotFoundError`` -> 404 ``not_found``
     * ``InvalidInputError`` -> 400 ``invalid_input``
     * ``UnsupportedFilterError`` -> 501 ``unsupported_filter``
-    * ``IntegrityError`` -> 409 ``conflict``
+    * ``ConflictError`` / ``IntegrityError`` -> 409 ``conflict``
     * ``ServiceError`` -> 500 ``internal_error``
     * Pydantic validation failures keep FastAPI's 422 (its default handler).
 
@@ -838,6 +838,10 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(UnsupportedFilterError)
     async def _unsupported_filter(_: Request, exc: UnsupportedFilterError) -> JSONResponse:
         return _error_response("unsupported_filter", str(exc), status.HTTP_501_NOT_IMPLEMENTED)
+
+    @app.exception_handler(ConflictError)
+    async def _conflict_error(_: Request, exc: ConflictError) -> JSONResponse:
+        return _error_response("conflict", str(exc), status.HTTP_409_CONFLICT)
 
     @app.exception_handler(IntegrityError)
     async def _conflict(_: Request, exc: IntegrityError) -> JSONResponse:

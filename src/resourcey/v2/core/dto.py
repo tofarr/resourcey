@@ -590,6 +590,27 @@ def _build_update_request_model(
     return create_model(name, **model_fields)
 
 
+def apply_operation_defaults(
+    dto: type[DTO], data: dict[str, Any], operation: str
+) -> dict[str, Any]:
+    """Fill omitted fields of ``data`` from the DTO's defaults for ``operation``.
+
+    A field the storage owns has no default for the operation, so nothing is
+    supplied and the storage generates it; a field with a factory default is
+    filled by the application. An omitted field with no default for the
+    operation is left untouched (so an update with no update default preserves
+    the stored value). Shared by every backend's create / update path so the
+    default precedence is defined once.
+    """
+    for name, (_ann, config) in dto.__dto_fields__.items():
+        if name in data:
+            continue
+        default = config.resolve_default(operation)
+        if default is not MISSING:
+            data[name] = default
+    return data
+
+
 def request_to_dto(dto_model: type[BaseModel], payload: BaseModel) -> BaseModel:
     """Convert a request model instance into a DTO instance — the sanctioned hop.
 

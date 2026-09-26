@@ -25,6 +25,7 @@ from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from resourcey.v2.core.dto import apply_operation_defaults
 from resourcey.v2.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.v2.core.service import (
     DEFAULT_LIMIT,
@@ -400,21 +401,8 @@ class SqlService(Service[T, K]):
     # ------------------------------------------------------------------
 
     def _with_defaults(self, data: dict[str, Any], operation: str) -> dict[str, Any]:
-        """Fill omitted fields from the DTO's defaults for ``operation``.
-
-        A field the database owns has no create default, so nothing is passed
-        and the database generates it; a field with a factory default is filled
-        by the application. An omitted field with no default for the operation
-        is left untouched (so an update with no update default preserves the
-        stored value).
-        """
-        for name, (_ann, config) in self._resource._dto.__dto_fields__.items():
-            if name in data:
-                continue
-            default = config.resolve_default(operation)
-            if default is not MISSING:
-                data[name] = default
-        return data
+        """Fill omitted fields from the DTO's defaults for ``operation``."""
+        return apply_operation_defaults(self._resource._dto, data, operation)
 
     def _to_columns(self, data: dict[str, Any]) -> dict[str, Any]:
         """Rename DTO field (attribute) keys to their table column names."""

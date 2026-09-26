@@ -46,3 +46,14 @@ class UnsupportedFilterError(ResourceyError):
     in-memory iteration fallback) it raises this rather than silently scanning
     the whole table. The transport maps it to ``501``.
     """
+
+
+class ConflictError(ResourceyError):
+    """A write collided with an existing record (a duplicate key).
+
+    The storage-neutral counterpart of a driver's duplicate-key error: a backend
+    whose driver raises a type the transport does not know (e.g. pymongo's
+    ``DuplicateKeyError``) translates it here, so the envelope can map it to
+    ``409`` without importing that driver. ``v2/sql`` keeps letting SQLAlchemy's
+    ``IntegrityError`` reach the same ``409`` handler directly.
+    """

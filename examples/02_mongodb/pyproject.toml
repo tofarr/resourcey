@@ -45,6 +45,9 @@ resourcey = { path = "../..", editable = true }
 target-version = "py311"
 line-length = 100
 
+[tool.ruff.lint.isort]
+known-first-party = ["resourcey", "message_board"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

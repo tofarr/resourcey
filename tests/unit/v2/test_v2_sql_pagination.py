@@ -28,6 +28,7 @@ from resourcey.v2.encryption.encryption_service import (
 )
 from resourcey.v2.sql import cursor as cursor_module
 from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.v2.util import cursor as cursor_codec
 
 
 class PaginationBase(DeclarativeBase):
@@ -219,7 +220,7 @@ def test_cursor_round_trips_remaining_scalar_types(value):
 
 
 def test_deserialize_unknown_tag_falls_back_to_the_repr():
-    assert cursor_module._deserialize("unknown", "raw") == "raw"
+    assert cursor_codec._deserialize("unknown", "raw") == "raw"
 
 
 def test_keyset_predicate_compares_the_id_column():
