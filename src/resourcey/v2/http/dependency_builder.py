@@ -20,6 +20,17 @@ secured service) to the whole API without naming a resource.
   the service, and it is what makes this seam cover authentication as well as
   authorization.
 
+* An **authenticating** builder may additionally implement
+  :meth:`DependencyBuilder.get_principal_dependency` (issue #131). The transport
+  adds that dependency to each resource's routes as a lightweight
+  ``dependencies=[...]`` so the OpenAPI operation reflects the builder's
+  security scheme (an extra declared parameter — e.g. ``X-API-Key`` — would not,
+  because FastAPI omits dependency-injected parameters from the operation). It
+  does not change the route or service contract: the service dependency still
+  does the real work, and the principal dependency runs once per request (the
+  result is cached, so there is no double authentication). The default returns
+  ``None`` (no extra dependency).
+
 The builder is an **authorization** seam. It never decides *exposure*:
 :meth:`~resourcey.v2.core.resource.Resource.get_exposed_resource` is the sole
 gate on route registration, and
@@ -67,6 +78,18 @@ class DependencyBuilder(DiscriminatedUnionMixin, ABC):
         The returned callable is used directly as a FastAPI dependency, so it
         may declare any parameter FastAPI can wire.
         """
+
+    def get_principal_dependency(self) -> Callable[..., object] | None:
+        """An optional dependency the transport adds to every route's ``dependencies``.
+
+        An authenticating builder returns a FastAPI dependency here so the
+        builder's security scheme appears in the OpenAPI operation (issue #131);
+        the default returns ``None``. It is added as a ``dependencies=[...]``
+        entry, so it guards the route without becoming a declared parameter; the
+        real service work stays in :meth:`get_service_dependency`, and the
+        authenticated result is cached per request (no double authentication).
+        """
+        return None
 
 
 class DefaultDependencyBuilder(DependencyBuilder):

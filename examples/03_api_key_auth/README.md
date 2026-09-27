@@ -14,8 +14,8 @@ every resource from one object.
 
 | Concern | Where | Notes |
 | ------- | ----- | ----- |
-| API-key auth | `resourcey.v2.auth.auth_api_key.ApiKeyDependencyBuilder` | Reads accepted keys from config; no users, no DB, no sessions. |
-| One-object posture | `api_key_auth/app.py` | The builder is passed to `create_app(..., dependency_builder=...)`, so it secures every resource. |
+| API-key auth | `resourcey.v2.auth.auth_api_key.ApiKeyAuthenticator` | Reads accepted keys from config; no users, no DB, no sessions. |
+| One-object posture | `api_key_auth/app.py` | An `AuthorizedDependencyBuilder` wraps the authenticator and is passed to `create_app(..., dependency_builder=...)`, so it secures every resource. |
 | Key rotation | `APP_API_KEYS_*` | A list: add the new key alongside the old, deploy, then remove the old. |
 | Fail-closed | builder default | An empty key list denies every request with `401`. |
 | Digest at rest | `v2/auth` | The key is hashed on load; the served entry holds only the SHA-256 digest. |
@@ -123,7 +123,9 @@ The whole posture is one object and one argument:
 
 ```python
 key_inner = config_api_key_resource(ApiKeysConfig.get_instance())
-builder = ApiKeyDependencyBuilder(key_resource=key_inner)
+builder = AuthorizedDependencyBuilder(
+    authenticator=ApiKeyAuthenticator(key_resource=key_inner)
+)
 manifest = Manifest(resources=[..., config_api_key_view(key_inner)], managers=[manager])
 app = create_app(manifest, dependency_builder=builder)
 ```
@@ -177,10 +179,10 @@ general-purpose dependency:
 
 ```python
 from fastapi import APIRouter, Depends
-from resourcey.v2.auth.auth_api_key import ApiKeyDependencyBuilder
+from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
 
 router = APIRouter(
-    dependencies=[Depends(ApiKeyDependencyBuilder(key_resource=key_inner).api_key_dependency)]
+    dependencies=[Depends(ApiKeyAuthenticator(key_resource=key_inner).api_key_dependency)]
 )
 ```
 

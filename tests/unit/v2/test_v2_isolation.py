@@ -287,7 +287,9 @@ def test_the_auth_files_exist_without_an_init():
         "auth_authorized_dependency.py",
         "auth_authorized_service.py",
         "auth_config.py",
+        "auth_cookie.py",
         "auth_policy.py",
+        "auth_principal.py",
     }
     assert not (auth / "__init__.py").exists()
 

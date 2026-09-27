@@ -7,7 +7,7 @@ point *is* the precedence rule). Covered:
 
 * the serialization convention — redact by default, reveal under
   ``expose_secrets``, and encryption winning over exposure;
-* :class:`ApiKeyDependencyBuilder` against both key sources (DB-backed and
+* :class:`ApiKeyAuthenticator` against both key sources (DB-backed and
   config-list), correct / incorrect / absent keys, and fail-closed;
 * the digest-at-rest guarantee for both sources;
 * the one-time reveal (create only) and the query-surface gate.
@@ -16,7 +16,9 @@ point *is* the precedence rule). Covered:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, MutableMapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -29,7 +31,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from resourcey.v2.auth.auth_api_key import (
     API_KEY_CHALLENGE,
     API_KEY_HEADER_NAME,
-    ApiKeyDependencyBuilder,
+    ApiKeyAuthenticator,
 )
 from resourcey.v2.auth.auth_api_key_resource import (
     ApiKey,
@@ -43,7 +45,9 @@ from resourcey.v2.auth.auth_api_key_resource import (
     stored_api_key_resource,
     stored_api_key_view,
 )
+from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.v2.auth.auth_principal import PrincipalKind
 from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.http.app import create_app
@@ -206,7 +210,7 @@ class _RecordingList(ListResource[Widget, int]):
 
 
 @pytest_asyncio.fixture
-async def db_app() -> AsyncIterator[tuple[AsyncClient, ApiKeyDependencyBuilder, Any]]:
+async def db_app() -> AsyncIterator[tuple[AsyncClient, ApiKeyAuthenticator, Any]]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as conn:
@@ -216,8 +220,10 @@ async def db_app() -> AsyncIterator[tuple[AsyncClient, ApiKeyDependencyBuilder, 
     view = stored_api_key_view(inner)
     widgets = ListResource([Widget(id=1, label="a")], path="widgets")
     manifest = Manifest(resources=[view, widgets])
-    builder = ApiKeyDependencyBuilder(key_resource=inner)
-    app = create_app(manifest, dependency_builder=builder)
+    builder = ApiKeyAuthenticator(key_resource=inner)
+    app = create_app(
+        manifest, dependency_builder=AuthorizedDependencyBuilder(authenticator=builder)
+    )
 
     async with manifest:
         transport = ASGITransport(app=app)
@@ -263,13 +269,13 @@ async def test_bearer_ignored_when_header_present(db_app):
 
 
 async def test_fail_closed_without_a_key_resource():
-    builder = ApiKeyDependencyBuilder(key_resource=None)
-    assert await builder.is_valid_api_key("anything") is False
+    builder = ApiKeyAuthenticator(key_resource=None)
+    assert await builder.lookup_api_key("anything") is None
 
 
 async def test_key_check_runs_before_target_storage():
     _RecordingList.opened = False
-    builder = ApiKeyDependencyBuilder(key_resource=None)
+    builder = AuthorizedDependencyBuilder(authenticator=ApiKeyAuthenticator(key_resource=None))
     dependency = builder.get_service_dependency(_RecordingList([Widget(id=1, label="a")]))
     app = FastAPI()
 
@@ -402,13 +408,63 @@ async def test_stored_service_find_by_key_round_trips(db_app):
         assert await service.find_by_key(hash_api_key("other")) is None
 
 
+async def _set_row(inner: Any, raw: str, **values: Any) -> None:
+    """Update the stored ``ApiKey`` row for ``raw`` (the credentials DB)."""
+    async with inner._session_factory() as session:
+        row = (
+            await session.execute(select(ApiKey).where(ApiKey.key == hash_api_key(raw)))
+        ).scalar_one()
+        for name, value in values.items():
+            setattr(row, name, value)
+        await session.commit()
+
+
+async def test_inactive_key_does_not_authenticate(db_app):
+    client, builder, inner = db_app
+    raw = await _mint(inner, "ci")
+    assert (await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})).status_code == 200
+    await _set_row(inner, raw, active=False)
+    response = await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})
+    assert response.status_code == 401
+    assert await builder.lookup_api_key(raw) is None
+
+
+async def test_expired_key_does_not_authenticate(db_app):
+    client, _builder, inner = db_app
+    raw = await _mint(inner, "ci")
+    await _set_row(inner, raw, expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    response = await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})
+    assert response.status_code == 401
+
+
+async def test_future_expires_at_still_authenticates(db_app):
+    client, _builder, inner = db_app
+    raw = await _mint(inner, "ci")
+    await _set_row(inner, raw, expires_at=datetime.now(UTC) + timedelta(days=1))
+    response = await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})
+    assert response.status_code == 200
+
+
+async def test_owned_db_key_resolves_to_a_user_principal(db_app):
+    client, builder, inner = db_app
+    raw = await _mint(inner, "ci")
+    owner = uuid4()
+    await _set_row(inner, raw, user_id=owner)
+    result = await builder.lookup_api_key(raw)
+    assert result is not None
+    principal = builder._principal_for(result)
+    assert principal.id == owner
+    assert principal.kind is PrincipalKind.USER
+    assert (await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})).status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # The config-list source
 # ---------------------------------------------------------------------------
 
 
 @pytest_asyncio.fixture
-async def config_app() -> AsyncIterator[tuple[AsyncClient, ApiKeyDependencyBuilder]]:
+async def config_app() -> AsyncIterator[tuple[AsyncClient, ApiKeyAuthenticator]]:
     cfg = ApiKeysConfig(
         api_keys=[
             ApiKeyConfig(id="k1", name="one", key=SecretStr("secret-one")),
@@ -419,8 +475,10 @@ async def config_app() -> AsyncIterator[tuple[AsyncClient, ApiKeyDependencyBuild
     view = config_api_key_view(inner)
     widgets = ListResource([Widget(id=1, label="a")], path="widgets")
     manifest = Manifest(resources=[view, widgets])
-    builder = ApiKeyDependencyBuilder(key_resource=inner)
-    app = create_app(manifest, dependency_builder=builder)
+    builder = ApiKeyAuthenticator(key_resource=inner)
+    app = create_app(
+        manifest, dependency_builder=AuthorizedDependencyBuilder(authenticator=builder)
+    )
     async with manifest:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:

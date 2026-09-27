@@ -30,8 +30,9 @@ from api_key_auth.models import Base, Message, Thread
 from resourcey.v2.auth.auth_api_key import (
     API_KEY_CHALLENGE,
     API_KEY_HEADER_NAME,
-    ApiKeyDependencyBuilder,
+    ApiKeyAuthenticator,
 )
+from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
 from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
@@ -174,7 +175,8 @@ async def test_empty_key_list_denies_everything() -> None:
 def test_build_auth_wires_the_api_key_builder() -> None:
     """The factory always builds the API-key authenticator."""
     builder, _view = build_auth(_keys(_API_KEY))
-    assert isinstance(builder, ApiKeyDependencyBuilder)
+    assert isinstance(builder, AuthorizedDependencyBuilder)
+    assert isinstance(builder.authenticator, ApiKeyAuthenticator)
 
 
 def test_posture_guard_rejects_a_non_api_key_builder() -> None:

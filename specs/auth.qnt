@@ -1,9 +1,14 @@
-// auth.qnt — formal spec for the API-key authenticator (issue #118).
+// auth.qnt — formal spec for authentication (issues #118 / #131).
 //
-// ApiKeyDependencyBuilder composes a key check with a resource's own
-// per-request service dependency. The check runs first, over a fresh
-// call-scoped context, so it owns the key storage it opens and can never adopt
-// (or hand off to) the target resource's session. The key is validated by
+// The principal pipeline (issue #131) classifies one request three ways —
+// absent / invalid / authenticated — and derives both the lenient and the
+// strict principal dependency from that single result, so the credential tier
+// and the requirement tier stay one code path.
+//
+// ApiKeyAuthenticator is one method on that pipeline. Its key check composes
+// with a resource's own per-request service dependency and runs first, over a
+// fresh call-scoped context, so it owns the key storage it opens and can never
+// adopt (or hand off to) the target resource's session. The key is validated by
 // hashing the presented value and searching for the digest; the presented
 // plaintext is never compared to a stored plaintext, because none is stored.
 //
@@ -18,6 +23,12 @@
 //     resource's service is built, for every request.
 //   - freshContext: the key service is opened over its own context, never the
 //     request's, so ownership of the two storages is never conflated.
+//   - strictGuardsEveryUnauthenticated / lenientAdmitsAnonymous /
+//     invalidIsNeverAnonymous: the strict dependency 401s unless authenticated;
+//     the lenient one admits only *absent* credentials (invalid is still 401);
+//     a presented-but-bad credential is never treated as anonymous.
+//   - compositeFirstWins: a composite authenticator's first grant wins, an
+//     invalid result outranks absent, and all-absent is absent.
 
 module auth {
   // A stored key set, reduced to the digests (integers stand in for SHA-256
@@ -151,6 +162,110 @@ module auth {
       assert(validGrantsAccess),
       assert(checkPrecedesTargetStorage),
       assert(freshContext),
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // The principal pipeline (issue #131)
+  // ------------------------------------------------------------------
+  //
+  // Authentication classifies one request three ways: absent (no credential),
+  // invalid (credential presented but not accepted), authenticated (a
+  // principal). A single classification derives both dependency tiers -- a
+  // lenient one (anonymous on absent, 401 on invalid) and a strict one (401
+  // unless authenticated) -- so the credential tier and the requirement tier
+  // stay one code path.
+
+  type AuthClass = Absent | Invalid | Authenticated
+
+  pure def classify(presented: bool, valid: bool): AuthClass =
+    if (not(presented)) Absent
+    else if (valid) Authenticated
+    else Invalid
+
+  // The strict dependency's outcome: 401 unless authenticated.
+  pure def strict(cls: AuthClass): Outcome =
+    if (cls == Authenticated) Granted else unauthorized
+
+  // The lenient dependency's outcome: anonymous is allowed, invalid is 401.
+  pure def lenient(cls: AuthClass): Outcome =
+    if (cls == Invalid) unauthorized else Granted
+
+  // A composite authenticator: first method that authenticates wins; if none
+  // does but a credential was seen, Invalid; else Absent.
+  pure def combine(results: Set[AuthClass]): AuthClass =
+    if (results.contains(Authenticated)) Authenticated
+    else if (results.contains(Invalid)) Invalid
+    else Absent
+
+  pure def strictGuardsEveryUnauthenticated: bool =
+    all {
+      strict(Absent) == unauthorized,
+      strict(Invalid) == unauthorized,
+      strict(Authenticated) == Granted,
+    }
+
+  pure def lenientAdmitsAnonymous: bool =
+    all {
+      lenient(Absent) == Granted,
+      lenient(Invalid) == unauthorized,
+      lenient(Authenticated) == Granted,
+    }
+
+  pure def invalidIsNeverAnonymous: bool =
+    // A presented-but-bad credential is rejected under both tiers, so it can
+    // never be silently treated as anonymous.
+    all {
+      strict(Invalid) == unauthorized,
+      lenient(Invalid) == unauthorized,
+    }
+
+  pure def compositeFirstWins: bool =
+    all {
+      combine(Set(Absent, Authenticated)) == Authenticated,
+      combine(Set(Authenticated, Invalid)) == Authenticated,
+      // An Invalid alongside a grant does not matter: the grant wins.
+      combine(Set(Invalid, Authenticated)) == Authenticated,
+    }
+
+  pure def compositeInvalidBeatsAbsent: bool =
+    combine(Set(Absent, Invalid)) == Invalid
+
+  pure def compositeAllAbsentIsAbsent: bool =
+    combine(Set(Absent)) == Absent
+
+  run thePipelineClassifiesThreeWays = {
+    all {
+      assert(classify(false, false) == Absent),
+      assert(classify(true, false) == Invalid),
+      assert(classify(true, true) == Authenticated),
+    }
+  }
+
+  run oneResultDerivesBothTiers = {
+    all {
+      assert(strictGuardsEveryUnauthenticated),
+      assert(lenientAdmitsAnonymous),
+      assert(invalidIsNeverAnonymous),
+    }
+  }
+
+  run theCompositeFollowsFirstWins = {
+    all {
+      assert(compositeFirstWins),
+      assert(compositeInvalidBeatsAbsent),
+      assert(compositeAllAbsentIsAbsent),
+    }
+  }
+
+  run principalPipelineInvariantsHold = {
+    all {
+      assert(strictGuardsEveryUnauthenticated),
+      assert(lenientAdmitsAnonymous),
+      assert(invalidIsNeverAnonymous),
+      assert(compositeFirstWins),
+      assert(compositeInvalidBeatsAbsent),
+      assert(compositeAllAbsentIsAbsent),
     }
   }
 }

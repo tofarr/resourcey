@@ -39,7 +39,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import DateTime, String
+from sqlalchemy import Boolean, DateTime, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.auth.auth_config import ApiKeysConfig
@@ -81,11 +81,13 @@ KEY_EXPOSED: dict[str, dict[str, Any]] = {
 }
 
 # The read-only variant: the key is hidden from every response and the query
-# surface. A read-only resource has no create route, so there is nothing to
-# reveal; leaving the create flags untouched is therefore inert, but an explicit
-# hide is clearer than relying on the action set.
+# surface, and ``principal_id`` (an internal principal binding, not part of the
+# public listing) is hidden too. A read-only resource has no create route, so
+# there is nothing to reveal; leaving the create flags untouched is therefore
+# inert, but an explicit hide is clearer than relying on the action set.
 KEY_QUERY_SURFACE_HIDDEN: dict[str, dict[str, Any]] = {
-    KEY_FIELD: {"in_read_response": False, "in_search_response": False}
+    KEY_FIELD: {"in_read_response": False, "in_search_response": False},
+    "principal_id": {"in_read_response": False, "in_search_response": False},
 }
 
 
@@ -159,6 +161,12 @@ class ApiKey(ApiKeyBase):
     key: Mapped[SecretStr] = mapped_column(
         "key_hash", String(_KEY_HASH_LENGTH), nullable=False, unique=True, index=True
     )
+    user_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -227,12 +235,14 @@ class ConfigApiKey(BaseModel):
 
     Only ``id`` / ``name`` are ever exposed; ``key`` holds the SHA-256 digest and
     is hidden by the read-hiding view, so it can be searched by the authenticator
-    but never read.
+    but never read. ``principal_id`` (an optional fixed principal for the key)
+    is carried so the authenticator can resolve it without a DB lookup.
     """
 
     id: str
     name: str | None = None
     key: SecretStr
+    principal_id: str | None = None
 
 
 def config_api_key_models(config: ApiKeysConfig) -> list[ConfigApiKey]:
@@ -246,6 +256,7 @@ def config_api_key_models(config: ApiKeysConfig) -> list[ConfigApiKey]:
             id=entry.id,
             name=entry.name,
             key=SecretStr(hash_api_key(entry.key.get_secret_value())),
+            principal_id=entry.principal_id,
         )
         for entry in config.api_keys
     ]
