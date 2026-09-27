@@ -359,8 +359,8 @@ def normalize_action(action: Action) -> Action:
     ``COUNT`` reuses the ``SEARCH`` permission, ``BATCH_READ`` reuses ``READ``,
     and ``BATCH_EDIT`` reuses ``UPDATE`` — the same equivalences
     :func:`normalize_actions` uses to prune a batch action whose singular action
-    is absent. A policy that does not reason about the derived members (e.g. one
-    that grants read-like actions only) branches on the normalised action;
+    is absent. A policy may instead list the derived members it grants
+    explicitly; either way the reduction agrees.
     ``CREATE`` / ``READ`` / ``UPDATE`` / ``DELETE`` / ``SEARCH`` are unchanged.
     """
     return _ACTION_EQUIVALENT.get(action, action)

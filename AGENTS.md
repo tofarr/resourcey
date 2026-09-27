@@ -113,7 +113,7 @@ lives beside the API-key code in **`src/resourcey/v2/auth/`**:
 * `auth_policy.py` — **`Policy`** (a `DiscriminatedUnionMixin`) reduces itself to
   a `SearchFilter` via `async def to_search_filter(user_id, action)`; built-ins
   **`AllowAll`** (`AllFilter`), **`DenyAll`** (`NoMatchFilter`), **`ReadOnly`**
-  (`AllFilter` for read/search/count, else `NoMatchFilter`). It is named
+  (`AllFilter` for read / search / count / batch_read, else `NoMatchFilter`). It is named
   `Policy`, not v1's `Permission`: a *permission* is the computed right, the
   *policy* is the rule that computes it (the project is pre-release, so clarity
   beats v1 compatibility; `specs/permissions.qnt` already calls the rule a
