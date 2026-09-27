@@ -105,6 +105,51 @@ disclosed exactly once, in the `201` create response, through the
 `specs/auth.qnt`. Selection is the explicit `dependency_builder=` argument on
 `create_app` / `add_to_app` (config-driven builder selection is a later rung).
 
+### `v2/auth` authorization (issue #127)
+
+Authorization (what a caller *may do*, as distinct from #118's authentication)
+lives beside the API-key code in **`src/resourcey/v2/auth/`**:
+
+* `auth_policy.py` — **`Policy`** (a `DiscriminatedUnionMixin`) reduces itself to
+  a `SearchFilter` via `async def to_search_filter(user_id, action)`; built-ins
+  **`AllowAll`** (`AllFilter`), **`DenyAll`** (`NoMatchFilter`), **`ReadOnly`**
+  (`AllFilter` for read/search/count, else `NoMatchFilter`). It is named
+  `Policy`, not v1's `Permission`: a *permission* is the computed right, the
+  *policy* is the rule that computes it (the project is pre-release, so clarity
+  beats v1 compatibility; `specs/permissions.qnt` already calls the rule a
+  `Policy`). The principal is an explicit argument to the reduction, not state
+  on the policy, so a `Policy` stays storable; `user_id` is `None` for now and
+  is the seam for the later users/groups/roles work. The built-in reductions use
+  the unparameterized `AllFilter()` / `NoMatchFilter()` leaves (the pydantic
+  parameterization `AllFilter[Any](...)` is a distinct class the SQL/Mongo
+  translation registries do not know).
+* `auth_authorized_service.py` — **`AuthorizedService`** wraps a resource's own
+  service and enforces the reduced filter per action, porting v1's
+  `SecuredService` semantics: a denied **create** raises `ForbiddenError` (403);
+  an out-of-scope **read** / **update** / **delete** raises `NotFoundError`
+  (404) so existence is not leaked; a denied **search** / **count** `and_`-and-pushes
+  the permission filter down and yields an empty page / `0` (never an error);
+  **batch_read** / **batch_edit** positions are `None`. It enters its inner
+  (honouring "whoever opens the storage owns its commit and close", and not
+  double-closing an inner it was handed already entered, as the dependency
+  opens it) and delegates `serialization_context()` so a one-time secret reveal
+  survives wrapping.
+* `auth_authorized_dependency.py` — **`AuthorizedDependencyBuilder`** (a
+  `DependencyBuilder`) **composes** #118's `ApiKeyDependencyBuilder`
+  (`api_key_dependency`) rather than re-implementing the key check; after it
+  passes, the resource service is opened over the request ctx and wrapped in an
+  entered `AuthorizedService`. `policy` defaults to `AllowAll`, so a valid key
+  grants full access exactly as #118 — setting `ReadOnly()` / `DenyAll()` is the
+  whole posture change. It is one policy per app, not a per-principal store.
+
+`ForbiddenError` and the singular `normalize_action` (`COUNT`→`SEARCH`,
+`BATCH_READ`→`READ`, `BATCH_EDIT`→`UPDATE`) live in `v2/core/service.py`;
+`ForbiddenError` is mapped to `403 forbidden` in `v2/http/routes.py`'s error
+envelope. The three built-ins are principal-independent, so caching (#92) is
+unaffected; a future row-scoping policy must force a caller-private
+`Cache-Control`, since an `ETag` alone cannot stop a shared cache serving one
+principal's slice to another. See `specs/permissions.qnt`.
+
 ### Storage backends and the shared paging base
 
 The `v1` package `resourcey.resource` ships only the SQL backend,

@@ -88,6 +88,21 @@ class NotFoundError(Exception):
         self.id = id
 
 
+class ForbiddenError(Exception):
+    """An attempted action is not permitted (the transport layer maps it to 403).
+
+    Authorization raises this for an action with no permitted scope — a denied
+    ``create`` is the clear case. By-id actions deliberately raise
+    :class:`NotFoundError` instead, so an out-of-scope id is indistinguishable
+    from an absent one and existence does not leak.
+    """
+
+    def __init__(self, resource_name: str, action: str) -> None:
+        super().__init__(f"{action} is not permitted on {resource_name!r}")
+        self.resource_name = resource_name
+        self.action = action
+
+
 class CacheStrategy:
     """A cache policy placeholder: the ``v2`` core names the concept only.
 
@@ -324,3 +339,28 @@ def normalize_actions(actions: frozenset[Action]) -> frozenset[Action]:
         if batch_action in normalized and normalized.isdisjoint(prerequisites):
             normalized.discard(batch_action)
     return frozenset(normalized)
+
+
+# The singular action a derived action reduces to for a policy that reasons only
+# about the CRUD surface: counting is not a separate privilege from searching,
+# and batching is not a separate privilege from the action it batches. A venue
+# that *does* distinguish them (a wrapper's action set, a view) uses the actions
+# as declared; this is for the policy reduction alone.
+_ACTION_EQUIVALENT: dict[Action, Action] = {
+    Action.COUNT: Action.SEARCH,
+    Action.BATCH_READ: Action.READ,
+    Action.BATCH_EDIT: Action.UPDATE,
+}
+
+
+def normalize_action(action: Action) -> Action:
+    """Reduce ``COUNT`` / ``BATCH_*`` to their closest singular CRUD action.
+
+    ``COUNT`` reuses the ``SEARCH`` permission, ``BATCH_READ`` reuses ``READ``,
+    and ``BATCH_EDIT`` reuses ``UPDATE`` — the same equivalences
+    :func:`normalize_actions` uses to prune a batch action whose singular action
+    is absent. A policy that does not reason about the derived members (e.g. one
+    that grants read-like actions only) branches on the normalised action;
+    ``CREATE`` / ``READ`` / ``UPDATE`` / ``DELETE`` / ``SEARCH`` are unchanged.
+    """
+    return _ACTION_EQUIVALENT.get(action, action)

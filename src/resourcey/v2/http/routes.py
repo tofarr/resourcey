@@ -59,6 +59,7 @@ from resourcey.v2.core.service import (
     Action,
     Create,
     Delete,
+    ForbiddenError,
     NotFoundError,
     Service,
     ServiceError,
@@ -861,6 +862,7 @@ def register_error_handlers(app: FastAPI) -> None:
     Maps the exceptions ``v2`` has today to the documented status + code:
 
     * ``NotFoundError`` -> 404 ``not_found``
+    * ``ForbiddenError`` -> 403 ``forbidden``
     * ``InvalidInputError`` -> 400 ``invalid_input``
     * ``UnsupportedFilterError`` -> 501 ``unsupported_filter``
     * ``ConflictError`` / ``IntegrityError`` -> 409 ``conflict``
@@ -874,6 +876,10 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(NotFoundError)
     async def _not_found(_: Request, exc: NotFoundError) -> JSONResponse:
         return _error_response("not_found", str(exc), status.HTTP_404_NOT_FOUND)
+
+    @app.exception_handler(ForbiddenError)
+    async def _forbidden(_: Request, exc: ForbiddenError) -> JSONResponse:
+        return _error_response("forbidden", str(exc), status.HTTP_403_FORBIDDEN)
 
     @app.exception_handler(InvalidInputError)
     async def _invalid_input(_: Request, exc: InvalidInputError) -> JSONResponse:

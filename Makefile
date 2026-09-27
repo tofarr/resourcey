@@ -20,6 +20,7 @@ specs:
 	scripts/install_quint_evaluator.sh
 	quint typecheck specs/resource_actions.qnt
 	quint typecheck specs/permissions.qnt
+	quint test specs/permissions.qnt --main=permissions --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|enforcementMatrix|enforcementAllowsEverything|allowAllGrantsAccess|denyAllBlocksAccess|emptyPoliciesDenies|readOnlyGrantsReadNotCreate|denyDoesNotOverrideGrant|unionCombinesGrants|invariantsHold)$$"
 	quint typecheck specs/exposure.qnt
 	quint typecheck specs/api_key.qnt
 	quint typecheck specs/auth.qnt
