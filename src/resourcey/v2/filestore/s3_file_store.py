@@ -180,7 +180,7 @@ class S3FileStore(FileStore):
 def _build_client(store: S3FileStore) -> Any:
     """Build a boto3 S3 client, or raise an actionable ``ImportError`` naming the extra."""
     try:
-        import boto3  # type: ignore[import-not-found]
+        import boto3
     except ImportError as exc:  # pragma: no cover - exercised only without the extra
         raise ImportError("S3FileStore requires boto3; install it with 'resourcey[s3]'.") from exc
     kwargs: dict[str, Any] = {}
