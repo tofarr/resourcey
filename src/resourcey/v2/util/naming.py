@@ -10,7 +10,11 @@ available to callers that need it.
 ``pluralize`` appends ``"s"`` — or ``"es"`` when the name ends in ``"s"``,
 ``"x"``, ``"z"``, ``"ch"``, or ``"sh"`` — a small, predictable rule that covers
 the common cases without a full English pluralization table. The ending check is
-case-insensitive but the input case is preserved. Both are pure functions so
+case-insensitive but the input case is preserved.
+
+``humanize`` renders an identifier as Title Case words (``"api-keys"`` ->
+``"Api Keys"``, ``"ConfigApiKeyView"`` -> ``"Config Api Key View"``), for a
+human-readable display name such as an OpenAPI tag. All are pure functions so
 they are individually testable.
 
 This module is part of the ``v2/util`` bottom layer: it imports no project
@@ -58,3 +62,16 @@ def pluralize(name: str) -> str:
     if name.lower().endswith(("s", "x", "z", "ch", "sh")):
         return name + "es"
     return name + "s"
+
+
+def humanize(name: str) -> str:
+    """Render an identifier as Title Case words.
+
+    Splits on camel-case boundaries (via :func:`camel_to_kebab`) and on kebab /
+    snake case separators, then capitalizes each word: ``"api-keys"`` ->
+    ``"Api Keys"``, ``"ConfigApiKeyView"`` -> ``"Config Api Key View"``. A
+    human-readable display name (e.g. an OpenAPI tag) for a value derived from a
+    machine identifier. An empty or separator-only input yields ``""``.
+    """
+    words = re.split(r"[-_\s]+", camel_to_kebab(name.strip()))
+    return " ".join(word[:1].upper() + word[1:].lower() for word in words if word)

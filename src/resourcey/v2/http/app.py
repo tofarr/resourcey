@@ -20,7 +20,7 @@ This module is part of ``v2/``: it imports no ``resourcey`` code outside ``v2/``
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -37,6 +37,7 @@ def create_app(
     *,
     cors_origins: list[str] | None = None,
     dependency_builder: DependencyBuilder | None = None,
+    tags: Sequence[str] | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app wired to this manifest's lifecycle.
 
@@ -50,10 +51,13 @@ def create_app(
         cors_origins: Allowed CORS origins; empty/``None`` adds no middleware.
         dependency_builder: How each resource's per-request service dependency
             is built (issue #86); ``None`` uses the default builder.
+        tags: OpenAPI tags override applied to **every** resource's routes;
+            ``None`` uses each resource's own default (a plural, human-readable
+            name). Rarely wanted — it puts every resource in one group.
     """
     app = FastAPI(lifespan=_lifespan(manifest))
     _configure_cors(app, cors_origins)
-    add_to_app(manifest, app, dependency_builder=dependency_builder)
+    add_to_app(manifest, app, dependency_builder=dependency_builder, tags=tags)
     return app
 
 
@@ -63,16 +67,20 @@ def add_to_app(
     *,
     prefix: str = "/",
     dependency_builder: DependencyBuilder | None = None,
+    tags: Sequence[str] | None = None,
 ) -> None:
     """Mount routes + error handlers onto a user-owned FastAPI app.
 
     Does **not** wire the lifespan — the caller must ``async with manifest``
     inside their own lifespan so Starlette's single-lifespan slot is composed
-    explicitly.
+    explicitly. ``tags``, when given, overrides the per-resource default on
+    every route (see :func:`register_routes`).
     """
     register_error_handlers(app)
     for resource in manifest.resources:
-        register_routes(app, resource, prefix=prefix, dependency_builder=dependency_builder)
+        register_routes(
+            app, resource, prefix=prefix, dependency_builder=dependency_builder, tags=tags
+        )
 
 
 def _lifespan(manifest: Manifest) -> Callable[[FastAPI], Any]:
