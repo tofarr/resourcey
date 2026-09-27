@@ -293,15 +293,11 @@ def test_v2_auth_never_imports_the_legacy_auth_packages():
     """``v2/auth`` is the replacement; it must not reach the v1 ``auth`` seam."""
     offenders: dict[str, list[str]] = {}
     for path in sorted((V2_DIR / "auth").rglob("*.py")):
-        modules = [
-            m
-            for m in _runtime_resourcey_imports(path)
-            if m in {"resourcey.auth", "resourcey.auth2"}
-        ]
+        modules = [m for m in _runtime_resourcey_imports(path) if m in {"resourcey.auth"}]
         if modules:
             offenders[str(path.relative_to(V2_DIR))] = sorted(set(modules))
-    assert offenders == {}, (
-        "v2/auth must not import the v1 auth / auth2 packages at runtime: " + str(offenders)
+    assert offenders == {}, "v2/auth must not import the v1 auth package at runtime: " + str(
+        offenders
     )
 
 

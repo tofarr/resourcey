@@ -6,7 +6,7 @@ environment**. There are no users, no sessions, no auth tables, and no
 and anything else gets `401`.
 
 This is the end-to-end demonstration of the `v2` authentication seam —
-`resourcey.v2.auth` (issue #118), the successor to `resourcey.auth2` — and of
+`resourcey.v2.auth` (issue #118) — and of
 the `v2/http` `DependencyBuilder` seam (issue #86), which applies the posture to
 every resource from one object.
 

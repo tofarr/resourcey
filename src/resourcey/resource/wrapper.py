@@ -154,14 +154,6 @@ class WrapperResourceBase(BaseResource):
         """
         return self._inner.get_orm_model()
 
-    def migrate_document(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Delegate lazy document migration to the inner resource."""
-        return self._inner.migrate_document(doc)
-
-    def clone_for_output(self, item: Any) -> Any:
-        """Delegate output cloning to the inner resource (its isolation policy)."""
-        return self._inner.clone_for_output(item)
-
     def open_storage(self, request: Any) -> Any:
         return self._inner.open_storage(request)
 

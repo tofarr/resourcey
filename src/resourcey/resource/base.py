@@ -121,11 +121,11 @@ class BaseResource(ABC):
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        # WrapperResourceBase proxies model_fields to its inner resource, and
-        # ListResource proxies it to an existing Pydantic model; both expose it
-        # as a property, so skip field collection to avoid shadowing it.
-        # Detected via a class-level marker (set on the class that owns the
-        # property) to avoid an import cycle (wrapper.py imports base.py).
+        # WrapperResourceBase proxies model_fields to its inner resource and
+        # exposes it as a property, so skip field collection to avoid
+        # shadowing it. Detected via a class-level marker (set on the class
+        # that owns the property) to avoid an import cycle (wrapper.py imports
+        # base.py).
         if _is_proxy_resource(cls):
             return
         cls.model_fields = _collect_field_infos(cls)
@@ -238,45 +238,13 @@ class BaseResource(ABC):
             )
         return getter()
 
-    def clone_for_output(self, item: Any) -> Any:
-        """Return the object to serve for a stored ``item`` (default: unchanged).
-
-        The output seam for read actions. Storage-backed resources return the
-        projected read model directly, so the default is the identity. A
-        read-only model-backed resource (:class:`~resourcey.list.list_resource.ListResource`)
-        overrides this to deep-copy each stored object when it is configured
-        ``defensive``, so a client cannot mutate the in-process collection
-        through a response.
-        """
-        return item
-
-    def migrate_document(self, doc: dict[str, Any]) -> dict[str, Any]:
-        """Lazily upgrade a stored document to the current shape on read (default no-op).
-
-        Only Mongo-backed resources have documents; declared on the base (rather
-        than only on :class:`~resourcey.mongo.mongo_resource.MongoResource`) so
-        a wrapper delegating to a Mongo resource can back a ``MongoService``
-        without the service knowing whether it holds a resource or a wrapper.
-
-        Invoked by :meth:`MongoService._doc_to_read_model` before projecting
-        a document into the read model. The default returns the document
-        unchanged. An application overrides this to coordinate schema upgrades
-        - most implementations carry a schema-version number on each document
-        and upgrade in place, but the framework does not prescribe the
-        versioning scheme, the upgrade function signatures, or the storage of
-        the version field. Returning a new dict (rather than mutating) is
-        safe and keeps the stored document untouched unless the override
-        writes back.
-        """
-        return doc
-
     @asynccontextmanager
     async def open_storage(self, request: Request) -> AsyncIterator[Any]:
         """Yield this resource's per-request storage handle (default: ``None``).
 
         The storage half of the service seam: a SQL resource yields an
-        ``AsyncSession``, a Mongo resource a collection. The base resource is
-        storage-agnostic, so it yields ``None``. A
+        ``AsyncSession``. The base resource is storage-agnostic, so it yields
+        ``None``. A
         :class:`~resourcey.resource.wrapper.WrapperResourceBase` delegates this
         to its inner resource so it reuses (and commits) the same storage.
         """
@@ -654,10 +622,9 @@ _NO_DEFAULT: Any = object()
 
 # Class-level marker set (as ``True``) on the class that *owns* a
 # ``model_fields`` property instead of a collected field registry:
-# ``WrapperResourceBase`` (proxying an inner resource) and ``ListResource``
-# (proxying an existing Pydantic model). ``BaseResource.__init_subclass__``
+# ``WrapperResourceBase`` (proxying an inner resource). ``BaseResource.__init_subclass__``
 # skips field collection when it finds the marker anywhere in the MRO, so a
-# concrete subclass of one of these proxies does not shadow the property.
+# concrete subclass of this proxy does not shadow the property.
 _PROXY_MARKER = "_is_proxy_resource"
 
 
@@ -682,9 +649,6 @@ _INFRA_ATTRS: frozenset[str] = frozenset(
         "_cache_strategy",
         "_ctx",
         "_session_factory",
-        "_client",
-        "_database_name",
-        "_db",
         "_instances",
         "_entered",
         "_is_proxy_resource",

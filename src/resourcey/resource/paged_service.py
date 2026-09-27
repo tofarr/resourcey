@@ -5,10 +5,9 @@ The storage-agnostic half of the search contract: the parts of
 (``limit`` validation, ``sort`` parsing, opaque-cursor decode/encode, cache
 header computation) and therefore identical across every storage backend.
 
-``SqlService`` and ``MongoService`` each implemented their own copy of this
-logic; :class:`PagedService` hoists it so a new backend (e.g.
-:class:`~resourcey.list.list_service.ListService`) reuses it instead of
-copy-pasting. A subclass supplies only what is genuinely storage-specific:
+``SqlService`` implemented its own copy of this logic; :class:`PagedService`
+hoists it so a new backend reuses it instead of copy-pasting. A subclass
+supplies only what is genuinely storage-specific:
 the :class:`Page` type via :class:`~resourcey.resource.service_base.BaseService`
 and, for the no-sort cursor default, the resource's id field.
 
