@@ -464,10 +464,14 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   registers one route per supported action, tagged with the exposed resource's
   class name, through the `_route` no-clobber escape hatch (a developer's route
   wins). The builder is resolved on the **exposed** resource, so a projection's
-  wrapped service is the projection's. It also holds `register_error_handlers`,
-  the projection helper, and the batch-edit body union — which is narrowed to
-  the `Create` / `Delete` actions the resource declares, so a batch cannot reach
-  an action the declaration omits.
+  wrapped service is the projection's. Every route is registered with a
+  per-action `summary` / `description` (from `_operation_metadata`, via the
+  exposed resource's DTO name with any trailing `DTO` suffix dropped) — the
+  handlers are all closures named `handler`, so without this FastAPI would
+  label every operation the bare `"Handler"` with no description. It also holds
+  `register_error_handlers`, the projection helper, and the batch-edit body
+  union — which is narrowed to the `Create` / `Delete` actions the resource
+  declares, so a batch cannot reach an action the declaration omits.
 
 Where the port differs from `v1`: `get_rest_models()` replaces the
 create/update/read model getters, so each action maps explicitly to its shape
