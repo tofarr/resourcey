@@ -864,18 +864,103 @@ lifecycle (e.g. `MongoResource.ensure_indexes()`) still runs; register the
 **view**, not the inner (registering both double-enters the inner and mounts
 duplicate routes). The layer ranks gain `view` at the backend rank.
 
+### `v2/filestore` — pre-signed-URL files (issue #117)
+
+`src/resourcey/v2/filestore/` adds **file bytes** as a first-class resource
+without putting the bytes on a request path. The *metadata* (name, size, MIME
+type, checksum, the medium's ETag, status, opaque storage key) is an ordinary
+model-first `SqlResource`, so it gets the standard surface plus cache headers;
+the *bytes* live in a pluggable medium behind `FileStore`. The client transfers
+directly against a short-lived capability URL and the API only mints it — so
+authorization stays in the API while the storage medium (which cannot see the
+API's auth) moves the bytes.
+
+* `file_store.py` — `FileStore` (a `DiscriminatedUnionMixin`, `kind` = class
+  name) is the medium seam: `put` / `get` / `head` / `delete` (async, the
+  server-side fallback) plus `presign_put` / `presign_get` (sync: a native SigV4
+  computation for S3, a local JWE mint for SQL / local, neither blocking the
+  event loop). `StoredObject` is a `head` result (`key`, `size`, `content_type`,
+  `etag`, `updated_at`); `PresignedUrl` is the identical-shape handshake result
+  (`url`, `method`, `expires_at`, `headers`). A store is its own async context
+  manager, entered through the manifest's `managers=` slot exactly like a
+  `SqlSessionManager` / `MongoClientManager`, so its client lifecycle is tied to
+  the app.
+* `file_metadata.py` — the metadata model + `file_resource(store, ...)`. Two
+  guarantees are built in: **`updated_at`** is an ordinary column with
+  `default` / `onupdate`, so the DTO conventions make it framework-owned and it
+  appears in every response shape; **MIME type** (`content_type`) is a
+  first-class column. The cache policy is overridden to a strong **ETag** over
+  the projected bytes (the default last-modified would otherwise win, since the
+  read model carries `updated_at`). `key` and `status` are server-owned (absent
+  from every create / update request and, for `key`, every response); `etag` is
+  server-owned. `FileMetadataService` assigns the opaque key + `pending` status
+  on create, enforces the optional `max_size` cap (defaulted from
+  `FileStoreConfig.max_size`), and on delete removes the row *and* the object so
+  no orphan remains.
+* `local_file_store.py` — the default medium (single instance, dev, tests):
+  bytes under `root`, MIME type in a `.meta` sidecar (the filesystem records
+  none), ETag an MD5 of the bytes. Keys are opaque server-assigned hex, never
+  client paths: `..`, an absolute path, `~`, and an empty key are rejected and
+  the resolved path is re-checked to live under `root`.
+* `sql_file_store.py` — bytes in a dedicated `file_blobs` table (no second
+  system). The blob table is **storage, not a resource**: never registered and
+  never DTO-derived, so bytes cannot leak through a read model. The app owns the
+  schema (`create_blob_tables` for `create_all`, or Alembic against
+  `FileBlobBase`). The session source mirrors `SqlResource` (explicit
+  `session_factory=` wins; else resolve from `session_manager=` by
+  `connection_name`, defaulting to the process-wide manager).
+* `s3_file_store.py` — the production medium: native SigV4 pre-signed URLs
+  (`presign_*` is local, no network round trip) and client put/get/head/delete.
+  `boto3` is imported **lazily**, only when a real client is built (an explicit
+  `client=` is the escape hatch), so `v2/filestore` imports without the extra;
+  the optional dependency is `s3` (`resourcey[s3]`), and a single-`PUT` cap
+  applies (`S3_MAX_PUT_BYTES`; multipart is out of scope).
+* `signed_url.py` — the framework-signed capability for the SQL / local
+  mediums: `mint_signed_url` produces a JWE over `v2/encryption` carrying
+  `{"k": key, "op": "put"|"get"}` plus `iat` / `exp`, and `verify_signed_url`
+  rejects (400) a malformed / tampered token, an expired one (the codec does
+  **not** enforce `exp`, so the caller must), one presented for the wrong
+  operation, and one missing its key. The token is a **bearer capability**: it
+  is short-lived and bound to exactly one `(key, op)` pair, and the route
+  rejects a token for key A used on key B. `SignedFileStore` owns the mint /
+  verify helpers over an injected `EncryptionService` so a concrete medium only
+  implements the medium operations.
+* `file_config.py` — `FileStoreConfig` (a `BaseConfig` block): the medium is
+  selected with no code change through a `LazyField` (`MEDIUM_CLASS` names a
+  `FileStore` subclass; unset ⇒ `LocalFileStore`), and the selected medium's own
+  fields parse under the `MEDIUM_` prefix. TTLs / cap are
+  `APP_UPLOAD_URL_TTL_SECONDS` / `APP_DOWNLOAD_URL_TTL_SECONDS` / `APP_MAX_SIZE`
+  (the `*_seconds` spelling keeps them env-parseable; `*_ttl` properties expose
+  `timedelta`).
+* `file_routes.py` — `register_file_routes(app, store, resource=files, ...)`,
+  called after `create_app`. It adds **no** standard `Action` member — a presign
+  handshake is genuinely not one of the eight — and mounts the capability
+  transfer endpoints (`PUT` / `GET` `/_files/{key}`, hidden from the schema) plus
+  the metadata handshake: `POST {resource}/{id}/upload-url` mints a `put`,
+  `POST {resource}/{id}/complete` heads + verifies + flips to `ready` (and
+  records the ETag), `GET {resource}/{id}/download` mints a `get` for a `ready`
+  file. Minting is authorized through the resource's normal
+  `DependencyBuilder` seam, so a caller must be permitted to act on the file
+  before receiving a URL.
+
+`specs/filestore.qnt` pins the handshake: `create → upload → complete → ready`,
+the completion guards (object present, size matches, not already ready),
+`download` requires `ready`, `delete` removes the object, capability binding,
+distinct keys, and the `ready`-implies-uploaded / ETag-matches-medium /
+`pending`-has-no-ETag invariants. It is part of `make specs` and CI.
+
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/auth`,
-`v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and `v2/http` are
-**parallel** to the existing packages — nothing
+`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/filestore`,
+`v2/auth`, `v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and `v2/http`
+are **parallel** to the existing packages — nothing
 existing is removed by them and they are not a refactor. The old `v1`
 packages/modules (and the old `resourcey.encryption`) stay in place until a
 follow-up removal. A test asserts that no module under `v2/` makes a **runtime**
 import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
 v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
 pins the **layer ranks**
-`util < core < {sql, mongo, list, view, http, config, cache, encryption, auth}`:
+`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}`:
 no module imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`,
 and `v2/list` implement whatever small helpers they need locally rather than
 reaching for `resourcey.util`.
@@ -893,7 +978,7 @@ They are copies, not moves — v1 `resourcey/util/` is untouched until it is
 removed. `v2/util` imports **no project package** at all (not even `v2/core`),
 so the layer ranks are a clean
 
-    util < core < {sql, mongo, list, http, config, cache, encryption, auth}
+    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}
 
 and `v2/core` may import `v2/util` — the dependency runs one way.
 
