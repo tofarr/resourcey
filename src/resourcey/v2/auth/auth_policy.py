@@ -24,7 +24,8 @@ Built-in policies:
 
 * :class:`AllowAll` — grants every action over every row (``AllFilter``).
 * :class:`DenyAll`  — denies every action over every row (``NoMatchFilter``).
-* :class:`ReadOnly` — grants read / search / count, denies everything else.
+* :class:`ReadOnly` — grants read / search / count / batch_read, denies the
+  write actions.
 
 This module is part of ``v2/auth``: it imports only ``v2``.
 """
@@ -35,9 +36,15 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any
 
-from resourcey.v2.core.service import Action, normalize_action
+from resourcey.v2.core.service import Action
 from resourcey.v2.util.models import DiscriminatedUnionMixin
 from resourcey.v2.util.search_filter import AllFilter, NoMatchFilter, SearchFilter
+
+# The read-like actions a ReadOnly policy grants: the four actions that only
+# read. The write actions (create / update / delete / batch_edit) are excluded.
+_READ_LIKE_ACTIONS: frozenset[Action] = frozenset(
+    {Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ}
+)
 
 
 class Policy(DiscriminatedUnionMixin, ABC):
@@ -92,17 +99,16 @@ class DenyAll(Policy):
 
 
 class ReadOnly(Policy):
-    """Grants the read-like actions (read / search / count) and denies the rest.
+    """Grants the read-like actions and denies the write actions.
 
-    ``count`` counts as a search and the batch actions reduce to their singular
-    action (:func:`~resourcey.v2.core.service.normalize_action`), so a
-    read-only principal gets read / search / count / batch_read and no
-    create / update / delete / batch_edit.
+    The read-like set (:data:`_READ_LIKE_ACTIONS`) is ``read``, ``search``,
+    ``count``, and ``batch_read``; everything else (``create``, ``update``,
+    ``delete``, ``batch_edit``) reduces to ``NoMatchFilter``.
     """
 
     async def to_search_filter(
         self, user_id: uuid.UUID | None, action: Action
     ) -> SearchFilter[Any]:
-        if normalize_action(action) in (Action.READ, Action.SEARCH):
+        if action in _READ_LIKE_ACTIONS:
             return AllFilter()
         return NoMatchFilter()
