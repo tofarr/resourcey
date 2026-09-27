@@ -68,7 +68,7 @@ from resourcey.v2.core.service import (
 )
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
 from resourcey.v2.util.missing import MISSING
-from resourcey.v2.util.naming import pluralize
+from resourcey.v2.util.naming import humanize, pluralize
 from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
 
 T = TypeVar("T", bound=BaseModel)
@@ -101,11 +101,15 @@ def register_routes(
 
     The ``{resource}`` path segment is the plural, lower-case, kebab-case name
     from ``exposed.get_resource_path()``; sub-paths use dashes (``batch-read``,
-    ``batch-edit``, ``count``). ``tags`` defaults to ``[<RESOURCE_NAME>]`` (the
-    exposed resource's class name). A route is only added if none already
-    exists at that path + method on the target router — a developer who
-    registers a custom route first keeps it (escape hatch). Returns the built
-    :class:`APIRouter`.
+    ``batch-edit``, ``count``). ``tags`` defaults to that path humanized
+    (``"threads"`` -> ``"Threads"``, ``"api-keys"`` -> ``"Api Keys"``), so
+    operations group by resource rather than by the *framework* class that
+    happens to implement it — a model-first ``SqlResource(Thread, ...)`` and a
+    ``MessageResource(Message, ...)`` land in distinct groups, and a
+    ``ResourceView`` does not collapse into a single ``ResourceView`` bucket. A
+    route is only added if none already exists at that path + method on the
+    target router — a developer who registers a custom route first keeps it
+    (escape hatch). Returns the built :class:`APIRouter`.
     """
     exposed = resource.get_exposed_resource()
     if exposed is None:
@@ -113,7 +117,10 @@ def register_routes(
         return APIRouter(tags=list(tags) if tags else [type(resource).__name__])
 
     builder = dependency_builder if dependency_builder is not None else DefaultDependencyBuilder()
-    router = APIRouter(tags=list(tags) if tags else [type(exposed).__name__])
+    resource_name = _resource_display_name(exposed)
+    router = APIRouter(
+        tags=list(tags) if tags else [_default_tag(exposed)],
+    )
     path = "/" + exposed.get_resource_path().lstrip("/")
     models = exposed.get_rest_models()
     dto_model = exposed.get_dto_type()
@@ -127,7 +134,6 @@ def register_routes(
     route_deps = [Depends(auth_dep)] if auth_dep is not None else None
     supported = normalize_actions(exposed.get_supported_actions())
     strategy = exposed.get_cache_strategy()
-    resource_name = _resource_display_name(exposed)
 
     # Static sub-paths (search / count / batch-read / batch-edit) are registered
     # before the ``{id}`` routes, otherwise ``batch-read`` would be captured as
@@ -337,6 +343,21 @@ def _resource_display_name(exposed: Resource[Any, Any]) -> str:
     if name:
         return name
     return exposed.get_resource_path()
+
+
+def _default_tag(exposed: Resource[Any, Any]) -> str:
+    """The default OpenAPI tag for ``exposed``: its collection path, humanized.
+
+    ``type(exposed).__name__`` is a poor tag for a model-first resource — every
+    bare ``SqlResource(Thread, ...)`` would share the one ``"SqlResource"``
+    bucket, and every ``ResourceView`` would collapse into ``"ResourceView"``.
+    The REST path is the identifier the routes actually live under and is
+    already the plural, kebab-case collection name, so humanizing it groups
+    operations the way a caller navigates them: ``threads`` -> ``Threads``,
+    ``messages`` -> ``Messages``, ``api-keys`` -> ``Api Keys``. It falls back to
+    the framework class name only if the path is somehow empty.
+    """
+    return humanize(exposed.get_resource_path()) or type(exposed).__name__
 
 
 def _operation_metadata(action: Action, resource_name: str) -> tuple[str, str]:

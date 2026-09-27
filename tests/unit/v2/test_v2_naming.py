@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from resourcey.v2.util.naming import camel_to_kebab, pluralize
+from resourcey.v2.util.naming import camel_to_kebab, humanize, pluralize
 
 
 @pytest.mark.parametrize(
@@ -44,3 +44,19 @@ def test_camel_to_kebab(value, expected):
 )
 def test_pluralize(value, expected):
     assert pluralize(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("thread", "Thread"),
+        ("api-keys", "Api Keys"),
+        ("api_keys", "Api Keys"),
+        ("ConfigApiKeyView", "Config Api Key View"),
+        ("  spaced  out  ", "Spaced Out"),
+        ("", ""),
+        ("---", ""),
+    ],
+)
+def test_humanize(value, expected):
+    assert humanize(value) == expected

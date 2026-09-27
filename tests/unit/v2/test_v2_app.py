@@ -485,8 +485,10 @@ async def test_register_routes_registers_every_action_and_tags_the_router():
     assert ("/threads/{id}", "GET") in paths
     assert ("/threads/{id}", "PATCH") in paths
     assert ("/threads/{id}", "DELETE") in paths
-    # The tag is the *exposed* resource's class name (here the SqlResource).
-    assert router.tags == ["SqlResource"]
+    # The tag is the resource path humanized, so a model-first resource groups
+    # by resource rather than by the framework class that happens to implement
+    # it.
+    assert router.tags == ["Threads"]
 
     await engine.dispose()
 
@@ -530,6 +532,47 @@ async def test_register_routes_hidden_resource_returns_an_empty_router():
     router = register_routes(app, hidden)
     assert router.routes == []
     assert router.tags == ["HiddenResource"]
+
+
+async def test_generated_routes_group_by_resource_not_framework_class():
+    """Two bare ``SqlResource`` instances land in distinct OpenAPI groups.
+
+    The regression this guards: tagging by ``type(exposed).__name__`` put every
+    model-first resource in the one ``"SqlResource"`` bucket.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    threads = SqlResource(Thread, session_factory=maker)
+    messages = SqlResource(Message, session_factory=maker)
+
+    app = FastAPI()
+    register_routes(app, threads)
+    register_routes(app, messages)
+
+    spec = app.openapi()
+    tags_by_path = {
+        path: {tag for op in ops.values() for tag in op.get("tags", [])}
+        for path, ops in spec["paths"].items()
+    }
+    assert tags_by_path["/threads"] == {"Threads"}
+    assert tags_by_path["/messages"] == {"Messages"}
+    await engine.dispose()
+
+
+async def test_create_app_tags_override_applies_to_every_resource():
+    """``create_app(tags=...)`` overrides the per-resource default on every route."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    threads = SqlResource(Thread, session_factory=maker)
+    messages = SqlResource(Message, session_factory=maker)
+
+    manifest: Manifest = Manifest(resources=[threads, messages])
+    app = create_app(manifest, tags=["everything"])
+
+    spec = app.openapi()
+    tags = {tag for ops in spec["paths"].values() for op in ops.values() for tag in op["tags"]}
+    assert tags == {"everything"}
+    await engine.dispose()
 
 
 async def test_register_routes_narrows_to_supported_actions():

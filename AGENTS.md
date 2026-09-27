@@ -511,9 +511,15 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   request.
 * `routes.py` — `register_routes(app_or_router, resource, *, prefix="",
   tags=None, dependency_builder=None)` resolves the exposed resource once and
-  registers one route per supported action, tagged with the exposed resource's
-  class name, through the `_route` no-clobber escape hatch (a developer's route
-  wins). The builder is resolved on the **exposed** resource, so a projection's
+  registers one route per supported action, through the `_route` no-clobber
+  escape hatch (a developer's route wins). The default OpenAPI tag is the
+  resource path humanized (`threads` -> `Threads`, `api-keys` -> `Api Keys`),
+  **not** `type(exposed).__name__`: the model-first workflow instantiates a
+  generic base directly (`SqlResource(Thread, ...)`), so the class name would
+  put every resource in one `SqlResource` bucket and collapse every
+  `ResourceView` into `ResourceView`. `tags=` still overrides it, and
+  `create_app` / `add_to_app` thread it through. The builder is resolved on the
+  **exposed** resource, so a projection's
   wrapped service is the projection's. Every route is registered with a
   per-action `summary` / `description` (from `_operation_metadata`, via the
   exposed resource's DTO name with any trailing `DTO` suffix dropped) — the
@@ -918,11 +924,13 @@ builds its own Mongo keyset query.
 
 `src/resourcey/v2/util/naming.py` holds the shared name helpers `camel_to_kebab`
 (inserts `-` boundaries without lowercasing), `camel_to_snake` (the same
-boundaries with `_`), and `pluralize` (a small `s` / `es` rule preserving case),
-public and reusable by any backend — e.g. `SqlResource` composes
-`camel_to_kebab` + `pluralize` for its default `get_resource_path` and
-`MongoResource` composes `camel_to_snake` + `pluralize` for its collection name.
-They were formerly private to `v2/core/resource.py`.
+boundaries with `_`), `pluralize` (a small `s` / `es` rule preserving case), and
+`humanize` (camel/kebab/snake identifier → Title Case words, e.g. `api-keys` →
+`Api Keys`), public and reusable by any backend — e.g. `SqlResource` composes
+`camel_to_kebab` + `pluralize` for its default `get_resource_path`,
+`MongoResource` composes `camel_to_snake` + `pluralize` for its collection name,
+and `v2/http/routes.py` composes `humanize` + `pluralize` for its default
+OpenAPI tag. They were formerly private to `v2/core/resource.py`.
 
 `src/resourcey/v2/util/singleton.py` (issue #95) is a second, non-vendored
 leaf: a small `Singleton` mixin for the process-wide pieces the framework
