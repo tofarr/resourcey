@@ -80,58 +80,53 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
   `DiscriminatedUnionMixin`.
 * `pr-review-checklist` — checklist for agents reviewing PRs.
 
-### `auth2` / `auth` and the `v2/auth` successor
+### `auth` and the `v2/auth` successor
 
-`src/resourcey/auth2/` (issue #63) split authentication out of
-`src/resourcey/auth/` and **must never import it**. It is the **v1**
-predecessor of the `v2` authentication seam: `auth2_api_key.py`'s
-`ApiKeyDependencyBuilder` subclasses the v1
-`resourcey.config.config_dependency.DependencyBuilder`, and
-`auth2_api_key_resource.py`'s `ApiKey` subclasses the v1 `SqlResource`. Because
-`v2`'s isolation test forbids a `v2` module importing `resourcey` code outside
-`v2/`, none of it is importable from a `v2` API.
+`src/resourcey/auth2/` (issue #63), the **v1** API-key authentication seam, has
+been **deleted** now that its `v2` port is complete. Authentication work lives
+in **`src/resourcey/v2/auth/`** (issue #118): `auth_api_key.py` (the `v2`
+`DependencyBuilder`), `auth_api_key_resource.py` (the DB-backed ORM `ApiKey` +
+inner `SqlResource`, the config-list inner `ListResource`, the exposed
+`ResourceView`s, and the key-generation helpers), `auth_api_key_service.py`
+(`StoredApiKeyService` / `ConfigApiKeyService`, both exposing `find_by_key`),
+and `auth_config.py` (`ApiKeysConfig` / `ApiKeyConfig`). It imports **only
+`v2`**, and `v2/http` must not import `v2/auth` (the app supplies the builder),
+so no cycle exists.
 
-The port lives in **`src/resourcey/v2/auth/`** (issue #118) and is the new
-home for authentication work: `auth_api_key.py` (the `v2` `DependencyBuilder`),
-`auth_api_key_resource.py` (the DB-backed ORM `ApiKey` + inner `SqlResource`,
-the config-list inner `ListResource`, the exposed `ResourceView`s, and the
-key-generation helpers), `auth_api_key_service.py` (`StoredApiKeyService` /
-`ConfigApiKeyService`, both exposing `find_by_key`), and `auth_config.py`
-(`ApiKeysConfig` / `ApiKeyConfig`). It imports **only `v2`**, and `v2/http`
-must not import `v2/auth` (the app supplies the builder), so no cycle exists.
-The v1-shaped `auth2` (plus `auth`) is deleted once the port is complete;
-until then `auth2` remains and must still never import `auth`.
+The remaining `v1` package `src/resourcey/auth/` (users, sessions, OAuth,
+permissions) stays in place until it too is ported; `v2/auth` must never import
+it at runtime (pinned by the `v2` isolation test).
 
 Key semantics: the key is a `SecretStr` and is stored **only as a SHA-256
-digest** in both variants; a presented key is validated by hashing it and
-searching for the digest (`find_by_key`), never through the public query
-surface. The raw key is disclosed exactly once, in the `201` create response,
-through the `expose_secrets` serialization context — see
-`specs/api_key.qnt` / `specs/auth.qnt`. Selection is the explicit
-`dependency_builder=` argument on `create_app` / `add_to_app` (config-driven
-builder selection is a later rung).
+digest**; a presented key is validated by hashing it and searching for the
+digest (`find_by_key`), never through the public query surface. The raw key is
+disclosed exactly once, in the `201` create response, through the
+`expose_secrets` serialization context — see `specs/api_key.qnt` /
+`specs/auth.qnt`. Selection is the explicit `dependency_builder=` argument on
+`create_app` / `add_to_app` (config-driven builder selection is a later rung).
 
 ### Storage backends and the shared paging base
 
-*(The `v1` packages.)* Three backends implement the same action contract:
-`SqlResource`/`SqlService`, `MongoResource`/`MongoService`, and
-`ListResource`/`ListService`. Storage-agnostic paging/sort/cursor/cache logic
-lives in `src/resourcey/resource/paged_service.py` (`PagedService`) — a new
-backend subclasses it and implements only its data access, never a copy of the
-cursor or sort-validation code. The `v2` counterparts are `v2/sql` (see below)
-and `v2/mongo` (issue #80); `v2` has no `ListResource` yet.
+The `v1` package `resourcey.resource` ships only the SQL backend,
+`SqlResource`/`SqlService`; the `v1` `resourcey.list` and `resourcey.mongo`
+packages have been **deleted** in favour of their `v2` counterparts. The `v2`
+backends are `v2/sql` (see below), `v2/mongo` (issue #80), and `v2/list`
+(issue #116). Storage-agnostic paging/sort/cursor/cache logic for the `v1` SQL
+path lives in `src/resourcey/resource/paged_service.py` (`PagedService`) — a
+new backend subclasses it and implements only its data access, never a copy of
+the cursor or sort-validation code.
 
-`ListResource` is **read-only**: it narrows `actions` to
+`v2/list`'s `ListResource` is **read-only**: it narrows `actions` to
 `read`/`search`/`count`/`batch_read` so no write route is ever mounted. It is
 installed with the models it serves (`ListResource(models=[...])`) and the
-wrapped Pydantic model *is* the read model — there is no schema generation, no
-create/update model, and no columns. It is **defensive** by default: every
-object it outputs is a deep copy of the stored object, so a caller cannot
-mutate the served collection through a result. The list *is* the storage,
-delivered through the same `open_storage`/`build_service` seam; there is no
-table and no migration.
+wrapped Pydantic model is projected onto a `DTO` declaration — there is no
+schema generation, no create/update model, and no columns. It is **defensive**
+by default: every object it outputs is a deep copy of the stored object, so a
+caller cannot mutate the served collection through a result. The list *is* the
+storage, delivered through the same service seam; there is no table and no
+migration.
 
-The manifest is declared with resource **instances**, not types:
+The `v1` manifest is declared with resource **instances**, not types:
 
 ```python
 manifest = ResourceManifest(resources=(Thread(), Message()))
@@ -140,8 +135,8 @@ app = manifest.create_app()
 
 Because instances carry their own configuration, a resource needing per-app
 inputs is simply constructed with them — that is how a `ListResource` gets its
-data (`ListResource(models=countries)`), and how a caller can override a hook
-per instance.
+data (`ListResource(countries)`), and how a caller can override a hook per
+instance.
 
 ### `v2/core` — the DTO / Resource / Service layer
 

@@ -52,21 +52,21 @@ paging, sort, filters, and cache headers are identical across all three.
 
 | Backend | Base class | Storage |
 |---|---|---|
-| SQL | `SqlResource` | SQLAlchemy 2 (async) table |
-| Mongo | `MongoResource` | an async `motor` collection |
-| List | `ListResource` | an in-process list of Pydantic objects |
+| SQL | `resourcey.v2.sql.SqlResource` | SQLAlchemy 2 (async) table |
+| Mongo | `resourcey.v2.mongo.MongoResource` | an async `motor` collection |
+| List | `resourcey.v2.list.ListResource` | an in-process list of Pydantic objects |
 
 A **list-backed** resource is read-only: it narrows its actions to
 `read` / `search` / `count` / `batch_read` and serves data already modelled as
 Pydantic objects (country codes, feature flags, catalog entries) without
 copying it into a table. Because the objects already exist as Pydantic models,
-there is no schema generation — the model *is* the read model, and (being
-read-only) there is no create/update model and no columns. The list *is* the
-storage, so there is no table and no migration.
+there is no schema generation — the model is projected onto the DTO the REST
+shapes derive from, and (being read-only) there is no create/update model and
+no columns. The list *is* the storage, so there is no table and no migration.
 
 ```python
 from pydantic import BaseModel
-from resourcey.list.list_resource import ListResource
+from resourcey.v2.list.list_resource import ListResource
 
 
 class Country(BaseModel):
@@ -79,9 +79,9 @@ countries = [
     Country(id="us", name="United States", iso3="USA"),
     Country(id="ca", name="Canada", iso3="CAN"),
 ]
-resource = ListResource(models=countries, path="countries")
+resource = ListResource(countries, path="countries")
 
-manifest = ResourceManifest(resources=(resource,))
+manifest = Manifest(resources=(resource,))
 ```
 
 `defensive=True` is the default: every object the resource outputs is a deep

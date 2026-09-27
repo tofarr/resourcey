@@ -1,8 +1,7 @@
 """``ListResource`` — the ``v2`` read-only list backend (issue #116).
 
 A ``v2`` backend alongside :mod:`resourcey.v2.sql`: a resource built from an
-application-supplied list of Pydantic models and served **read-only**. It is the
-``v2`` successor to ``v1``'s ``resourcey.list.ListResource``.
+application-supplied list of Pydantic models and served **read-only**.
 
 The use case is in-process reference data that is already modelled — country
 codes, feature flags, catalog entries, enum-like lookups — exposed over the same

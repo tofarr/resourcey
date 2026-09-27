@@ -47,8 +47,7 @@ class ResourceManifest(BaseModel):
         resources: Resource **instances** (subclasses of :class:`BaseResource`),
             in declaration order. Construction calls ``on_register`` on each so
             backend artifacts (SQL models, etc.) are materialised. A resource
-            that needs per-app inputs — e.g. a ``ListResource`` whose data is
-            the model instances themselves — is simply constructed with them::
+            that needs per-app inputs is simply constructed with them::
 
                 manifest = ResourceManifest(resources=(Thread(), Message()))
     """
