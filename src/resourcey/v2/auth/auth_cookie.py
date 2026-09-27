@@ -151,6 +151,8 @@ def _string_claims(claims: dict[str, Any]) -> dict[str, str]:
 
     Non-scalar claims (nested objects / lists) are dropped: ``claims`` is
     provenance kept alongside the principal, not a place to carry arbitrary
-    structures.
+    structures. In particular the ``roles`` claim is dropped here — it is
+    surfaced on :attr:`Principal.roles`, which is a decision input, not
+    provenance.
     """
     return {key: value for key, value in claims.items() if isinstance(value, str)}

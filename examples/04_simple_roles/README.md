@@ -49,6 +49,15 @@ APP_API_KEYS_1_ROLES_0=USER
 
 A key with no `roles` authenticates but is denied everything (fail-closed).
 
+## Caller-private caching
+
+`USER`'s own-rows-only view means the *same URL* returns different rows per
+caller, so the response is marked `Cache-Control: private, no-cache`. A shared
+cache (proxy/CDN) therefore neither stores nor revalidates it: an `ETag` /
+`Last-Modified` alone would let one principal's validator replay another
+principal's slice. The `Owner` policy declares `scopes_to_caller = True`, which
+the authorization service propagates to the transport.
+
 ## What to try
 
 ```bash

@@ -495,3 +495,104 @@ async def test_admin_role_grants_full_access_end_to_end():
                 assert [n["text"] for n in listed["items"]] == ["admin made"]
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Caller-scoped responses are private (a shared cache must not replay them)
+# ---------------------------------------------------------------------------
+
+
+def _owner_scoped_app(maker: Any) -> Any:
+    """An ``Owner``-scoped ``/notes`` app plus its two principals' contexts."""
+    resource = SqlResource(Note, session_factory=maker, path="notes")
+    cfg = _keys(
+        [
+            ApiKeyConfig(
+                id="alice", key=SecretStr("alice-key"), principal_id=str(ALICE), roles=["USER"]
+            ),
+            ApiKeyConfig(id="bob", key=SecretStr("bob-key"), principal_id=str(BOB), roles=["USER"]),
+        ]
+    )
+    inner = config_api_key_resource(cfg)
+    builder = AuthorizedDependencyBuilder(
+        authenticator=ApiKeyAuthenticator(key_resource=inner),
+        policy_resolver=RolePolicyResolver(
+            resource_role_policies={"notes": {"USER": [Owner(owner_field="owner_id")]}}
+        ),
+    )
+    manifest = Manifest(resources=[config_api_key_view(inner), resource])
+    return create_app(manifest, dependency_builder=builder), manifest, resource
+
+
+def test_policy_privacy_flags_are_class_level():
+    # The principal-independent built-ins opt out of caller-scoping so their
+    # shared-cache optimisations survive; an unclassified policy is caller-scoped.
+    assert AllowAll().scopes_to_caller is False
+    assert ReadOnly().scopes_to_caller is False
+    assert Owner(owner_field="owner_id").scopes_to_caller is True
+
+
+async def test_owner_scoped_response_is_caller_private():
+    """An ``Owner``-scoped search must not be stored/shared by a shared cache.
+
+    The ETag alone cannot stop a shared cache revalidating Bob's cached body with
+    Alice's client presenting Bob's validator, so the response must carry
+    ``Cache-Control: private``. Regression test for the cross-principal 304 leak.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    app, manifest, resource = _owner_scoped_app(maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(OwnerBase.metadata.create_all)
+    try:
+        async with await resource.get_service({}) as service:
+            await service.create(resource.get_dto_type()(owner_id=ALICE, text="alice"))
+            await service.create(resource.get_dto_type()(owner_id=BOB, text="bob"))
+        async with manifest:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                alice = await client.get("/notes", headers={API_KEY_HEADER_NAME: "alice-key"})
+                bob = await client.get("/notes", headers={API_KEY_HEADER_NAME: "bob-key"})
+                assert [n["text"] for n in alice.json()["items"]] == ["alice"]
+                assert [n["text"] for n in bob.json()["items"]] == ["bob"]
+                assert "private" in alice.headers["cache-control"]
+                assert "private" in bob.headers["cache-control"]
+    finally:
+        await engine.dispose()
+
+
+async def test_principal_independent_role_response_keeps_shared_caching():
+    """A ``ReadOnly`` (principal-independent) role must not be forced private.
+
+    Guards against over-marking: the privacy flag follows the *policies*, so a
+    role that grants the same rows to everyone keeps its shared-cache validator.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(Note, session_factory=maker, path="notes")
+    async with engine.begin() as conn:
+        await conn.run_sync(OwnerBase.metadata.create_all)
+    try:
+        cfg = _keys(
+            [
+                ApiKeyConfig(
+                    id="r", key=SecretStr("reader-key"), principal_id=str(ALICE), roles=["READER"]
+                )
+            ]
+        )
+        inner = config_api_key_resource(cfg)
+        builder = AuthorizedDependencyBuilder(
+            authenticator=ApiKeyAuthenticator(key_resource=inner),
+            policy_resolver=RolePolicyResolver(
+                resource_role_policies={"notes": {"READER": [ReadOnly()]}}
+            ),
+        )
+        manifest = Manifest(resources=[config_api_key_view(inner), resource])
+        app = create_app(manifest, dependency_builder=builder)
+        async with manifest:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.get("/notes", headers={API_KEY_HEADER_NAME: "reader-key"})
+                assert "private" not in response.headers["cache-control"]
+    finally:
+        await engine.dispose()

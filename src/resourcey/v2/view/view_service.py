@@ -76,6 +76,19 @@ class ViewService(Service[T, K], Generic[T, K]):
         return self._inner.serialization_context()
 
     # ------------------------------------------------------------------
+    # Cache privacy (delegated to the inner service)
+    # ------------------------------------------------------------------
+
+    def response_is_private(self) -> bool:
+        """The inner service's cache privacy.
+
+        Delegated: a projection narrows the *fields*, but whether the body is
+        caller-scoped is the inner (authorized) service's fact — an ``Owner``
+        policy behind a view still makes the response caller-private.
+        """
+        return self._inner.response_is_private()
+
+    # ------------------------------------------------------------------
     # Standard actions (forwarded)
     # ------------------------------------------------------------------
 

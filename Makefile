@@ -20,9 +20,9 @@ specs:
 	scripts/install_quint_evaluator.sh
 	quint typecheck specs/resource_actions.qnt
 	quint typecheck specs/permissions.qnt
-	quint test specs/permissions.qnt --main=permissions --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|enforcementMatrix|enforcementAllowsEverything|allowAllGrantsAccess|denyAllBlocksAccess|emptyPoliciesDenies|readOnlyGrantsReadNotCreate|denyDoesNotOverrideGrant|unionCombinesGrants|invariantsHold)$$"
+	quint test specs/permissions.qnt --main=permissions --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|enforcementMatrix|enforcementAllowsEverything|allowAllGrantsAccess|denyAllBlocksAccess|emptyPoliciesDenies|readOnlyGrantsReadNotCreate|denyDoesNotOverrideGrant|unionCombinesGrants|builtinsStayShared|invariantsHold)$$"
 	quint typecheck specs/roles.qnt
-	quint test specs/roles.qnt --main=roles --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|ownerPolicyScoping|unknownRoleGrantsNothing|unroledCallerUsesTheClosedDefault|perResourceScoping|readsAllOfXOwnRowsOfY|multipleRolesUnionTheirGrants|denyRoleDoesNotOverrideAGrant|invariantsHold)$$"
+	quint test specs/roles.qnt --main=roles --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|ownerPolicyScoping|unknownRoleGrantsNothing|unroledCallerUsesTheClosedDefault|perResourceScoping|readsAllOfXOwnRowsOfY|multipleRolesUnionTheirGrants|denyRoleDoesNotOverrideAGrant|ownerResponseIsPrivate|invariantsHold)$$"
 	quint typecheck specs/exposure.qnt
 	quint typecheck specs/api_key.qnt
 	quint typecheck specs/auth.qnt

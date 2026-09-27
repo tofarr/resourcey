@@ -203,10 +203,15 @@ to go back and re-check the principal), distinct from the browser cookie's
 `ForbiddenError` and the singular `normalize_action` (`COUNT`→`SEARCH`,
 `BATCH_READ`→`READ`, `BATCH_EDIT`→`UPDATE`) live in `v2/core/service.py`;
 `ForbiddenError` is mapped to `403 forbidden` in `v2/http/routes.py`'s error
-envelope. The three built-ins are principal-independent, so caching (#92) is
-unaffected; a future row-scoping policy must force a caller-private
-`Cache-Control`, since an `ETag` alone cannot stop a shared cache serving one
-principal's slice to another. See `specs/permissions.qnt`.
+envelope. Caching (#92) and authorization compose through a **caller-scope
+seam**: `Policy.scopes_to_caller` (a `ClassVar`, default `True` = safe;
+`AllowAll` / `DenyAll` / `ReadOnly` declare `False`) plus
+`Service.response_is_private()` (`False` in `v2/core`, overridden by
+`AuthorizedService` from the resolved policies). `v2/http/routes.py` forces
+`private` onto the cache header when the service reports a caller-scoped
+response, so a shared cache neither stores nor revalidates it — an `ETag` alone
+cannot stop a shared cache serving one principal's slice to another. See
+`specs/permissions.qnt` / `specs/cache_defaults.qnt`.
 
 ### `v2/auth` simple roles (issue #132)
 
@@ -239,10 +244,14 @@ framework never imports app code to interpret a credential.
 * Roles are carried on both credential types with **no extra store lookup**: a
   DB-backed / config-list `ApiKey` row's `roles` column / `ConfigApiKey.roles`,
   populated onto `Principal.roles` by `ApiKeyAuthenticator` (a row's own
-  `principal_id` now wins over the authenticator's fixed one), and a cookie's
-  `roles` JWE claim by `CookieAuthenticator`. The key `roles` field stays a
-  normal, writable field on the DB-backed surface (a credential-carried role is
-  an entry on the key's definition, not a secret); the config-list view hides it
+  `principal_id` now wins over the authenticator's fixed one, and a
+  present-but-unparseable id degrades to anonymous rather than adopting the
+  shared fixed principal), and a cookie's `roles` JWE claim by
+  `CookieAuthenticator`. The key `roles` field stays a normal, writable field on
+  the DB-backed surface (a credential-carried role is an entry on the key's
+  definition, not a secret) — which makes that resource a **privilege-assignment
+  surface**, so access to it must be restricted to administrators; the
+  config-list view hides `roles`
   from the read / search surface alongside `principal_id`.
 * `auth_authorized_dependency.py` publishes the authenticated principal on the
   call-scoped `ctx` under `auth_principal.PRINCIPAL_CTX_KEY`, so a resource

@@ -95,7 +95,10 @@ KEY_QUERY_SURFACE_HIDDEN: dict[str, dict[str, Any]] = {
 # The DB-backed view is the full key surface: only the secret ``key`` is
 # projected away (``KEY_EXPOSED``). ``roles`` stays a normal writable field — a
 # credential-carried role is an entry on the key's definition, settable (and
-# rotatable) through the REST surface, not a secret.
+# rotatable) through the REST surface, not a secret. Note the consequence: the
+# DB-backed key resource is therefore a **privilege-assignment surface** —
+# whoever can write a key row can grant it roles — so access to this resource
+# must itself be restricted to administrators.
 STORED_KEY_EXPOSED: dict[str, dict[str, Any]] = dict(KEY_EXPOSED)
 
 

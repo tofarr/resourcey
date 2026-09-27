@@ -663,3 +663,52 @@ async def test_mutation_routes_still_emit_etag_without_304():
         assert updated.status_code == 200
         assert updated.json()["label"] == "y"
     await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Strategy privacy (caller-scoped responses)
+# ---------------------------------------------------------------------------
+
+
+def test_with_private_forces_private_and_is_idempotent():
+    strategy = ETagCacheStrategy()
+    assert strategy.cache_is_private() is False
+    forced = strategy.with_private(True)
+    assert forced.cache_is_private() is True
+    assert forced.private is True
+    # A no-op request returns the same object (no allocation on the common path).
+    assert strategy.with_private(False) is strategy
+    assert forced.with_private(True) is forced
+
+
+def test_optimistic_strategy_reports_its_own_window_as_private():
+    assert OptimisticCacheStrategy(expire_in=30, private=True).cache_is_private() is True
+    assert OptimisticCacheStrategy(expire_in=30).cache_is_private() is False
+
+
+def test_forced_private_validator_header_revalidates_but_stays_out_of_shared_cache():
+    from resourcey.v2.http.routes import _cache_response_headers
+
+    header = ETagCacheStrategy().with_private(True).get_cache_header([])
+    headers = _cache_response_headers(header)
+    assert headers["Cache-Control"] == "private, no-cache"
+
+
+def test_private_strategy_leaves_a_none_strategy_and_placeholder_alone():
+    from resourcey.v2.core.service import CacheStrategy as CoreCacheStrategy
+    from resourcey.v2.http.routes import _private_strategy
+
+    class _Service:
+        def __init__(self, private: bool) -> None:
+            self._private = private
+
+        def response_is_private(self) -> bool:
+            return self._private
+
+    assert _private_strategy(None, _Service(True)) is None
+    # A core placeholder has no ``with_private`` and yields no validator.
+    placeholder = CoreCacheStrategy()
+    assert _private_strategy(placeholder, _Service(True)) is placeholder
+    # A non-private service leaves the strategy unchanged.
+    base = ETagCacheStrategy()
+    assert _private_strategy(base, _Service(False)) is base

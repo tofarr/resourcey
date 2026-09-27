@@ -34,6 +34,9 @@
 //     actions, AllF for create (unscoped), and NoMatchF for an anonymous caller.
 //   - perResourceScoping: the same role maps to different policies on different
 //     resources.
+//   - ownerResponseIsPrivate: a policy set containing an Owner policy scopes to
+//     the caller, so its response is marked caller-private; a set of the
+//     principal-independent built-ins is not.
 
 module roles {
   // The standard resource actions, mirroring v2/core/service.Action.
@@ -73,6 +76,16 @@ module roles {
   // The chain rank, so OR is the join (maximum).
   pure def rank(f: Filter): int =
     match f { NoMatchF => 0 | OwnF => 1 | AllF => 2 }
+
+  // Whether a policy scopes its reduction to the caller (mirrors
+  // Policy.scopes_to_caller). Owner does; the built-ins do not.
+  pure def policyScopesToCaller(p: Policy): bool =
+    p == Owner
+
+  // Whether a response under a policy set may differ per caller — true iff any
+  // resolved policy scopes to the caller (the privacy derivation).
+  pure def setScopesToCaller(ps: Set[Policy]): bool =
+    ps.exists(p => policyScopesToCaller(p))
 
   // OR-combine two filters: the join of the chain.
   pure def orF(a: Filter, b: Filter): Filter =
@@ -239,6 +252,21 @@ module roles {
       assert(effective(Set("ADMIN"), "threads", Read, true) == AllF),
       assert(effective(Set("ADMIN", "DENIED"), "threads", Read, true) == AllF),
       assert(effective(Set("ADMIN", "DENIED"), "threads", Create, true) == AllF),
+    }
+  }
+
+  // An Owner-scoped response is caller-private; a built-in-only set is not.
+  run ownerResponseIsPrivate = {
+    all {
+      assert(setScopesToCaller(Set(Owner))),
+      assert(not(setScopesToCaller(Set(AllowAll)))),
+      assert(not(setScopesToCaller(Set(ReadOnly)))),
+      // Any set containing Owner is caller-scoped, however it is combined.
+      assert(setScopesToCaller(Set(Owner, ReadOnly))),
+      // The USER role on messages resolves to Owner -> private; on threads it
+      // resolves to ReadOnly -> shared.
+      assert(setScopesToCaller(policiesForCaller(Set("USER"), "messages"))),
+      assert(not(setScopesToCaller(policiesForCaller(Set("USER"), "threads")))),
     }
   }
 

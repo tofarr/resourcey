@@ -198,7 +198,15 @@ class ApiKeyAuthenticator(Authenticator):
         roles = roles_from_credential(getattr(row, "roles", None))
         if owner is not None:
             return Principal(id=owner, kind=PrincipalKind.USER, roles=roles)
-        principal_id = _as_uuid(getattr(row, "principal_id", None)) or self.principal_id
+        # A row's own ``principal_id`` wins when set; only a *missing* value
+        # falls back to the authenticator's fixed id. A present-but-unparseable
+        # value degrades to ``None`` (anonymous-scoped) rather than silently
+        # adopting the shared fixed principal, so a malformed binding cannot
+        # grant another principal's scope.
+        raw_principal_id = getattr(row, "principal_id", None)
+        principal_id = (
+            _as_uuid(raw_principal_id) if raw_principal_id is not None else self.principal_id
+        )
         return Principal(id=principal_id, kind=PrincipalKind.SERVICE, roles=roles)
 
 

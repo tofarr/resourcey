@@ -25,6 +25,9 @@
 //     grant (reduce to a non-None filter) for that action.
 //   - deniedImpliesNoGrant: when every policy denies an action, it is not
 //     permitted.
+//   - principalIndependentSetsStayShared: a policy set drawn from the built-ins
+//     (all principal-independent) is never caller-scoped, so a response under it
+//     keeps its shared-cache optimisation.
 
 module permissions {
   // The standard resource actions, mirroring v2/core/service.Action.
@@ -37,6 +40,18 @@ module permissions {
 
   // A policy as stored. All three built-ins are principal-independent.
   type Policy = AllowAll | DenyAll | ReadOnly
+
+  // Whether a policy's reduction depends on *who* is asking (mirrors
+  // Policy.scopes_to_caller). All three built-ins are principal-independent, so
+  // a response under them may be shared; only a caller-scoped policy (e.g. the
+  // Owner policy in roles.qnt) forces a private response.
+  pure def policyScopesToCaller(p: Policy): bool =
+    match p { AllowAll => false | DenyAll => false | ReadOnly => false }
+
+  // Whether a response under a policy set may differ per caller — true iff any
+  // resolved policy scopes to the caller (the privacy derivation).
+  pure def setScopesToCaller(ps: Set[Policy]): bool =
+    ps.exists(p => policyScopesToCaller(p))
 
   // An enforcement decision, mirroring the AuthorizedService matrix.
   type Decision = Allowed | Forbidden | Hidden | Empty
@@ -236,6 +251,17 @@ module permissions {
     all {
       assert(isPermitted("alice", Create, ps)),
       assert(isPermitted("alice", Read, ps)),
+    }
+  }
+
+  // The three built-ins are principal-independent, so a response under any set
+  // of them keeps its shared-cache optimisation (never forced private).
+  run builtinsStayShared = {
+    all {
+      assert(not(policyScopesToCaller(AllowAll))),
+      assert(not(policyScopesToCaller(DenyAll))),
+      assert(not(policyScopesToCaller(ReadOnly))),
+      policySets.forall(ps => not(setScopesToCaller(ps))),
     }
   }
 

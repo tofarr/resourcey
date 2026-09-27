@@ -35,7 +35,7 @@ This module is part of ``v2/auth``: it imports only ``v2``.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from enum import StrEnum
 from typing import Any
 
@@ -64,11 +64,8 @@ class AppRole(StrEnum):
 
 
 # A role in the app's vocabulary (an ``AppRole`` member) or its raw string form
-# as it arrives on a credential.
+# as it arrives on a credential. Named for documentation; no runtime wrapping.
 RoleName = str
-
-# A role -> policies mapping (one role grants any of these policies).
-RolePolicyMap = Mapping[str, "list[Policy]"]
 
 
 def role_key(role: AppRole | str) -> str:
@@ -116,8 +113,12 @@ class RolePolicyResolver(PolicyResolver):
     Attributes:
         role_policies: Global rules — role name -> policies on *every* resource.
         resource_role_policies: Per-resource rules — resource path -> role name
-            -> policies. A resource's entry is combined with the global map, so
-            a role can be ``ReadOnly`` globally and own-rows-only on one resource.
+            -> policies. A role's global and per-resource policies are both
+            *added* to the union (they are not narrowed by each other), so a
+            broader grant wins: declaring ``ReadOnly`` globally and ``Owner``
+            per resource yields read-all (``ReadOnly``'s ``AllFilter`` dominates
+            the union), not own-rows-only. To scope a role per resource, declare
+            the policy only in ``resource_role_policies``.
         default: Policies for a caller whose roles matched nothing (or who has no
             roles). Empty by default — fail-closed.
         resource_defaults: Per-resource overrides for :attr:`default`, keyed by

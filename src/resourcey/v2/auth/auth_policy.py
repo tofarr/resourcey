@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from resourcey.v2.core.service import Action
 from resourcey.v2.util.models import DiscriminatedUnionMixin
@@ -75,6 +75,13 @@ class Policy(DiscriminatedUnionMixin, ABC):
     row" (a deny — no writes, an empty read).
     """
 
+    # Whether this policy's reduction depends on *who* is asking. Defaults to
+    # ``True`` (safe): an unclassified policy is assumed caller-scoped, so a
+    # response it narrows is marked caller-private and never stored by a shared
+    # cache. A genuinely principal-independent policy opts out by declaring
+    # ``False``. Not a pydantic field -- a class-level fact about the policy kind.
+    scopes_to_caller: ClassVar[bool] = True
+
     @abstractmethod
     async def to_search_filter(
         self, user_id: uuid.UUID | None, action: Action
@@ -91,6 +98,8 @@ class Policy(DiscriminatedUnionMixin, ABC):
 class AllowAll(Policy):
     """Grants every action over every row."""
 
+    scopes_to_caller: ClassVar[bool] = False
+
     async def to_search_filter(
         self, user_id: uuid.UUID | None, action: Action
     ) -> SearchFilter[Any]:
@@ -105,6 +114,8 @@ class DenyAll(Policy):
     policy's grant. On its own it denies everything.
     """
 
+    scopes_to_caller: ClassVar[bool] = False
+
     async def to_search_filter(
         self, user_id: uuid.UUID | None, action: Action
     ) -> SearchFilter[Any]:
@@ -118,6 +129,8 @@ class ReadOnly(Policy):
     ``count``, and ``batch_read``; everything else (``create``, ``update``,
     ``delete``, ``batch_edit``) reduces to ``NoMatchFilter``.
     """
+
+    scopes_to_caller: ClassVar[bool] = False
 
     async def to_search_filter(
         self, user_id: uuid.UUID | None, action: Action
