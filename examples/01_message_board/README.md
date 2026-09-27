@@ -29,11 +29,10 @@ Both are **SQLAlchemy ORM models** in `message_board/models.py`; `Thread` and
 `Message` resources are thin `SqlResource` subclasses over them.
 `Message.thread_id` is a real `ForeignKey` column to `threads.id`.
 
-`Message.search` opts into a declared filter surface: a `MessageSearchFilter`
-(`BaseObjectFilter`) returned from `get_search_filter_type()`, exposing
-`thread_id__eq` (list a thread's messages) and `text__contains` (substring
-search). Declaring it also *narrows* the surface — v2 otherwise derives one from
-the read model — so `?id__eq=` is rejected.
+`Message.search` needs no declared filter surface: the query surface is derived
+from the read model, so `thread_id__eq` (list a thread's messages) and
+`text__contains` (substring search) work because those fields are readable, and
+a hidden field is rejected.
 
 ## Layout
 
@@ -47,7 +46,7 @@ the read model — so `?id__eq=` is rejected.
 ├── message_board/       # the importable app package
 │   ├── app.py           # manager + manifest + app (uvicorn target)
 │   ├── models.py        # Thread & Message ORM models + Base (schema of record)
-│   └── message.py       # MessageSearchFilter + MessageResource (declared filter)
+│   └── message.py       # MessageResource (derived query surface)
 ├── migrations/
 │   ├── env.py           # Alembic env, diffs against the ORM metadata
 │   └── versions/        # generated + reviewed revisions

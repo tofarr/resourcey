@@ -50,7 +50,7 @@ from config, with a `ResourceView` hiding the digest — see
 ├── api_key_auth/        # the importable app package
 │   ├── app.py           # manager + manifest + app, with the API-key builder
 │   ├── models.py        # Thread & Message ORM models + Base (schema of record)
-│   └── message.py       # MessageResource (declared filter)
+│   └── message.py       # MessageResource (derived query surface)
 ├── migrations/
 │   ├── env.py              # Alembic env, diffs against the ORM metadata
 │   ├── script.py.mako

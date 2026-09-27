@@ -260,13 +260,6 @@ class TestMessageSearch:
         assert len(items) == 1
         assert items[0]["text"] == "hello world"
 
-    async def test_declared_filter_surface_rejects_other_fields(self, authed: AsyncClient) -> None:
-        """The declared filter class is the whole surface: ``id__eq`` is rejected."""
-        await _make_thread(authed)
-        resp = await authed.get("/messages?id__eq=1")
-        assert resp.status_code == 400
-        assert resp.json()["error"]["code"] == "invalid_input"
-
 
 # ---------------------------------------------------------------------------
 # The exposed key resource

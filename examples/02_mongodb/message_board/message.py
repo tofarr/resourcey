@@ -7,11 +7,9 @@ constraints, so the relation is enforced at the application level. ``v2``'s
 projection is plain-columns-only (relationship / nested projection is a known
 limitation), which is exactly what this example needs.
 
-The example opts into a **declared** filter surface: a
-:class:`~resourcey.v2.util.search_filter.BaseObjectFilter` returned from
-``get_search_filter_type``. Its ``<attribute>__<op>`` fields are the whole
-surface, so ``GET /messages?thread_id__eq=<id>`` lists a thread's messages and
-``?text__contains=`` does a substring search on the body.
+The query surface is the read model: a field is filterable / sortable exactly
+when the DTO exposes it, so ``GET /messages?thread_id__eq=<id>`` lists a
+thread's messages and ``?text__contains=`` does a substring search on the body.
 """
 
 from __future__ import annotations
@@ -22,7 +20,6 @@ from uuid import UUID
 
 from resourcey.v2.core.dto import DTO
 from resourcey.v2.mongo.mongo_resource import MongoResource
-from resourcey.v2.util.search_filter import BaseObjectFilter
 
 
 class MessageDTO(DTO):
@@ -43,17 +40,6 @@ class MessageDTO(DTO):
     updated_at: datetime
 
 
-class MessageSearchFilter(BaseObjectFilter[MessageDTO]):
-    """Optional filter clauses for ``Message`` search.
-
-    ``thread_id__eq`` lists a thread's messages; ``text__contains`` does a
-    substring search on the body.
-    """
-
-    thread_id__eq: UUID | None = None
-    text__contains: str | None = None
-
-
 class MessageResource(MongoResource[MessageDTO, UUID]):
     """``MessageDTO`` served from the ``messages`` collection."""
 
@@ -61,7 +47,3 @@ class MessageResource(MongoResource[MessageDTO, UUID]):
         kwargs.setdefault("path", "messages")
         kwargs.setdefault("collection_name", "messages")
         super().__init__(*args, **kwargs)
-
-    def get_search_filter_type(self) -> type[MessageSearchFilter]:
-        """Expose ``thread_id__eq`` / ``text__contains`` and nothing else."""
-        return MessageSearchFilter
