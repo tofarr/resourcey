@@ -29,7 +29,8 @@ until the first release.
 ## Repo layout
 
 * `src/resourcey/` — the framework.
-* `examples/01_message_board`, `02_mongodb`, `03_api_key_auth` — standalone
+* `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
+  `04_simple_roles` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **`v2` reference app** (issue
@@ -49,12 +50,19 @@ until the first release.
   `config_api_key_view`) built from `APP_API_KEYS_*` — no auth table, no
   `DEPENDENCY_BUILDER_CLASS`
   (the builder is constructed explicitly in `app.py`), and a `build_app` posture
-  guard. `v2` does no `.env` loading, so its run/debug commands pass
+  guard. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
+  same message board, but with a per-app `Role` vocabulary carried on each API
+  key (`APP_API_KEYS_<n>_ROLES_<m>`) and a single `RolePolicyResolver` mapping
+  role -> policy (global + per-resource): `ADMIN` full access, `MODERATOR`
+  read-only on `threads` / full on `messages`, `USER` read-only on `threads` but
+  `Owner`-scoped (`author_id`) on `messages` — the "read all of X, own rows
+  of Y" rule — and an un-roled key denied everything (fail-closed). `v2` does
+  no `.env` loading, so its run/debug commands pass
   `uvicorn --env-file .env` / `uv run --env-file .env`.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
-  8081 (01), 8082 (02), 8083 (03).
+  8081 (01), 8082 (02), 8083 (03), 8084 (04).
 
 ## Core design principles
 
@@ -199,6 +207,54 @@ envelope. The three built-ins are principal-independent, so caching (#92) is
 unaffected; a future row-scoping policy must force a caller-private
 `Cache-Control`, since an `ETag` alone cannot stop a shared cache serving one
 principal's slice to another. See `specs/permissions.qnt`.
+
+### `v2/auth` simple roles (issue #132)
+
+Part 2 of the auth roadmap gives a deployment a small, **per-app** role
+vocabulary carried on the credential and translated to policies in **one place**
+(`auth_role.py`). Roles are per-app, never global: the same string means
+whatever an app declares, so there is deliberately no process-wide role
+registry. `AppRole` is the ergonomic `StrEnum` vocabulary (`Role.ADMIN`, no
+magic strings) while the credential carries the **plain string** — `role_key` /
+`role_keys` / `roles_from_credential` are the string conversion seam, so the
+framework never imports app code to interpret a credential.
+
+* `auth_policy.py` also gains **`PolicyResolver`** (a `DiscriminatedUnionMixin`,
+  `async resolve(resource, principal) -> list[Policy]`) — the `Principal ->
+  Policy` seam #131 introduced, with built-ins `AllowAllResolver` (the default,
+  preserving #118 / #127's "a valid credential grants full access") and
+  `DenyAllResolver`; and the **`Owner`** policy (own-rows-only): `AttrFilter` on
+  `owner_field` (`user_id` by default) for the read-like / by-id write actions,
+  `AllFilter` for **create** (a new row has no owner yet — the resource stamps
+  it), and `NoMatchFilter` for an anonymous caller. `AuthorizedService`
+  OR-combines the resolved policies (the union model), so a `DenyAll` from one
+  role never overrides another's grant; an empty list is deny / fail-closed.
+* `auth_role.py` — **`RolePolicyResolver`** is the single location an app
+  expresses its `role -> policy` rules: a **global** `role_policies` map (a
+  role's policies on every resource) plus a per-resource
+  `resource_role_policies` map keyed by the resource's path, an explicit
+  fail-closed `default` (empty unless the app opts in) with per-resource
+  `resource_defaults` overrides. An unknown role therefore grants nothing. The
+  static mapping is this rung; the store-backed resolver is Part 3.
+* Roles are carried on both credential types with **no extra store lookup**: a
+  DB-backed / config-list `ApiKey` row's `roles` column / `ConfigApiKey.roles`,
+  populated onto `Principal.roles` by `ApiKeyAuthenticator` (a row's own
+  `principal_id` now wins over the authenticator's fixed one), and a cookie's
+  `roles` JWE claim by `CookieAuthenticator`. The key `roles` field stays a
+  normal, writable field on the DB-backed surface (a credential-carried role is
+  an entry on the key's definition, not a secret); the config-list view hides it
+  from the read / search surface alongside `principal_id`.
+* `auth_authorized_dependency.py` publishes the authenticated principal on the
+  call-scoped `ctx` under `auth_principal.PRINCIPAL_CTX_KEY`, so a resource
+  service (which receives the same ctx) can read it — e.g. an `Owner`-scoped
+  resource stamping the owner on a create row. The key is a plain string so
+  `v2/core` need not import `v2/auth`.
+
+`specs/roles.qnt` pins the role → policy reduction and the union laws (in `make
+specs` and CI): the `Owner` scoping (own rows for read / by-id writes, unscoped
+create, denied anonymous), unknown-role / un-roled fail-closed defaults,
+per-resource scoping (a role reading all of X but only its own rows of Y), the
+union of several roles, and that a deny-only role never overrides a grant.
 
 ### Storage backends and the shared paging base
 

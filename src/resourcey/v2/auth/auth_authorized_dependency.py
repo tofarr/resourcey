@@ -52,6 +52,7 @@ from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.v2.auth.auth_authorized_service import AuthorizedService
 from resourcey.v2.auth.auth_policy import AllowAllResolver, PolicyResolver
 from resourcey.v2.auth.auth_principal import (
+    PRINCIPAL_CTX_KEY,
     Authenticator,
     optional_principal,
     required_principal,
@@ -137,7 +138,13 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
         ) -> AsyncIterator[Service[Any, Any]]:
             policies = await policy_resolver.resolve(resource, principal)
             user_id = principal.id if principal is not None else None
-            inner = await resource.get_service(request_ctx(request))
+            ctx = request_ctx(request)
+            # Publish the principal on the call-scoped ctx so a resource service
+            # (which receives the same ctx) can read it — e.g. an Owner-scoped
+            # resource stamping the owner on a create row the policy deliberately
+            # leaves unscoped.
+            ctx[PRINCIPAL_CTX_KEY] = principal
+            inner = await resource.get_service(ctx)
             service: Service[Any, Any] = AuthorizedService(
                 inner,
                 policies=policies,

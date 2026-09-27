@@ -36,10 +36,12 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from resourcey.v2.auth.auth_principal import Authenticator, AuthResult, Principal, PrincipalKind
+from resourcey.v2.auth.auth_role import roles_from_credential
 from resourcey.v2.encryption.encryption_service import EncryptionService
 
 SUB_CLAIM = "sub"
 EXP_CLAIM = "exp"
+ROLES_CLAIM = "roles"
 
 
 class CookieAuthenticator(Authenticator):
@@ -109,7 +111,12 @@ class CookieAuthenticator(Authenticator):
         except ValueError:
             # ``sub`` must be the principal's UUID; anything else is a bad cookie.
             return None
-        return Principal(id=subject, kind=PrincipalKind.USER, claims=_string_claims(claims))
+        return Principal(
+            id=subject,
+            kind=PrincipalKind.USER,
+            roles=roles_from_credential(claims.get(ROLES_CLAIM)),
+            claims=_string_claims(claims),
+        )
 
     def _is_stale(self, claims: dict[str, Any]) -> bool:
         """Whether the cookie is past its freshness window and should be re-issued.

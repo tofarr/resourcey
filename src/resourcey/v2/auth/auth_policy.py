@@ -26,6 +26,9 @@ Built-in policies:
 * :class:`DenyAll`  — denies every action over every row (``NoMatchFilter``).
 * :class:`ReadOnly` — grants read / search / count / batch_read, denies the
   write actions.
+* :class:`Owner`    — scopes rows to the authenticated principal (the
+  "own-rows-only" rule): reads / searches / updates / deletes only rows whose
+  owner column equals ``user_id``.
 
 This module is part of ``v2/auth``: it imports only ``v2``.
 """
@@ -38,7 +41,13 @@ from typing import TYPE_CHECKING, Any
 
 from resourcey.v2.core.service import Action
 from resourcey.v2.util.models import DiscriminatedUnionMixin
-from resourcey.v2.util.search_filter import AllFilter, NoMatchFilter, SearchFilter
+from resourcey.v2.util.search_filter import (
+    AllFilter,
+    AttrFilter,
+    EqFilter,
+    NoMatchFilter,
+    SearchFilter,
+)
 
 # The read-like actions a ReadOnly policy grants: the four actions that only
 # read. The write actions (create / update / delete / batch_edit) are excluded.
@@ -116,6 +125,40 @@ class ReadOnly(Policy):
         if action in _READ_LIKE_ACTIONS:
             return AllFilter()
         return NoMatchFilter()
+
+
+class Owner(Policy):
+    """Scopes rows to the authenticated principal — the "own-rows-only" rule.
+
+    For the read-like actions the reduction is ``AttrFilter(<owner_field>,
+    EqFilter(user_id))``: only rows whose owner column equals the principal's id
+    are admitted. The write-by-id actions (``update`` / ``delete``) use the same
+    scope, so a row owned by someone else is a 404 and not leaked. ``create`` is
+    *not* scoped by a filter — a new row has no owner yet — so it is granted
+    whenever the caller is authenticated; the row's owner is supplied by the
+    resource / service, not by the policy.
+
+    An anonymous caller (``user_id is None``) owns nothing, so every action
+    reduces to ``NoMatchFilter`` (deny / fail-closed).
+
+    Attributes:
+        owner_field: The DTO field naming the row's owner. Defaults to
+            ``user_id``; set it to the resource's actual owner column (e.g.
+            ``owner_id``) via the role resolver's per-resource policy value.
+    """
+
+    owner_field: str = "user_id"
+
+    async def to_search_filter(
+        self, user_id: uuid.UUID | None, action: Action
+    ) -> SearchFilter[Any]:
+        if user_id is None:
+            return NoMatchFilter()
+        if action is Action.CREATE:
+            # Create is unscoped: the row does not exist yet, and its owner is
+            # stamped by the resource rather than matched by the policy.
+            return AllFilter()
+        return AttrFilter(attribute=self.owner_field, filter=EqFilter(value=user_id))
 
 
 class PolicyResolver(DiscriminatedUnionMixin, ABC):
