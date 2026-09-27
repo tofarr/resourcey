@@ -57,6 +57,13 @@ ValT = TypeVar("ValT")
 # The separator in an ``<attribute>__<op>`` object-filter field name.
 SEPARATOR = "__"
 
+# The most values an :class:`InFilter` may carry. An ``IN`` literal list is bounded
+# by the database's bind-parameter limit (SQLite's default is 999, Postgres
+# ~65535) and a very large set is a modelling smell; the cap keeps a set leaf well
+# inside the smallest of those. Beyond it, push the set down as a store join /
+# subquery (the materialized-ACL escape hatch) rather than a literal list.
+MAX_IN_VALUES = 500
+
 # A nested filter field annotated with this is validated by the ``mode="before"``
 # resolvers below (which route a ``dict`` through ``SearchFilter.model_validate``)
 # and then accepted as-is. Without ``SkipValidation`` a *parameterised* generic
@@ -267,6 +274,54 @@ class ContainsFilter(SearchFilter[T]):
         return _mem_contains(value, self.value)
 
 
+class InFilter(SearchFilter[T]):
+    """Set membership: the stored value is one of ``values``.
+
+    ``values`` is a **tuple** (not a list) so the frozen tree stays hashable, the
+    same reason :class:`AndFilter` / :class:`OrFilter` children are tuples. It
+    composes with the existing :class:`AttrFilter`, which binds the column::
+
+        AttrFilter("id", InFilter(values=(uuid1, uuid2, ...)))
+
+    An **empty set matches nothing** (fail-closed): it is a deny, never "no
+    restriction". This is deliberate and differs from v1's ``AclFilter``, whose
+    empty id list meant "no restriction" -- a footgun for a permission set.
+
+    ``values`` is capped at :data:`MAX_IN_VALUES` so an unbounded ``IN`` list is
+    refused with an actionable error; the escape hatch beyond the cap is a store
+    join / subquery (the materialized-ACL path), not a literal list.
+    """
+
+    values: tuple[T, ...]
+
+    @property
+    def value(self) -> tuple[T, ...]:
+        """Alias of :attr:`values` so the generic converters (which read
+        ``node.value``) handle this leaf without a special case."""
+        return self.values
+
+    @field_validator("values", mode="before")
+    @classmethod
+    def _coerce_tuple(cls, value: Any) -> Any:
+        if isinstance(value, list):
+            return tuple(value)
+        return value
+
+    @field_validator("values")
+    @classmethod
+    def _enforce_cap(cls, value: tuple[T, ...]) -> tuple[T, ...]:
+        if len(value) > MAX_IN_VALUES:
+            raise ValueError(
+                f"InFilter permits at most {MAX_IN_VALUES} values; got {len(value)}. "
+                "Push the set down as a store join / subquery (the materialized-ACL "
+                "path) instead of a literal IN list."
+            )
+        return value
+
+    def matches(self, value: T) -> bool:
+        return value in self.values
+
+
 def _mem_contains(attr_value: Any, needle: Any) -> bool:
     """In-memory ``needle in stored`` with case-insensitive string semantics."""
     if attr_value is None:
@@ -372,6 +427,7 @@ _OP_NODES: dict[str, Any] = {
     "lt": LtFilter,
     "le": LeFilter,
     "contains": ContainsFilter,
+    "in": InFilter,
 }
 
 
@@ -415,7 +471,7 @@ class BaseObjectFilter(SearchFilter[T]):
             value = getattr(self, name)
             if value is None:
                 continue
-            clauses.append(attr(head, _OP_NODES[op](value=value)))
+            clauses.append(attr(head, _leaf_for(op, value)))
         return and_(*clauses)
 
 
@@ -424,9 +480,12 @@ class BaseObjectFilter(SearchFilter[T]):
 # ---------------------------------------------------------------------------
 
 # Operator suffixes by base Python type. Equality is always allowed; ordering
-# only where it is meaningful; ``contains`` only for strings.
+# only where it is meaningful; ``contains`` only for strings; ``in`` (set
+# membership) for every filterable field, since a set test is a variant of
+# equality.
+_IN = frozenset({"in"})
 _ORDERED_OPS = frozenset({"gt", "ge", "lt", "le"})
-_EQ_ONLY = frozenset({"eq"})
+_EQ_ONLY = frozenset({"eq"}) | _IN
 _STRING_OPS = _EQ_ONLY | _ORDERED_OPS | {"contains"}
 _ORDERABLE_OPS = _EQ_ONLY | _ORDERED_OPS
 
@@ -448,8 +507,11 @@ def operators_for_annotation(annotation: Any) -> frozenset[str]:
     """The ``<op>`` suffixes a field of ``annotation`` supports.
 
     The derived query surface: a field is filterable exactly when the read model
-    exposes it, and the operator set follows the field's type (equality always;
-    ordering for numbers and datetimes; substring for strings).
+    exposes it, and the operator set follows the field's type (equality for
+    scalars, ordering for numbers and datetimes, substring for strings, and the
+    ``in`` set test throughout). A non-scalar annotation (a JSON ``dict`` / list
+    column) yields **no** operators: it is not scalarly comparable, and a query
+    param of that type is not one FastAPI can wire.
     """
     base = _base_annotation(annotation)
     if isinstance(base, type):
@@ -459,10 +521,29 @@ def operators_for_annotation(annotation: Any) -> frozenset[str]:
             return _ORDERABLE_OPS
         if issubclass(base, _STRING_TYPES):
             return _STRING_OPS
-    return _EQ_ONLY
+        return _EQ_ONLY
+    return frozenset()
 
 
 def build_filter(clauses: Iterable[tuple[str, str, Any]]) -> SearchFilter[Any]:
     """Combine ``(attribute, op, value)`` clauses into one normalised tree."""
-    children = [attr(attribute, _OP_NODES[op](value=value)) for attribute, op, value in clauses]
+    children = [attr(attribute, _leaf_for(op, value)) for attribute, op, value in clauses]
     return and_(*children)
+
+
+def _leaf_for(op: str, value: Any) -> SearchFilter[Any]:
+    """Construct the value leaf for ``op``, naming its field correctly.
+
+    Most leaves take ``value``; the set leaf (:class:`InFilter`) takes ``values``.
+    A comma-separated string (the wire form of a set) is split into a tuple, and
+    a bare scalar is wrapped, so both the query-string path and an already-typed
+    object-filter field lower to the same leaf.
+    """
+    if op == "in":
+        if isinstance(value, str):
+            value = tuple(part.strip() for part in value.split(",") if part.strip())
+        elif not isinstance(value, (tuple, list, set, frozenset)):
+            value = (value,)
+        return InFilter(values=tuple(value))
+    leaf: SearchFilter[Any] = _OP_NODES[op](value=value)
+    return leaf

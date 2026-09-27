@@ -30,7 +30,7 @@ until the first release.
 
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
-  `04_simple_roles` — standalone
+  `04_simple_roles`, `05_full_rbac` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **`v2` reference app** (issue
@@ -58,11 +58,22 @@ until the first release.
   `Owner`-scoped (`author_id`) on `messages` — the "read all of X, own rows
   of Y" rule — and an un-roled key denied everything (fail-closed). `v2` does
   no `.env` loading, so its run/debug commands pass
-  `uvicorn --env-file .env` / `uv run --env-file .env`.
+  `uvicorn --env-file .env` / `uv run --env-file .env`. `05_full_rbac` is the
+  **`v2` store-backed RBAC app** (issue #133, Part 3 of the auth roadmap): the
+  same board, but the credential carries only a `principal_id` and the roles /
+  groups / permissions live in real `users` / `groups` / `group_users` /
+  `roles` / `group_roles` / `role_permissions` / `resource_acls` tables, resolved
+  **per request** by `RbacPolicyResolver` (group → role → permission, scoped to
+  the target resource) — `admin` full access, `viewer` read-only, `author`
+  read-only on `threads` but `Owner`-scoped (`author_id`) on `messages`, and a
+  `DenyAll` never overriding another role's grant (union model). Multiple roles
+  union their policies: `viewer` ∪ `author` reads all of `messages` but edits
+  only its own. A `seed` module populates the store; the whole RBAC set is also
+  served over the ordinary REST surface, with an `admin` grant on each table.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
-  8081 (01), 8082 (02), 8083 (03), 8084 (04).
+  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05).
 
 ## Core design principles
 
@@ -264,6 +275,62 @@ specs` and CI): the `Owner` scoping (own rows for read / by-id writes, unscoped
 create, denied anonymous), unknown-role / un-roled fail-closed defaults,
 per-resource scoping (a role reading all of X but only its own rows of Y), the
 union of several roles, and that a deny-only role never overrides a grant.
+
+### `v2/auth` full RBAC — the stored rung (issue #133)
+
+Part 3 replaces Part 2's app-level, credential-carried roles with a **store**.
+Three modules, all importing only `v2`:
+
+* `auth_rbac.py` — the ORM models + the exposed resource set, **model-first**
+  like every `v2` SQL resource. `User` (`id`/`email`/`username`/`enabled`),
+  `Group`, `GroupUser` (membership), `Role` (the stored counterpart of Part 2's
+  role strings), `GroupRole` (role assignment to a group), `RolePermission` (the
+  core RBAC unit: a `resource` name + a JSON-serialized `Policy`), and
+  `ResourceAcl` (the materialized per-object grant, keyed by
+  `(principal_id, resource_name)`). They live on a local `RbacBase` metadata.
+  `policy_to_json` / `utc_now` are the small helpers. `RBAC_MODELS` and
+  `rbac_resources(...)` expose the whole set as ordinary `SqlResource`s (so it
+  can be seeded / administered over REST); an app that wants to hide a table
+  registers a narrowing `ResourceView` instead.
+* `auth_rbac_store.py` — **`RbacStore`** (the read seam: `policies_for`,
+  `groups_for`, and the materialized-ACL `acl_ids` / `acl_id_subquery`) and its
+  SQL implementation **`SqlRbacStore`**. Resolution **collapses at the store**:
+  the query joins membership → role → permission filtered to the target
+  `resource`, with `SELECT DISTINCT` so roles sharing a policy collapse. The
+  session source is an `async_sessionmaker` **or** a zero-arg callable returning
+  one (sync or async), so a store can be built before the app lifecycle (a
+  `SqlSessionManager` only hands out makers once entered). `ACL_MAX_IDS = 100`
+  caps the enumeration path (v1's bound carried forward); beyond it the join /
+  subquery flavour is the answer. `policy_from_rows` skips a corrupt row rather
+  than crashing or over-denying.
+* `auth_rbac_resolver.py` — **`RbacPolicyResolver`**, Part 1's `PolicyResolver`
+  seam against the store: for each request it takes the authenticated
+  `Principal`, asks the store for the principal's groups and the resource-scoped
+  policies, binds membership onto any `GroupMember` policy, and returns them;
+  `AuthorizedService` OR-combines (union model — no deny-wins override; an
+  empty set is fail-closed; an anonymous principal resolves to `[]`).
+  `materialized_acl(...)` is the portable bridge that enumerates the (capped)
+  ids into an `Acl` policy. **Freshness is explicit**: `cache_ttl` (default
+  `None`) resolves every request, so an API key sees a membership change
+  immediately; a positive value bounds staleness to (at most) the credential's
+  own validation / refresh threshold. `invalidate(...)` is the write-through
+  hook.
+
+The vocabulary is Part 2's — `Owner`, `GroupMember`, `Acl`, plus the built-ins —
+so Parts 2 and 3 share one `Policy` set. `GroupMember` is the principal-level
+gate: membership is pre-bound by the resolver (`bind_member_groups`) and its
+`to_search_filter` selects `on_match` / `on_mismatch` (`on_create` for create);
+an unbound / empty target is fail-closed. `Acl` reduces to
+`AttrFilter(id_field, InFilter(values=...))` — the set leaf from #136, one `IN`
+predicate rather than a `K`-term `OR`.
+
+`specs/rbac.qnt` pins the store resolution + union laws (in `make specs` and
+CI): the policy reductions (`AllowAll` / `DenyAll` / `ReadOnly` / creator /
+group-member / ACL), the group → role → permission walk, per-resource scoping,
+`SELECT DISTINCT` collapse, fail-closed on unknown user / empty permission set,
+multiple roles unioning, deny never overriding a grant, same-attribute ACLs
+collapsing to one set, the set leaf agreeing with the join, the threshold
+bounding a membership change, and the caller-scoping derivation.
 
 ### Storage backends and the shared paging base
 

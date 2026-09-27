@@ -55,11 +55,13 @@ jobs:
       - name: Run secret-serialization spec tests
         run: quint test specs/secret_serialization.qnt --main=secret_serialization --match "^(defaultRedacts|exposeRevealsThePlaintext|encryptionTakesPrecedence|outputDependsOnlyOnTheContext|encryptionRoundTrips|invariantsHold)$"
       - name: Run filtering spec tests
-        run: quint test specs/filtering.qnt --main=filtering --match "^(law1_normalisationPreserves|law2_nullSafeNegation|law3_nullSafeNegationGeneralises|law4_positivePushdownIsSound)$"
+        run: quint test specs/filtering.qnt --main=filtering --match "^(law1_normalisationPreserves|law2_nullSafeNegation|law3_nullSafeNegationGeneralises|law4_positivePushdownIsSound|law5_inFilterAgreesWithEqAndOr)$"
       - name: Run sorting spec tests
         run: quint test specs/sorting.qnt --main=sorting --match "^(law1_totalOrder|law2_keysetAgreement|law3_descendingIsTheMirror|law4_cursorSortBinding)$"
       - name: Run cache-defaults spec tests
         run: quint test specs/cache_defaults.qnt --main=cache_defaults --match "^(readOnlyIsOptimistic|writeActionForcesValidator|writableWithUpdatedAtGetsLastModified|writableWithoutUpdatedAtGetsEtag|readOnlyDefaultHasPositiveWindow|readOnlyWindowIsPrivate|selectionIsTotal|invariantsHold)$"
+      - name: Run rbac spec tests
+        run: quint test specs/rbac.qnt --main=rbac --match "^(allowAllMatchesEveryRow|denyAllMatchesNothing|readOnlyMatchesReadLike|creatorScopesToOwnedRows|groupMemberMatchesOwnGroups|aclMatchesItsIds|resolutionWalksGroupsToRolesToPermissions|resourceScopingFiltersOtherResources|scopedQueryIsComplete|unknownUserIsFailClosed|emptyPermissionSetIsFailClosed|multipleRolesUnionTheirGrants|denyDoesNotOverrideAGrant|aclsUnionToOneSet|setLeafMatchesTheJoin|thresholdBoundsMembershipChange|callerScopingIsDerivedFromPolicies|invariantsHold)$"
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
@@ -78,6 +80,8 @@ jobs:
             name: api-key-auth (env API key)
           - example: examples/04_simple_roles
             name: simple-roles (role-based API keys)
+          - example: examples/05_full_rbac
+            name: full-rbac (stored users/groups/roles)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4

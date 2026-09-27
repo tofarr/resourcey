@@ -29,6 +29,15 @@ Built-in policies:
 * :class:`Owner`    — scopes rows to the authenticated principal (the
   "own-rows-only" rule): reads / searches / updates / deletes only rows whose
   owner column equals ``user_id``.
+* :class:`GroupMember` - the group-membership gate: a per-action outcome
+  (``on_match`` / ``on_mismatch`` / ``on_create``) selected by whether the
+  principal belongs to one of ``group_ids``. Membership is **pre-bound** by the
+  resolver (``matched``), so the reduction stays pure and storage-free.
+* :class:`Acl` - the portable object-id-list policy (a materialized ACL): a
+  bounded set of identifiers the principal may touch. It is the escape hatch
+  for genuine per-object grants; see
+  :mod:`resourcey.v2.auth.auth_rbac_resolver` for the store-backed loading and
+  its cap.
 
 This module is part of ``v2/auth``: it imports only ``v2``.
 """
@@ -39,12 +48,15 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 
+from pydantic import Field, PrivateAttr
+
 from resourcey.v2.core.service import Action
 from resourcey.v2.util.models import DiscriminatedUnionMixin
 from resourcey.v2.util.search_filter import (
     AllFilter,
     AttrFilter,
     EqFilter,
+    InFilter,
     NoMatchFilter,
     SearchFilter,
 )
@@ -81,6 +93,16 @@ class Policy(DiscriminatedUnionMixin, ABC):
     # cache. A genuinely principal-independent policy opts out by declaring
     # ``False``. Not a pydantic field -- a class-level fact about the policy kind.
     scopes_to_caller: ClassVar[bool] = True
+
+    group_ids: list[uuid.UUID] = Field(default_factory=list)
+    """The group ids a membership policy applies to (its *target* groups).
+
+    A plain policy ignores this. A store-backed resolver resolves the
+    *principal's* groups once per request and binds them onto the policy copy it
+    hands to ``AuthorizedService`` (via :func:`bind_member_groups`), so the
+    reduction itself stays pure and storage-free. A ``list`` (not a
+    ``frozenset``) so a stored policy serializes to JSON.
+    """
 
     @abstractmethod
     async def to_search_filter(
@@ -172,6 +194,123 @@ class Owner(Policy):
             # stamped by the resource rather than matched by the policy.
             return AllFilter()
         return AttrFilter(attribute=self.owner_field, filter=EqFilter(value=user_id))
+
+
+class GroupMember(Policy):
+    """Group-membership gate: outcome selected by the principal's group membership.
+
+    The principal-level (not per-row) counterpart of :class:`Owner`: if the
+    caller belongs to at least one of a permission's :attr:`group_ids`, the
+    reduction for the action is ``on_match``; otherwise it is ``on_mismatch``.
+    ``create`` (which has no existing row to scope) always uses ``on_create``.
+
+    Membership is **pre-bound**: a store-backed resolver resolves the
+    principal's groups once per request and calls
+    :func:`bind_member_groups` on each resolved policy, which binds the
+    principal's membership onto ``GroupMember``'s :attr:`Policy.group_ids`. The
+    reduction is therefore pure and storage-free. A ``GroupMember`` whose
+    ``group_ids`` is empty (never bound, or a permission with no group) reduces
+    to ``on_mismatch`` — fail-closed. All three outcomes default to
+    :class:`DenyAll`, so a bare ``GroupMember()`` grants nothing.
+
+    Example::
+
+        GroupMember(group_ids=[moderator_group], on_match=AllowAll())
+            # members read/write everything; others denied; no create.
+
+    Its outcome may itself be a caller-scoped policy (e.g. ``Owner``), so it
+    keeps the safe caller-scoped default (:attr:`Policy.scopes_to_caller`) and a
+    response under it is marked private rather than optimistically shared.
+
+    ``group_ids`` means different things at two moments, deliberately kept
+    separate:
+
+    * **as stored**, it names the groups the permission *targets* (what an admin
+      declares);
+    * **as bound** by :func:`bind_member_groups`, the resolver replaces it with
+      the *principal's* groups (via :func:`bind_member_groups`), and the reduction
+      then answers "does the principal have a non-empty membership?". The
+      principal's membership never overwrites the stored value in the database —
+      the binding is on the in-memory copy the resolver yields.
+    """
+
+    on_match: Policy = Field(default_factory=DenyAll)
+    on_mismatch: Policy = Field(default_factory=DenyAll)
+    on_create: Policy = Field(default_factory=DenyAll)
+
+    _member_groups: frozenset[uuid.UUID] = PrivateAttr(default_factory=frozenset)
+
+    @property
+    def member_groups(self) -> frozenset[uuid.UUID]:
+        """The principal's bound groups (never a stored field).
+
+        Kept off the JSON surface entirely: the resolved membership is
+        process-local, bound per request, and never persisted, so it must not
+        appear in ``model_dump`` (the ``permission`` column is JSON).
+        """
+        return self._member_groups
+
+    async def to_search_filter(
+        self, user_id: uuid.UUID | None, action: Action
+    ) -> SearchFilter[Any]:
+        if action is Action.CREATE:
+            return await self.on_create.to_search_filter(user_id, action)
+        # Membership is checked against the *bound* member groups, so a caller
+        # who is a member of a targeted group gets ``on_match``. An unbound copy
+        # (empty membership) reduces to ``on_mismatch`` — fail-closed.
+        if not self._member_groups.isdisjoint(self.group_ids):
+            return await self.on_match.to_search_filter(user_id, action)
+        return await self.on_mismatch.to_search_filter(user_id, action)
+
+
+def bind_member_groups(policy: Policy, groups: frozenset[uuid.UUID]) -> Policy:
+    """Bind a principal's group membership onto a membership-aware policy.
+
+    A :class:`GroupMember` target may be *either* a specific group (the stored
+    ``group_ids``) *or* "any group the principal belongs to". This binds the
+    principal's membership onto the in-memory copy (never the stored value), so
+    the pure reduction can answer "is the caller a member?" by intersecting the
+    two. A non-membership policy is returned unchanged.
+    """
+    if isinstance(policy, GroupMember):
+        bound = policy.model_copy()
+        bound._member_groups = groups
+        return bound
+    return policy
+
+
+class Acl(Policy):
+    """Portable object-id-list policy — the materialized-ACL escape hatch.
+
+    A bounded set of identifiers the principal may touch, reduced to
+    ``AttrFilter(<id_field>, InFilter((...)))`` for the non-create actions (a
+    single ``IN`` predicate, not a ``K``-term ``OR``). This is the portable
+    flavour of a per-object grant: it travels in the policy tree and works on
+    every backend. Beyond the set cap
+    (:data:`~resourcey.v2.util.search_filter.MAX_IN_VALUES`) a genuine
+    per-object ACL must be pushed down as a store join / subquery instead — see
+    :mod:`resourcey.v2.auth.auth_rbac_resolver`.
+
+    ``create`` is unscoped (a new row has no id yet), so it is grantable like
+    :class:`Owner`'s create; use ``on_create`` to deny it if desired.
+
+    Attributes:
+        ids: The permitted object identifiers.
+        id_field: The DTO field naming the row's identifier (``id`` by default).
+    """
+
+    ids: frozenset[Any] = frozenset()
+    id_field: str = "id"
+    on_create: Policy = Field(default_factory=AllowAll)
+
+    async def to_search_filter(
+        self, user_id: uuid.UUID | None, action: Action
+    ) -> SearchFilter[Any]:
+        if action is Action.CREATE:
+            return await self.on_create.to_search_filter(user_id, action)
+        if not self.ids:
+            return NoMatchFilter()
+        return AttrFilter(attribute=self.id_field, filter=InFilter(values=tuple(self.ids)))
 
 
 class PolicyResolver(DiscriminatedUnionMixin, ABC):

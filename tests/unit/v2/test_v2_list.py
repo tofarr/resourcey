@@ -592,8 +592,8 @@ class TestCacheAndQuerySurface:
 
     def test_filter_operators_follow_the_field_type(self) -> None:
         operators = _resource().get_filter_operators()
-        assert operators["name"] == frozenset({"eq", "gt", "ge", "lt", "le", "contains"})
-        assert operators["population"] == frozenset({"eq", "gt", "ge", "lt", "le"})
+        assert operators["name"] == frozenset({"eq", "in", "gt", "ge", "lt", "le", "contains"})
+        assert operators["population"] == frozenset({"eq", "in", "gt", "ge", "lt", "le"})
 
 
 # ---------------------------------------------------------------------------

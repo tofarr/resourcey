@@ -290,6 +290,9 @@ def test_the_auth_files_exist_without_an_init():
         "auth_cookie.py",
         "auth_policy.py",
         "auth_principal.py",
+        "auth_rbac.py",
+        "auth_rbac_resolver.py",
+        "auth_rbac_store.py",
         "auth_role.py",
     }
     assert not (auth / "__init__.py").exists()

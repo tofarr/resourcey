@@ -63,6 +63,18 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "preLaunchTask": "examples: migrate 04_simple_roles"
+        },
+        {
+            "name": "Debug 05 — Full RBAC (SQLite, v2)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["full_rbac.app:app", "--env-file", ".env", "--port", "8085"],
+            "cwd": "${workspaceFolder}/examples/05_full_rbac",
+            "python": "${workspaceFolder}/examples/05_full_rbac/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 05_full_rbac"
         }
     ],
     "compounds": [
@@ -72,7 +84,8 @@
                 "Debug 01 — Message Board (SQLite, v2)",
                 "Debug 02 — Message Board (MongoDB, embedded)",
                 "Debug 03 — API Key Auth (SQLite)",
-                "Debug 04 — Simple Roles (SQLite)"
+                "Debug 04 — Simple Roles (SQLite)",
+                "Debug 05 — Full RBAC (SQLite)"
             ],
             "stopAll": true
         }
