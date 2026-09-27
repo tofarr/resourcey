@@ -40,6 +40,10 @@ jobs:
           done
       - name: Run Quint tests
         run: quint test specs/resource_actions.qnt --main=resource_actions --match "^(createThenRead|createUpdateDelete|batchReadAndEdit|searchEmptyFilterMatchesAll|searchEqualityPredicate|searchInPredicate|searchEmptyInMatchesNothing|searchAndCombinesPredicates|searchNoFilterDeclaredRejectsNonEmptyFilter|readOnlyResourceExposesReadSubset|writableResourceExposesAllActions|readOnlyResourceServesReads|defensiveReadIsolated|nonDefensiveServesStore)$"
+      - name: Run permissions spec tests
+        run: quint test specs/permissions.qnt --main=permissions --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|enforcementMatrix|enforcementAllowsEverything|allowAllGrantsAccess|denyAllBlocksAccess|emptyPoliciesDenies|readOnlyGrantsReadNotCreate|denyDoesNotOverrideGrant|unionCombinesGrants|invariantsHold)$"
+      - name: Run roles spec tests
+        run: quint test specs/roles.qnt --main=roles --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|ownerPolicyScoping|unknownRoleGrantsNothing|unroledCallerUsesTheClosedDefault|perResourceScoping|readsAllOfXOwnRowsOfY|multipleRolesUnionTheirGrants|denyRoleDoesNotOverrideAGrant|invariantsHold)$"
       - name: Run exposure spec tests
         run: quint test specs/exposure.qnt --main=exposure --match "^(selfIsTheDefault|hiddenRegistersNoRoutesTest|wrapperHidesAnExposedResource|wrapperNarrowsTheQuerySurface|delegatedWrapperWouldLeak|builderDoesNotChangeExposure|narrowingIsAllowedWideningIsRejected|batchEditAdmitsOnlyDeclaredActions|batchActionsRequireTheirSingularTest|defaultBuilderIsIdentityTest|wrappedBuilderPreservesTheActionContractTest|invariantsHold)$"
       - name: Run DTO-defaults spec tests
@@ -72,6 +76,8 @@ jobs:
             name: message-board (MongoDB)
           - example: examples/03_api_key_auth
             name: api-key-auth (env API key)
+          - example: examples/04_simple_roles
+            name: simple-roles (role-based API keys)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4

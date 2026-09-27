@@ -190,6 +190,7 @@ class Service(Generic[T, K]):
     def __init__(self) -> None:
         self._entered = False
         self._serialization_ctx: dict[str, Any] | None = None
+        self._response_private = False
 
     # ------------------------------------------------------------------
     # Serialization context
@@ -210,6 +211,34 @@ class Service(Generic[T, K]):
     def set_serialization_context(self, ctx: dict[str, Any] | None) -> None:
         """Set the serialization context this service supplies to the transport."""
         self._serialization_ctx = ctx
+
+    # ------------------------------------------------------------------
+    # Cache privacy
+    # ------------------------------------------------------------------
+
+    def response_is_private(self) -> bool:
+        """Whether this response may differ per caller, so it must not be shared.
+
+        ``False`` by default. A service wrapping a *principal-scoped* resource —
+        one whose responses depend on who is asking (an authorization policy that
+        narrows rows, e.g. an ``Owner`` policy) — returns ``True``, and the
+        transport then marks the response ``Cache-Control: private`` so a shared
+        cache (proxy / CDN) neither stores nor revalidates it for another caller.
+
+        This is the service-level half of the "a row-scoping policy must force a
+        caller-private cache" invariant: an ``ETag`` / ``Last-Modified`` alone
+        cannot keep a shared cache from serving one principal's slice to another.
+        """
+        return self._response_private
+
+    def set_response_private(self, private: bool) -> None:
+        """Mark whether this service's responses are caller-scoped.
+
+        See :meth:`response_is_private`. A wrapper (e.g. an authorization service)
+        that knows it enforces a principal-dependent policy calls this on its own
+        instance; it is not inherited by a delegate.
+        """
+        self._response_private = private
 
     # ------------------------------------------------------------------
     # Lifecycle (the service is the async context manager)

@@ -52,6 +52,7 @@ from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.v2.auth.auth_authorized_service import AuthorizedService
 from resourcey.v2.auth.auth_policy import AllowAllResolver, PolicyResolver
 from resourcey.v2.auth.auth_principal import (
+    PRINCIPAL_CTX_KEY,
     Authenticator,
     optional_principal,
     required_principal,
@@ -137,15 +138,36 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
         ) -> AsyncIterator[Service[Any, Any]]:
             policies = await policy_resolver.resolve(resource, principal)
             user_id = principal.id if principal is not None else None
-            inner = await resource.get_service(request_ctx(request))
+            ctx = request_ctx(request)
+            # Publish the principal on the call-scoped ctx so a resource service
+            # (which receives the same ctx) can read it — e.g. an Owner-scoped
+            # resource stamping the owner on a create row the policy deliberately
+            # leaves unscoped.
+            ctx[PRINCIPAL_CTX_KEY] = principal
+            inner = await resource.get_service(ctx)
             service: Service[Any, Any] = AuthorizedService(
                 inner,
                 policies=policies,
                 id_field=id_field,
                 resource_name=resource_name,
                 user_id=user_id,
+                response_private=_response_is_caller_scoped(policies),
             )
             async with service:
                 yield service
 
         return dependency
+
+
+def _response_is_caller_scoped(policies: list[Any]) -> bool:
+    """Whether a response under ``policies`` may differ per caller.
+
+    A response is marked caller-private when any resolved policy scopes to the
+    caller (``Policy.scopes_to_caller``). The flag defaults to ``True`` on
+    :class:`~resourcey.v2.auth.auth_policy.Policy`, so an unclassified policy is
+    treated as caller-scoped (safe); the principal-independent built-ins
+    (``AllowAll`` / ``DenyAll`` / ``ReadOnly``) declare ``False`` and keep the
+    shared-cache optimisations. This is what stops a shared cache from replaying
+    a principal-narrowed body (e.g. an ``Owner`` policy) to another caller.
+    """
+    return any(getattr(policy, "scopes_to_caller", True) for policy in policies)

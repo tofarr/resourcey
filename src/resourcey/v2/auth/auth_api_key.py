@@ -56,6 +56,7 @@ from resourcey.v2.auth.auth_principal import (
     Principal,
     PrincipalKind,
 )
+from resourcey.v2.auth.auth_role import roles_from_credential
 
 API_KEY_HEADER_NAME = "X-API-Key"
 
@@ -188,12 +189,35 @@ class ApiKeyAuthenticator(Authenticator):
 
         A DB row's owner (``user_id``) wins when present (a user principal); a
         row with no owner, or a config-list entry, resolves to a service
-        principal (optionally named by :attr:`principal_id`).
+        principal named by the row's own ``principal_id`` (falling back to the
+        authenticator's fixed :attr:`principal_id`). The row's
+        credential-carried ``roles`` are populated onto the principal with no
+        extra lookup, so a role-based policy can read them.
         """
         owner = getattr(row, "user_id", None)
+        roles = roles_from_credential(getattr(row, "roles", None))
         if owner is not None:
-            return Principal(id=owner, kind=PrincipalKind.USER)
-        return Principal(id=self.principal_id, kind=PrincipalKind.SERVICE)
+            return Principal(id=owner, kind=PrincipalKind.USER, roles=roles)
+        # A row's own ``principal_id`` wins when set; only a *missing* value
+        # falls back to the authenticator's fixed id. A present-but-unparseable
+        # value degrades to ``None`` (anonymous-scoped) rather than silently
+        # adopting the shared fixed principal, so a malformed binding cannot
+        # grant another principal's scope.
+        raw_principal_id = getattr(row, "principal_id", None)
+        principal_id = (
+            _as_uuid(raw_principal_id) if raw_principal_id is not None else self.principal_id
+        )
+        return Principal(id=principal_id, kind=PrincipalKind.SERVICE, roles=roles)
+
+
+def _as_uuid(value: Any) -> UUID | None:
+    """Coerce a stored principal id (a string in config) to a ``UUID``, or ``None``."""
+    if value is None or isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except ValueError:
+        return None
 
 
 def _key_is_live(row: Any, *, now: datetime | None = None) -> bool:

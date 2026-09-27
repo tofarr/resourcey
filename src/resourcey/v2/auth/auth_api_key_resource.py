@@ -38,8 +38,8 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, SecretStr
-from sqlalchemy import Boolean, DateTime, String
+from pydantic import BaseModel, Field, SecretStr
+from sqlalchemy import JSON, Boolean, DateTime, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.auth.auth_config import ApiKeysConfig
@@ -81,14 +81,25 @@ KEY_EXPOSED: dict[str, dict[str, Any]] = {
 }
 
 # The read-only variant: the key is hidden from every response and the query
-# surface, and ``principal_id`` (an internal principal binding, not part of the
-# public listing) is hidden too. A read-only resource has no create route, so
-# there is nothing to reveal; leaving the create flags untouched is therefore
-# inert, but an explicit hide is clearer than relying on the action set.
+# surface, and ``principal_id`` / ``roles`` (internal credential bindings, not
+# part of the public listing) are hidden too. A read-only resource has no create
+# route, so there is nothing to reveal; leaving the create flags untouched is
+# therefore inert, but an explicit hide is clearer than relying on the action
+# set.
 KEY_QUERY_SURFACE_HIDDEN: dict[str, dict[str, Any]] = {
     KEY_FIELD: {"in_read_response": False, "in_search_response": False},
     "principal_id": {"in_read_response": False, "in_search_response": False},
+    "roles": {"in_read_response": False, "in_search_response": False},
 }
+
+# The DB-backed view is the full key surface: only the secret ``key`` is
+# projected away (``KEY_EXPOSED``). ``roles`` stays a normal writable field — a
+# credential-carried role is an entry on the key's definition, settable (and
+# rotatable) through the REST surface, not a secret. Note the consequence: the
+# DB-backed key resource is therefore a **privilege-assignment surface** —
+# whoever can write a key row can grant it roles — so access to this resource
+# must itself be restricted to administrators.
+STORED_KEY_EXPOSED: dict[str, dict[str, Any]] = dict(KEY_EXPOSED)
 
 
 def encode_base36(value: int, width: int) -> str:
@@ -162,6 +173,7 @@ class ApiKey(ApiKeyBase):
         "key_hash", String(_KEY_HASH_LENGTH), nullable=False, unique=True, index=True
     )
     user_id: Mapped[UUID | None] = mapped_column(nullable=True, index=True)
+    roles: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="true"
     )
@@ -227,22 +239,24 @@ def stored_api_key_resource(
 
 def stored_api_key_view(inner: Resource[Any, Any]) -> ResourceView[Any, Any]:
     """The exposed view over a DB-backed key resource (the one-time reveal)."""
-    return ResourceView(inner, exposed_field_overrides=KEY_EXPOSED)
+    return ResourceView(inner, exposed_field_overrides=STORED_KEY_EXPOSED)
 
 
 class ConfigApiKey(BaseModel):
-    """A served config key: the identifier, the label, and the **digest**.
+    """A served config key: the identifier, the label, the digest, and its roles.
 
     Only ``id`` / ``name`` are ever exposed; ``key`` holds the SHA-256 digest and
     is hidden by the read-hiding view, so it can be searched by the authenticator
     but never read. ``principal_id`` (an optional fixed principal for the key)
-    is carried so the authenticator can resolve it without a DB lookup.
+    and ``roles`` (the roles the key authenticates as) are carried so the
+    authenticator can resolve them without a DB lookup.
     """
 
     id: str
     name: str | None = None
     key: SecretStr
     principal_id: str | None = None
+    roles: list[str] = Field(default_factory=list)
 
 
 def config_api_key_models(config: ApiKeysConfig) -> list[ConfigApiKey]:
@@ -257,6 +271,7 @@ def config_api_key_models(config: ApiKeysConfig) -> list[ConfigApiKey]:
             name=entry.name,
             key=SecretStr(hash_api_key(entry.key.get_secret_value())),
             principal_id=entry.principal_id,
+            roles=list(entry.roles),
         )
         for entry in config.api_keys
     ]

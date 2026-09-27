@@ -91,6 +91,7 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         id_field: str,
         resource_name: str,
         user_id: uuid.UUID | None = None,
+        response_private: bool = False,
     ) -> None:
         super().__init__()
         self._inner = inner
@@ -102,6 +103,21 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         self._resource_name = resource_name
         self._user_id = user_id
         self._owns_inner = False
+        self.set_response_private(response_private)
+
+    # ------------------------------------------------------------------
+    # Cache privacy
+    # ------------------------------------------------------------------
+
+    def response_is_private(self) -> bool:
+        """Whether this service's responses are caller-scoped.
+
+        Delegates to the inner when the inner already declares privacy, else
+        reports this wrapper's own flag (set from the resolved policies). The
+        wrapper's flag is the important one: an ``Owner`` policy narrows rows
+        even though the inner storage is principal-agnostic.
+        """
+        return self._response_private or self._inner.response_is_private()
 
     # ------------------------------------------------------------------
     # Lifecycle (delegated to the inner service)

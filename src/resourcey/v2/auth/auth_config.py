@@ -47,6 +47,14 @@ class ApiKeyConfig(BaseModel):
     own ``user_id`` always wins.
     """
 
+    roles: list[str] = Field(default_factory=list)
+    """The roles this key authenticates as (the simple-roles vocabulary, #132).
+
+    The roles are short, app-scoped strings carried on the key's definition, so a
+    presented key's roles are populated onto the principal with no extra store
+    lookup. An empty list means an un-roled (fail-closed) caller.
+    """
+
 
 class ApiKeysConfig(BaseConfig):
     """The root config block holding the configured API keys.

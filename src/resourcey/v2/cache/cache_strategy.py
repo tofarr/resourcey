@@ -143,6 +143,29 @@ class CacheStrategy(DiscriminatedUnionMixin, CoreCacheStrategy, ABC, Generic[T])
         header.private = self.private
         return header
 
+    def cache_is_private(self) -> bool:
+        """Whether this strategy's responses are caller-scoped, so must not be shared.
+
+        ``True`` when the strategy's freshness window is already private.
+        Deliberately reports only the strategy's *own* contract, not the
+        resource's: a service-level privacy flag (an ``Owner``-scoped resource)
+        is layered on top by the transport via :meth:`with_private`.
+        """
+        return self.private
+
+    def with_private(self, private: bool) -> CacheStrategy[T]:
+        """A copy of this strategy with ``private`` forced to ``private``.
+
+        The transport calls this with ``True`` when the request's service is
+        caller-scoped, so even a validator-only strategy (ETag / Last-Modified)
+        emits ``Cache-Control: private`` and a shared cache neither stores nor
+        revalidates the response for another caller. ``private=False`` returns
+        ``self`` unchanged, so the common (non-scoped) path allocates nothing.
+        """
+        if not private or self.private:
+            return self
+        return self.model_copy(update={"private": True})
+
 
 class ETagCacheStrategy(CacheStrategy[T]):
     """Strong-ETag strategy: a stable hash of the serialized read models.

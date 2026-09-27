@@ -202,8 +202,37 @@ def _annotation_for_column(column: Any, declared: Any = None) -> Any:
     declared annotation and projects as ``SecretStr`` — the stored digest stays a
     ``String``.
     """
-    annotation = SecretStr if _is_secret_column(declared) else _scalar_annotation(column.type)
+    if _is_secret_column(declared):
+        annotation: Any = SecretStr
+    elif isinstance(column.type, JSON):
+        # The SQL type says only "JSON"; the declared annotation carries the
+        # container shape (``list[str]``, ``dict``, ...), so prefer it when the
+        # column was annotated as a list / dict.
+        declared_container = _declared_annotation(declared)
+        origin = get_origin(declared_container)
+        annotation = declared_container if origin in (list, dict) else dict
+    else:
+        annotation = _scalar_annotation(column.type)
     return annotation | None if column.nullable else annotation
+
+
+def _declared_annotation(declared: Any) -> Any:
+    """Reduce ``Mapped[T]`` / ``T | None`` to ``T`` for a container annotation.
+
+    Unlike :func:`_unwrap_mapped` (which only looks for ``SecretStr``), this
+    keeps the *whole* container type so a ``Mapped[list[str]]`` JSON column
+    projects as ``list[str]`` rather than ``dict``.
+    """
+    if declared is None:
+        return None
+    origin = get_origin(declared)
+    if origin is not None and getattr(origin, "__name__", "") == "Mapped":
+        args = get_args(declared)
+        return _declared_annotation(args[0]) if args else None
+    if type(None) in get_args(declared):
+        non_none = [arg for arg in get_args(declared) if arg is not type(None)]
+        return non_none[0] if len(non_none) == 1 else declared
+    return declared
 
 
 def _resolved_hints(mapper: Mapper[Any]) -> dict[str, Any]:
@@ -271,8 +300,6 @@ def _scalar_annotation(column_type: Any) -> Any:
         return bytes
     if isinstance(column_type, Uuid):
         return UUID
-    if isinstance(column_type, JSON):
-        return dict
     if isinstance(column_type, String):
         return str
     return Any

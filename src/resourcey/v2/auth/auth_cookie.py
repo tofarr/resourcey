@@ -36,10 +36,12 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from resourcey.v2.auth.auth_principal import Authenticator, AuthResult, Principal, PrincipalKind
+from resourcey.v2.auth.auth_role import roles_from_credential
 from resourcey.v2.encryption.encryption_service import EncryptionService
 
 SUB_CLAIM = "sub"
 EXP_CLAIM = "exp"
+ROLES_CLAIM = "roles"
 
 
 class CookieAuthenticator(Authenticator):
@@ -109,7 +111,12 @@ class CookieAuthenticator(Authenticator):
         except ValueError:
             # ``sub`` must be the principal's UUID; anything else is a bad cookie.
             return None
-        return Principal(id=subject, kind=PrincipalKind.USER, claims=_string_claims(claims))
+        return Principal(
+            id=subject,
+            kind=PrincipalKind.USER,
+            roles=roles_from_credential(claims.get(ROLES_CLAIM)),
+            claims=_string_claims(claims),
+        )
 
     def _is_stale(self, claims: dict[str, Any]) -> bool:
         """Whether the cookie is past its freshness window and should be re-issued.
@@ -144,6 +151,8 @@ def _string_claims(claims: dict[str, Any]) -> dict[str, str]:
 
     Non-scalar claims (nested objects / lists) are dropped: ``claims`` is
     provenance kept alongside the principal, not a place to carry arbitrary
-    structures.
+    structures. In particular the ``roles`` claim is dropped here — it is
+    surfaced on :attr:`Principal.roles`, which is a decision input, not
+    provenance.
     """
     return {key: value for key, value in claims.items() if isinstance(value, str)}

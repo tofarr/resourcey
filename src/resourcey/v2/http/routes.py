@@ -426,7 +426,7 @@ def _add_create_route(
         created = await service.create(request_to_dto(dto_model, payload))
         context = service.serialization_context()
         projected = _project(created, models.create_response, context)
-        header = _header_for(strategy, [projected], context)
+        header = _header_for(strategy, [projected], context, service)
         return _cached_json_response(
             request, _dump(projected, context), header, status.HTTP_201_CREATED
         )
@@ -463,7 +463,7 @@ def _add_read_route(
         found = await service.read(id)
         context = service.serialization_context()
         projected = _project(found, models.read_response, context)
-        header = _header_for(strategy, [projected], context)
+        header = _header_for(strategy, [projected], context, service)
         return _cached_json_response(request, _dump(projected, context), header)
 
     handler.__annotations__ = {"request": Request, "id": id_type, "service": Service}
@@ -495,7 +495,7 @@ def _add_update_route(
         updated = await service.update(_update_dto(dto_model, id_field, id, payload))
         context = service.serialization_context()
         projected = _project(updated, models.update_response, context)
-        header = _header_for(strategy, [projected], context)
+        header = _header_for(strategy, [projected], context, service)
         return _cached_json_response(request, _dump(projected, context), header)
 
     handler.__annotations__ = {
@@ -589,7 +589,7 @@ def _add_search_route(
         )
         context = service.serialization_context()
         body, items = _page_body(page, models.search_response, context)
-        header = _header_for(strategy, items, context)
+        header = _header_for(strategy, items, context, service)
         return _cached_json_response(request, body, header)
 
     handler.__annotations__ = {
@@ -639,8 +639,9 @@ def _add_count_route(
         filters = _resolve_filters(request, filter_spec, values)
         total = await service.count(search_filter=filters)
         header: CacheHeader | None = None
-        if strategy is not None:
-            candidate = strategy.count_cache_header(total, filters)
+        effective = _private_strategy(strategy, service)
+        if effective is not None:
+            candidate = effective.count_cache_header(total, filters)
             header = candidate if candidate.has_any() else None
         return _cached_json_response(request, total, header)
 
@@ -671,7 +672,7 @@ def _add_batch_read_route(
         found = await service.batch_read(list(id))
         context = service.serialization_context()
         items = [_project(item, models.search_response, context) for item in found]
-        header = _header_for(strategy, items, context)
+        header = _header_for(strategy, items, context, service)
         return _cached_json_response(request, _dump(items, context), header)
 
     handler.__annotations__ = {"request": Request, "id": list[id_type], "service": Service}
@@ -734,7 +735,7 @@ def _add_batch_edit_route(
             _project_edit_result(edit, result, models, context)
             for edit, result in zip(edits, edited, strict=True)
         ]
-        header = _header_for(strategy, items, context)
+        header = _header_for(strategy, items, context, service)
         return _cached_json_response(request, _dump(items, context), header)
 
     handler.__annotations__ = {
@@ -842,19 +843,47 @@ def _page_body(
 # ---------------------------------------------------------------------------
 
 
+def _response_is_private(service: Any) -> bool:
+    """Whether ``service`` reports its responses as caller-scoped."""
+    fn = getattr(service, "response_is_private", None)
+    return bool(fn()) if callable(fn) else False
+
+
+def _private_strategy(strategy: Any, service: Any) -> Any:
+    """``strategy`` with privacy forced on when ``service`` is caller-scoped.
+
+    A principal-narrowed resource (an ``Owner`` policy, or any resolver / policy
+    that scopes to the caller) must not let a shared cache store or revalidate
+    its response under a validator another caller could present. Forcing
+    ``private`` onto the strategy makes the emitted ``Cache-Control`` carry
+    ``private``. A strategy with no ``with_private`` (the ``v2/core`` placeholder)
+    is left alone — it produces no validator, so there is nothing to protect.
+    """
+    if strategy is None or not _response_is_private(service):
+        return strategy
+    with_private = getattr(strategy, "with_private", None)
+    return with_private(True) if callable(with_private) else strategy
+
+
 def _header_for(
-    strategy: Any, items: list[Any], context: dict[str, Any] | None = None
+    strategy: Any,
+    items: list[Any],
+    context: dict[str, Any] | None = None,
+    service: Any = None,
 ) -> CacheHeader | None:
     """Compute the cache header for ``items`` via the resource's strategy.
 
     ``None`` when the resource declares no strategy or the strategy yields
     nothing (no validators and no freshness), so the response is uncached.
     ``context`` is the service's serialization context, so a secret-bearing ETag
-    hashes exactly the bytes the response carries.
+    hashes exactly the bytes the response carries. ``service`` supplies the
+    per-request privacy fact (a caller-scoped response forces ``private`` onto
+    the header), so a shared cache cannot replay it across principals.
     """
     if strategy is None:
         return None
-    header = strategy.get_cache_header(items, context=context)
+    effective = _private_strategy(strategy, service) if service is not None else strategy
+    header = effective.get_cache_header(items, context=context)
     return header if header.has_any() else None
 
 

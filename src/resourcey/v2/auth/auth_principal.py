@@ -55,6 +55,12 @@ AUTH_CHALLENGE = "Bearer"
 # (the builder's and an app route's) do not authenticate twice.
 _AUTH_STATE_KEY = "resourcey_auth"
 
+# The call-scoped ``ctx`` key under which the dependency builder stores the
+# authenticated principal, so a resource service (which receives the same ctx)
+# can read it — e.g. an ``Owner``-scoped resource stamping the owner on a create
+# row. Kept a plain string so ``v2/core`` need not import ``v2/auth``.
+PRINCIPAL_CTX_KEY = "resourcey_principal"
+
 
 class PrincipalKind(StrEnum):
     """The kind of authenticated caller.
