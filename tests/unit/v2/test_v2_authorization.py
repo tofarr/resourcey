@@ -29,7 +29,7 @@ from sqlalchemy import String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from resourcey.v2.auth.auth_api_key import API_KEY_HEADER_NAME, ApiKeyDependencyBuilder
+from resourcey.v2.auth.auth_api_key import API_KEY_HEADER_NAME, ApiKeyAuthenticator
 from resourcey.v2.auth.auth_api_key_resource import (
     config_api_key_resource,
     config_api_key_view,
@@ -37,7 +37,13 @@ from resourcey.v2.auth.auth_api_key_resource import (
 from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_authorized_service import AuthorizedService
 from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.auth.auth_policy import AllowAll, DenyAll, Policy, ReadOnly
+from resourcey.v2.auth.auth_policy import (
+    AllowAll,
+    DenyAll,
+    Policy,
+    PolicyResolver,
+    ReadOnly,
+)
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.service import (
     Action,
@@ -137,7 +143,7 @@ def _authorized(
 ) -> AuthorizedService[Any, Any]:
     return AuthorizedService(
         inner,
-        policy=policy,
+        policies=[policy],
         id_field=resource.get_id_field(),
         resource_name="items",
     )
@@ -315,12 +321,22 @@ class Widget(BaseModel):
     label: str
 
 
+class _FixedResolver(PolicyResolver):
+    """A resolver returning one fixed policy — the pre-#131 single-policy behaviour."""
+
+    policy: Policy
+
+    async def resolve(self, resource: Any, principal: Any) -> list[Policy]:
+        return [self.policy]
+
+
 def _config_builder(policy: Policy) -> tuple[AuthorizedDependencyBuilder, Any]:
     cfg = ApiKeysConfig(api_keys=[ApiKeyConfig(id="k1", name="one", key=SecretStr("secret-one"))])
     inner = config_api_key_resource(cfg)
     view = config_api_key_view(inner)
     builder = AuthorizedDependencyBuilder(
-        authenticator=ApiKeyDependencyBuilder(key_resource=inner), policy=policy
+        authenticator=ApiKeyAuthenticator(key_resource=inner),
+        policy_resolver=_FixedResolver(policy=policy),
     )
     return builder, view
 

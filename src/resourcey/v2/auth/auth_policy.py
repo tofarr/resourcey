@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from resourcey.v2.core.service import Action
 from resourcey.v2.util.models import DiscriminatedUnionMixin
@@ -45,6 +45,10 @@ from resourcey.v2.util.search_filter import AllFilter, NoMatchFilter, SearchFilt
 _READ_LIKE_ACTIONS: frozenset[Action] = frozenset(
     {Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ}
 )
+
+if TYPE_CHECKING:
+    from resourcey.v2.auth.auth_principal import Principal
+    from resourcey.v2.core.resource import Resource
 
 
 class Policy(DiscriminatedUnionMixin, ABC):
@@ -112,3 +116,56 @@ class ReadOnly(Policy):
         if action in _READ_LIKE_ACTIONS:
             return AllFilter()
         return NoMatchFilter()
+
+
+class PolicyResolver(DiscriminatedUnionMixin, ABC):
+    """Reduce an authenticated principal to the policies for one resource.
+
+    The ``Principal -> Policy`` translation is a **first-class, centralized,
+    pluggable** seam: a resolver maps a principal (its id, roles, ...) to the
+    policies that apply to the target resource, and
+    :class:`~resourcey.v2.auth.auth_authorized_service.AuthorizedService`
+    OR-combines their reductions (the union model -- a ``DenyAll`` contributes
+    nothing; an empty list is deny / fail-closed).
+
+    It is **async** and receives the target ``resource`` so a resolver may
+    consult storage (the store-backed RBAC rung) and scope per resource. The
+    result must be *complete* for ``(principal, resource)`` -- a disjunction
+    cannot be evaluated from a partial view -- so a resolver scopes and collapses
+    at the store rather than expanding many grants into a tree.
+
+    The built-ins below are principal-independent; an app supplies its own
+    subclass (or, later, a config-declared mapping) for its role logic.
+    """
+
+    @abstractmethod
+    async def resolve(
+        self, resource: Resource[Any, Any], principal: Principal | None
+    ) -> list[Policy]:
+        """The policies that apply to ``principal`` on ``resource``."""
+        raise NotImplementedError
+
+
+class AllowAllResolver(PolicyResolver):
+    """Grants every authenticated caller full access (``AllowAll``).
+
+    The default, preserving the #118 / #127 posture: any valid credential maps
+    to ``AllowAll``. An anonymous caller (``principal is None`` or
+    ``principal.id is None``) still gets ``AllowAll`` here -- whether anonymous
+    access is *reached* is the dependency's decision (strict vs lenient), not
+    the resolver's.
+    """
+
+    async def resolve(
+        self, resource: Resource[Any, Any], principal: Principal | None
+    ) -> list[Policy]:
+        return [AllowAll()]
+
+
+class DenyAllResolver(PolicyResolver):
+    """Denies every caller (no policies => fail-closed)."""
+
+    async def resolve(
+        self, resource: Resource[Any, Any], principal: Principal | None
+    ) -> list[Policy]:
+        return []

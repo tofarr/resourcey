@@ -11,8 +11,11 @@ from ``APP_SQL_CONNECTIONS_*``), a
 lifecycle), and the :func:`~resourcey.v2.http.app.create_app` free function.
 The security posture is the fourth piece: ``create_app``'s
 ``dependency_builder=`` argument, handed an
-:class:`~resourcey.v2.auth.auth_api_key.ApiKeyDependencyBuilder` whose key check
-is composed in front of every resource's service dependency.
+:class:`~resourcey.v2.auth.auth_authorized_dependency.AuthorizedDependencyBuilder`
+that authenticates with an
+:class:`~resourcey.v2.auth.auth_api_key.ApiKeyAuthenticator` and then grants the
+authenticated principal full access (the default ``AllowAllResolver``). The key
+check is composed in front of every resource's service dependency.
 
 Run with::
 
@@ -47,8 +50,9 @@ from fastapi import FastAPI
 
 from api_key_auth.message import MessageResource
 from api_key_auth.models import Message, Thread
-from resourcey.v2.auth.auth_api_key import ApiKeyDependencyBuilder
+from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.v2.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
+from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_config import ApiKeysConfig
 from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
@@ -70,17 +74,20 @@ def _verify_posture(builder: Any) -> None:
     API that merely looks secured. Raise an actionable error at import time
     instead of leaving that to be discovered by a client.
     """
-    if not isinstance(builder, ApiKeyDependencyBuilder):
+    if not isinstance(builder, AuthorizedDependencyBuilder) or not isinstance(
+        builder.authenticator, ApiKeyAuthenticator
+    ):
         raise ResourceyConfigError(
             "Example 03 requires the API-key posture: pass an "
-            "ApiKeyDependencyBuilder to create_app "
+            "AuthorizedDependencyBuilder authenticating with an "
+            "ApiKeyAuthenticator to create_app "
             f"(resolved {type(builder).__name__} instead)."
         )
 
 
 def build_auth(
     keys: ApiKeysConfig | None = None,
-) -> tuple[ApiKeyDependencyBuilder, Resource[Any, Any]]:
+) -> tuple[AuthorizedDependencyBuilder, Resource[Any, Any]]:
     """The API-key authenticator plus the exposed view over its key resource.
 
     Returns the builder (which holds the **inner** key resource and reaches
@@ -91,7 +98,9 @@ def build_auth(
     """
     api_keys = keys if keys is not None else ApiKeysConfig.get_instance()
     key_inner: Resource[Any, Any] = config_api_key_resource(api_keys)
-    builder = ApiKeyDependencyBuilder(key_resource=key_inner)
+    builder = AuthorizedDependencyBuilder(
+        authenticator=ApiKeyAuthenticator(key_resource=key_inner)
+    )
     _verify_posture(builder)
     return builder, config_api_key_view(key_inner)
 

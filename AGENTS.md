@@ -43,9 +43,11 @@ until the first release.
   no migration step (the schema is implicit and
   `migrate_document` is the opt-in hook). `03_api_key_auth` is the **`v2`
   authentication app** (issue #124): the same model-first message board as 01,
-  secured by `ApiKeyDependencyBuilder` passed to `create_app`, over a config-list
-  key resource (`ApiKeysConfig` → `config_api_key_resource` / `config_api_key_view`)
-  built from `APP_API_KEYS_*` — no auth table, no `DEPENDENCY_BUILDER_CLASS`
+  secured by an `AuthorizedDependencyBuilder` (authenticating with an
+  `ApiKeyAuthenticator`, granting `AllowAll`) passed to `create_app`, over a
+  config-list key resource (`ApiKeysConfig` → `config_api_key_resource` /
+  `config_api_key_view`) built from `APP_API_KEYS_*` — no auth table, no
+  `DEPENDENCY_BUILDER_CLASS`
   (the builder is constructed explicitly in `app.py`), and a `build_app` posture
   guard. `v2` does no `.env` loading, so its run/debug commands pass
   `uvicorn --env-file .env` / `uv run --env-file .env`.
@@ -84,14 +86,17 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
 
 `src/resourcey/auth2/` (issue #63), the **v1** API-key authentication seam, has
 been **deleted** now that its `v2` port is complete. Authentication work lives
-in **`src/resourcey/v2/auth/`** (issue #118): `auth_api_key.py` (the `v2`
-`DependencyBuilder`), `auth_api_key_resource.py` (the DB-backed ORM `ApiKey` +
+in **`src/resourcey/v2/auth/`**: `auth_principal.py` (the `Principal` /
+`PrincipalKind` / `AuthResult` vocabulary, the `Authenticator` seam, the
+`CompositeAuthenticator`, and the lenient/strict principal dependencies),
+`auth_api_key.py` (the `ApiKeyAuthenticator`), `auth_cookie.py` (the
+`CookieAuthenticator`), `auth_api_key_resource.py` (the DB-backed ORM `ApiKey` +
 inner `SqlResource`, the config-list inner `ListResource`, the exposed
 `ResourceView`s, and the key-generation helpers), `auth_api_key_service.py`
 (`StoredApiKeyService` / `ConfigApiKeyService`, both exposing `find_by_key`),
-and `auth_config.py` (`ApiKeysConfig` / `ApiKeyConfig`). It imports **only
-`v2`**, and `v2/http` must not import `v2/auth` (the app supplies the builder),
-so no cycle exists.
+and `auth_config.py` (`ApiKeysConfig` / `ApiKeyConfig` / `SessionCookieConfig`).
+It imports **only `v2`**, and `v2/http` must not import `v2/auth` (the app
+supplies the builder), so no cycle exists.
 
 The remaining `v1` package `src/resourcey/auth/` (users, sessions, OAuth,
 permissions) stays in place until it too is ported; `v2/auth` must never import
@@ -135,12 +140,57 @@ lives beside the API-key code in **`src/resourcey/v2/auth/`**:
   opens it) and delegates `serialization_context()` so a one-time secret reveal
   survives wrapping.
 * `auth_authorized_dependency.py` — **`AuthorizedDependencyBuilder`** (a
-  `DependencyBuilder`) **composes** #118's `ApiKeyDependencyBuilder`
-  (`api_key_dependency`) rather than re-implementing the key check; after it
-  passes, the resource service is opened over the request ctx and wrapped in an
-  entered `AuthorizedService`. `policy` defaults to `AllowAll`, so a valid key
-  grants full access exactly as #118 — setting `ReadOnly()` / `DenyAll()` is the
-  whole posture change. It is one policy per app, not a per-principal store.
+  `DependencyBuilder`) composes two independent, pluggable seams: an
+  **`authenticator`** (default a fail-closed `ApiKeyAuthenticator`) and a
+  **`policy_resolver`** (default `AllowAllResolver`). After authentication it
+  opens the resource service over the request ctx and wraps it in an entered
+  `AuthorizedService` carrying the resolved policies. `posture` (default
+  `Posture.REQUIRED`) selects whether an absent credential is a `401` or
+  anonymous; `with_posture(...)` is the one-line override. `get_principal_dependency()`
+  returns the strict/lenient principal dependency the transport adds to every
+  route as a `dependencies=[...]` entry, so the authenticator's OpenAPI security
+  scheme is declared without changing the route signature. The resolved policy
+  set replaces #127's one-policy-per-app assumption.
+
+### `v2/auth` authentication — the principal pipeline (issue #131)
+
+`auth_principal.py` states the authentication half in one place:
+
+* **`Principal`** (frozen, pydantic) — the authenticated caller: `id`
+  (`None` = anonymous), `kind` (`USER` / `SERVICE` / `ANONYMOUS`), `roles`,
+  `scopes`, `claims`. The three collections are three distinct layers and must
+  not be conflated: `claims` is what the *credential says* (provenance only —
+  never a decision input), `scopes` is a ceiling on *this credential*
+  (intersected with the policy), and `roles` is what the *principal is part of*
+  (sourced into a policy). `roles` is the **simple-roles** representation and is
+  populated only when roles are few and credential-carried; the store-backed
+  RBAC rung leaves it empty and resolves roles per request from `id`.
+* **`AuthResult`** — one attempt's outcome, keeping **absent** (no credential)
+  and **invalid** (presented but rejected) distinguishable, with
+  `refresh_recommended` for a cookie past its freshness threshold.
+* **`Authenticator`** (a `DiscriminatedUnionMixin`) — `authenticate(request) ->
+  AuthResult`, with a `dependency()` returning the request-cached FastAPI
+  dependency and a `challenge()` returning the `WWW-Authenticate` value.
+  `optional_principal(authenticator)` / `required_principal(authenticator)`
+  derive the **lenient** (anonymous on absent, `401` on invalid) and **strict**
+  (`401` unless authenticated) dependencies from the one `AuthResult`, both
+  sending the authenticator's challenge for absent and invalid alike.
+* **`CompositeAuthenticator`** — an ordered chain (first authenticated wins; a
+  seen-but-unauthenticated credential ⇒ invalid; else absent). Its dependency
+  synthesises one `Depends(child.dependency())` parameter per child so every
+  child's security scheme stays visible.
+
+`ApiKeyAuthenticator` (`auth_api_key.py`) is the API-key `Authenticator`: it
+looks the presented key's digest up on the inner (DB or config-list) key
+resource and returns a `Principal` — a DB row's owner (`user_id`) wins, else a
+`SERVICE` principal (optionally named by the config entry's `principal_id`).
+`lookup_api_key` returns `None` for a key that is inactive or past `expires_at`.
+`CookieAuthenticator` (`auth_cookie.py`) mints/validates a JWE cookie
+(`EncryptionService.create_jwe_token` / `decrypt_jwe_token`) whose `sub` is the
+principal id; the cookie's `exp` is the **internal validation threshold** (when
+to go back and re-check the principal), distinct from the browser cookie's
+`Max-Age`, and `refresh_after` is an optional margin before it.
+`SessionCookieConfig` (`auth_config.py`) holds the env-driven cookie settings.
 
 `ForbiddenError` and the singular `normalize_action` (`COUNT`→`SEARCH`,
 `BATCH_READ`→`READ`, `BATCH_EDIT`→`UPDATE`) live in `v2/core/service.py`;

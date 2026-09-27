@@ -1,7 +1,11 @@
 """The policy-enforcing service wrapper for ``v2`` (issue #127).
 
-:class:`AuthorizedService` wraps a resource's own service and enforces a
-:class:`~resourcey.v2.auth.auth_policy.Policy` on every action before delegating.
+:class:`AuthorizedService` wraps a resource's own service and enforces a set of
+:class:`~resourcey.v2.auth.auth_policy.Policy` objects on every action before
+delegating. Its filter for an action is the **OR-combination** of every
+policy's reduction (the union model), so a principal with several policies sees
+the union of what each grants and a ``DenyAll`` contributes nothing; an empty
+set is deny / fail-closed.
 It is storage-agnostic and depends only on ``v2`` — ``v2/core`` never imports it
 (dependency direction is strictly inward: ``auth`` -> ``core``), and a resource
 opts in by having the dependency builder yield an ``AuthorizedService`` instead
@@ -36,6 +40,7 @@ This module is part of ``v2/auth``: it imports only ``v2``.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Any, Generic, TypeVar
 
 from resourcey.v2.auth.auth_policy import Policy
@@ -51,7 +56,7 @@ from resourcey.v2.core.service import (
     Update,
 )
 from resourcey.v2.util.missing import MISSING
-from resourcey.v2.util.search_filter import NoMatchFilter, SearchFilter, and_
+from resourcey.v2.util.search_filter import NoMatchFilter, SearchFilter, and_, or_
 from resourcey.v2.util.sort_order import SortOrder
 
 T = TypeVar("T")
@@ -66,14 +71,13 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
     the transport projects them onto the resource's REST models.
 
     Attributes:
-        policy: The authorization rule applied to every action. This first rung
-            carries one policy per resource; a per-principal *set* of policies
-            (OR-combined, per ``specs/permissions.qnt``) arrives with the users /
-            groups / roles work, which is why the reduction already passes the
-            principal explicitly.
-        user_id: The authenticated principal, or ``None``. Always ``None`` here
-            (the built-in policies are principal-independent); it is the
-            forward-compatible argument a ``Creator`` / ``Group`` policy reads.
+        policies: The authorization rules applied to every action, OR-combined
+            (the union model -- ``specs/permissions.qnt``): a principal with
+            several policies sees the union of what each grants, and a
+            ``DenyAll`` contributes nothing. An empty list is deny / fail-closed.
+        user_id: The authenticated principal's id (``None`` for anonymous),
+            passed to every policy reduction so a ``Creator`` / ``Group`` policy
+            can scope rows.
         id_field: The identifier field name of the served DTO, used to locate an
             existing row for the by-id actions.
         resource_name: The served resource's name, for error messages.
@@ -83,14 +87,17 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         self,
         inner: Service[T, K],
         *,
-        policy: Policy,
+        policies: Policy | Sequence[Policy],
         id_field: str,
         resource_name: str,
         user_id: uuid.UUID | None = None,
     ) -> None:
         super().__init__()
         self._inner = inner
-        self._policy = policy
+        # Accept a bare ``Policy`` for ergonomics; normalise to a list.
+        self._policies: list[Policy] = (
+            [policies] if isinstance(policies, Policy) else list(policies)
+        )
         self._id_field = id_field
         self._resource_name = resource_name
         self._user_id = user_id
@@ -135,8 +142,17 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
     # ------------------------------------------------------------------
 
     async def _permission_filter(self, action: Action) -> SearchFilter[Any]:
-        """The policy's filter for ``action`` — a ``NoMatchFilter`` means deny."""
-        return await self._policy.to_search_filter(self._user_id, action)
+        """The OR-combination of every policy's filter for ``action``.
+
+        An empty policy list -- or a list whose reductions all deny -- yields a
+        ``NoMatchFilter`` (deny / fail-closed). A ``NoMatchFilter`` child is the
+        identity of the union, so a ``DenyAll`` policy never suppresses another
+        policy's grant (the union model, ``specs/permissions.qnt``).
+        """
+        reductions = [
+            await policy.to_search_filter(self._user_id, action) for policy in self._policies
+        ]
+        return or_(*reductions)
 
     # ------------------------------------------------------------------
     # Standard actions

@@ -120,6 +120,11 @@ def register_routes(
     id_field = exposed.get_id_field()
     id_type = _id_python_type(models, id_field)
     service_dep = _service_dependency(exposed, builder)
+    # An authenticating builder (issue #131) supplies a dependency the transport
+    # adds to every route, so the security scheme appears in the OpenAPI
+    # operation; a builder without one (the default) contributes nothing.
+    auth_dep = builder.get_principal_dependency()
+    route_deps = [Depends(auth_dep)] if auth_dep is not None else None
     supported = normalize_actions(exposed.get_supported_actions())
     strategy = exposed.get_cache_strategy()
     resource_name = _resource_display_name(exposed)
@@ -128,11 +133,15 @@ def register_routes(
     # before the ``{id}`` routes, otherwise ``batch-read`` would be captured as
     # an id value by the ``/{resource}/{id}`` route.
     if Action.SEARCH in supported:
-        _add_search_route(router, path, models, exposed, service_dep, strategy, resource_name)
+        _add_search_route(
+            router, path, models, exposed, service_dep, strategy, resource_name, route_deps
+        )
     if Action.COUNT in supported:
-        _add_count_route(router, path, exposed, service_dep, strategy, resource_name)
+        _add_count_route(router, path, exposed, service_dep, strategy, resource_name, route_deps)
     if Action.BATCH_READ in supported:
-        _add_batch_read_route(router, path, models, id_type, service_dep, strategy, resource_name)
+        _add_batch_read_route(
+            router, path, models, id_type, service_dep, strategy, resource_name, route_deps
+        )
     if Action.BATCH_EDIT in supported:
         _add_batch_edit_route(
             router,
@@ -145,17 +154,31 @@ def register_routes(
             service_dep,
             strategy,
             resource_name,
+            route_deps,
         )
     if Action.CREATE in supported:
-        _add_create_route(router, path, models, dto_model, service_dep, strategy, resource_name)
+        _add_create_route(
+            router, path, models, dto_model, service_dep, strategy, resource_name, route_deps
+        )
     if Action.READ in supported:
-        _add_read_route(router, path, models, id_type, service_dep, strategy, resource_name)
+        _add_read_route(
+            router, path, models, id_type, service_dep, strategy, resource_name, route_deps
+        )
     if Action.UPDATE in supported:
         _add_update_route(
-            router, path, models, dto_model, id_field, id_type, service_dep, strategy, resource_name
+            router,
+            path,
+            models,
+            dto_model,
+            id_field,
+            id_type,
+            service_dep,
+            strategy,
+            resource_name,
+            route_deps,
         )
     if Action.DELETE in supported:
-        _add_delete_route(router, path, id_type, service_dep, resource_name)
+        _add_delete_route(router, path, id_type, service_dep, resource_name, route_deps)
 
     app_or_router.include_router(router, prefix=_normalize_prefix(prefix))
     return router
@@ -376,6 +399,7 @@ def _add_create_route(
     service_dep: Any,
     strategy: Any,
     resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
         created = await service.create(request_to_dto(dto_model, payload))
@@ -397,6 +421,7 @@ def _add_create_route(
         path,
         ["POST"],
         handler,
+        dependencies=route_deps,
         status_code=status.HTTP_201_CREATED,
         summary=summary,
         description=description,
@@ -411,6 +436,7 @@ def _add_read_route(
     service_dep: Any,
     strategy: Any,
     resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     async def handler(request, id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.read(id)
@@ -421,7 +447,15 @@ def _add_read_route(
 
     handler.__annotations__ = {"request": Request, "id": id_type, "service": Service}
     summary, description = _operation_metadata(Action.READ, resource_name)
-    _route(router, f"{path}/{{id}}", ["GET"], handler, summary=summary, description=description)
+    _route(
+        router,
+        f"{path}/{{id}}",
+        ["GET"],
+        handler,
+        dependencies=route_deps,
+        summary=summary,
+        description=description,
+    )
 
 
 def _add_update_route(
@@ -434,6 +468,7 @@ def _add_update_route(
     service_dep: Any,
     strategy: Any,
     resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     async def handler(request, id, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         updated = await service.update(_update_dto(dto_model, id_field, id, payload))
@@ -449,11 +484,24 @@ def _add_update_route(
         "service": Service,
     }
     summary, description = _operation_metadata(Action.UPDATE, resource_name)
-    _route(router, f"{path}/{{id}}", ["PATCH"], handler, summary=summary, description=description)
+    _route(
+        router,
+        f"{path}/{{id}}",
+        ["PATCH"],
+        handler,
+        dependencies=route_deps,
+        summary=summary,
+        description=description,
+    )
 
 
 def _add_delete_route(
-    router: APIRouter, path: str, id_type: Any, service_dep: Any, resource_name: str
+    router: APIRouter,
+    path: str,
+    id_type: Any,
+    service_dep: Any,
+    resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     async def handler(id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         await service.delete(id)
@@ -466,6 +514,7 @@ def _add_delete_route(
         f"{path}/{{id}}",
         ["DELETE"],
         handler,
+        dependencies=route_deps,
         status_code=status.HTTP_204_NO_CONTENT,
         summary=summary,
         description=description,
@@ -480,6 +529,7 @@ def _add_search_route(
     service_dep: Any,
     strategy: Any,
     resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     """Register ``GET /{resource}`` — cursor-paginated, filterable, sortable search.
 
@@ -531,7 +581,15 @@ def _add_search_route(
         "service": Service,
     }
     summary, description = _operation_metadata(Action.SEARCH, resource_name)
-    _route(router, path, ["GET"], handler, summary=summary, description=description)
+    _route(
+        router,
+        path,
+        ["GET"],
+        handler,
+        dependencies=route_deps,
+        summary=summary,
+        description=description,
+    )
 
 
 def _add_count_route(
@@ -541,6 +599,7 @@ def _add_count_route(
     service_dep: Any,
     strategy: Any,
     resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     """Register ``GET /{resource}/count`` — the count of matching rows.
 
@@ -566,7 +625,15 @@ def _add_count_route(
 
     handler.__annotations__ = {"request": Request, "values": dict, "service": Service}
     summary, description = _operation_metadata(Action.COUNT, resource_name)
-    _route(router, f"{path}/count", ["GET"], handler, summary=summary, description=description)
+    _route(
+        router,
+        f"{path}/count",
+        ["GET"],
+        handler,
+        dependencies=route_deps,
+        summary=summary,
+        description=description,
+    )
 
 
 def _add_batch_read_route(
@@ -577,6 +644,7 @@ def _add_batch_read_route(
     service_dep: Any,
     strategy: Any,
     resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     async def handler(request, id=Query(default=[]), service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.batch_read(list(id))
@@ -587,7 +655,15 @@ def _add_batch_read_route(
 
     handler.__annotations__ = {"request": Request, "id": list[id_type], "service": Service}
     summary, description = _operation_metadata(Action.BATCH_READ, resource_name)
-    _route(router, f"{path}/batch-read", ["GET"], handler, summary=summary, description=description)
+    _route(
+        router,
+        f"{path}/batch-read",
+        ["GET"],
+        handler,
+        dependencies=route_deps,
+        summary=summary,
+        description=description,
+    )
 
 
 def _add_batch_edit_route(
@@ -601,6 +677,7 @@ def _add_batch_edit_route(
     service_dep: Any,
     strategy: Any,
     resource_name: str,
+    route_deps: list[Any] | None = None,
 ) -> None:
     """Register ``POST /{resource}/batch-edit`` — mixed create / update / delete.
 
@@ -646,7 +723,13 @@ def _add_batch_edit_route(
     }
     summary, description = _operation_metadata(Action.BATCH_EDIT, resource_name)
     _route(
-        router, f"{path}/batch-edit", ["POST"], handler, summary=summary, description=description
+        router,
+        f"{path}/batch-edit",
+        ["POST"],
+        handler,
+        dependencies=route_deps,
+        summary=summary,
+        description=description,
     )
 
 
@@ -670,7 +753,15 @@ def _route(
             existing.add((getattr(route, "path", ""), method))
     if any((path, method) in existing for method in methods):
         return
-    router.add_api_route(path, handler, methods=methods, response_model=None, **kwargs)
+    dependencies = kwargs.pop("dependencies", None)
+    router.add_api_route(
+        path,
+        handler,
+        methods=methods,
+        response_model=None,
+        dependencies=dependencies,
+        **kwargs,
+    )
 
 
 def _project(
