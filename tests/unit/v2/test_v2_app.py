@@ -17,7 +17,7 @@ import pytest
 import pytest_asyncio
 from fastapi import APIRouter, Depends, FastAPI, Request
 from httpx import ASGITransport, AsyncClient
-from pydantic import Field
+from pydantic import BaseModel, Field
 from sqlalchemy import Integer, String
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -550,6 +550,63 @@ async def test_register_routes_narrows_to_supported_actions():
     assert ("/threads/{id}", "PATCH") not in paths
     assert ("/threads", "POST") not in paths
     await engine.dispose()
+
+
+async def test_every_operation_has_a_summary_and_description():
+    """Each generated operation is labelled — not the ``handler`` fallback."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    threads = SqlResource(Thread, session_factory=maker)
+
+    manifest: Manifest = Manifest(resources=[threads])
+    app = create_app(manifest)
+    spec = app.openapi()
+    operations = [op for methods in spec["paths"].values() for op in methods.values()]
+
+    assert operations  # sanity: the resource mounted its routes
+    for operation in operations:
+        summary = operation["summary"]
+        description = operation.get("description")
+        assert summary and summary != "Handler"
+        assert description
+        # The summary names the action and the resource, so operations on one
+        # resource are distinguishable in the docs.
+        assert "Thread" in summary
+    await engine.dispose()
+
+
+async def test_read_only_operations_describe_only_the_read_subset():
+    """A narrowed resource documents exactly the routes it mounts."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    class ReadOnlyThread(SqlResource[Any, Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset({Action.READ, Action.SEARCH, Action.COUNT})
+
+    resource = ReadOnlyThread(Thread, session_factory=maker)
+    app = create_app(Manifest(resources=[resource]))
+    spec = app.openapi()
+
+    summaries = {op["summary"] for methods in spec["paths"].values() for op in methods.values()}
+    assert summaries == {"Search Thread", "Count Thread", "Read Thread"}
+    await engine.dispose()
+
+
+async def test_operation_summary_strips_a_dto_name_suffix():
+    """A DTO-first resource (``WidgetDTO``) reads as ``Widget`` in the docs."""
+    from resourcey.v2.list.list_resource import ListResource
+
+    class WidgetDTO(BaseModel):
+        id: str
+        name: str
+
+    resource = ListResource([WidgetDTO(id="a", name="A")], path="widgets")
+    app = create_app(Manifest(resources=[resource]))
+    spec = app.openapi()
+
+    summaries = {op["summary"] for methods in spec["paths"].values() for op in methods.values()}
+    assert summaries == {"Search Widget", "Count Widget", "Read Widget", "Batch read Widget"}
 
 
 async def test_route_escape_hatch_preserves_a_developer_route():

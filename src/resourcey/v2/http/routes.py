@@ -68,6 +68,7 @@ from resourcey.v2.core.service import (
 )
 from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
 from resourcey.v2.util.missing import MISSING
+from resourcey.v2.util.naming import pluralize
 from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
 
 T = TypeVar("T", bound=BaseModel)
@@ -121,28 +122,40 @@ def register_routes(
     service_dep = _service_dependency(exposed, builder)
     supported = normalize_actions(exposed.get_supported_actions())
     strategy = exposed.get_cache_strategy()
+    resource_name = _resource_display_name(exposed)
 
     # Static sub-paths (search / count / batch-read / batch-edit) are registered
     # before the ``{id}`` routes, otherwise ``batch-read`` would be captured as
     # an id value by the ``/{resource}/{id}`` route.
     if Action.SEARCH in supported:
-        _add_search_route(router, path, models, exposed, service_dep, strategy)
+        _add_search_route(router, path, models, exposed, service_dep, strategy, resource_name)
     if Action.COUNT in supported:
-        _add_count_route(router, path, exposed, service_dep, strategy)
+        _add_count_route(router, path, exposed, service_dep, strategy, resource_name)
     if Action.BATCH_READ in supported:
-        _add_batch_read_route(router, path, models, id_type, service_dep, strategy)
+        _add_batch_read_route(router, path, models, id_type, service_dep, strategy, resource_name)
     if Action.BATCH_EDIT in supported:
         _add_batch_edit_route(
-            router, path, models, dto_model, id_field, id_type, supported, service_dep, strategy
+            router,
+            path,
+            models,
+            dto_model,
+            id_field,
+            id_type,
+            supported,
+            service_dep,
+            strategy,
+            resource_name,
         )
     if Action.CREATE in supported:
-        _add_create_route(router, path, models, dto_model, service_dep, strategy)
+        _add_create_route(router, path, models, dto_model, service_dep, strategy, resource_name)
     if Action.READ in supported:
-        _add_read_route(router, path, models, id_type, service_dep, strategy)
+        _add_read_route(router, path, models, id_type, service_dep, strategy, resource_name)
     if Action.UPDATE in supported:
-        _add_update_route(router, path, models, dto_model, id_field, id_type, service_dep, strategy)
+        _add_update_route(
+            router, path, models, dto_model, id_field, id_type, service_dep, strategy, resource_name
+        )
     if Action.DELETE in supported:
-        _add_delete_route(router, path, id_type, service_dep)
+        _add_delete_route(router, path, id_type, service_dep, resource_name)
 
     app_or_router.include_router(router, prefix=_normalize_prefix(prefix))
     return router
@@ -286,6 +299,75 @@ def _resolve_filters(
 # ---------------------------------------------------------------------------
 
 
+def _resource_display_name(exposed: Resource[Any, Any]) -> str:
+    """A human-readable name for ``exposed``, from its DTO type.
+
+    Used to make each operation's summary / description name the resource it
+    acts on (e.g. "Create Thread"). The declaration's trailing ``DTO``
+    convention suffix is dropped so ``ThreadDTO`` reads as ``Thread`` (matching
+    the SQL backend's inferred ``Thread``). Falls back to the resource path when
+    the DTO type has no usable name.
+    """
+    name = getattr(exposed.get_dto_type(), "__name__", "")
+    if name.endswith("DTO") and len(name) > 3:
+        name = name[: -len("DTO")]
+    if name:
+        return name
+    return exposed.get_resource_path()
+
+
+def _operation_metadata(action: Action, resource_name: str) -> tuple[str, str]:
+    """The ``(summary, description)`` for one generated operation.
+
+    Every handler is a closure, so FastAPI would otherwise fall back to the
+    bare summary "Handler" and emit no description for every route. These name
+    the action and the resource so the generated OpenAPI is self-describing.
+
+    ``{name}`` is the singular resource name and ``{plural}`` its plural, so the
+    read-side actions can talk about the collection and the rest about one
+    object.
+    """
+    templates: dict[Action, tuple[str, str]] = {
+        Action.CREATE: (
+            "Create {name}",
+            "Create a new {name} and return the created object.",
+        ),
+        Action.READ: (
+            "Read {name}",
+            "Fetch a single {name} by its identifier.",
+        ),
+        Action.UPDATE: (
+            "Update {name}",
+            "Partially update an existing {name} by its identifier and return the updated object.",
+        ),
+        Action.DELETE: (
+            "Delete {name}",
+            "Delete a {name} by its identifier.",
+        ),
+        Action.SEARCH: (
+            "Search {name}",
+            "List {plural} using cursor pagination, optional sorting, and optional field filters.",
+        ),
+        Action.COUNT: (
+            "Count {name}",
+            "Count the {plural} matching the given field filters.",
+        ),
+        Action.BATCH_READ: (
+            "Batch read {name}",
+            "Fetch several {plural} by identifier in one request. "
+            "The result is positionally aligned with the requested ids.",
+        ),
+        Action.BATCH_EDIT: (
+            "Batch edit {name}",
+            "Create, update, and delete {plural} in one request. "
+            "The result is positionally aligned with the submitted edits.",
+        ),
+    }
+    summary, description = templates[action]
+    values = {"name": resource_name, "plural": pluralize(resource_name)}
+    return summary.format(**values), description.format(**values)
+
+
 def _add_create_route(
     router: APIRouter,
     path: str,
@@ -293,6 +375,7 @@ def _add_create_route(
     dto_model: type[BaseModel],
     service_dep: Any,
     strategy: Any,
+    resource_name: str,
 ) -> None:
     async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
         created = await service.create(request_to_dto(dto_model, payload))
@@ -308,7 +391,16 @@ def _add_create_route(
         "payload": models.create_request,
         "service": Service,
     }
-    _route(router, path, ["POST"], handler, status_code=status.HTTP_201_CREATED)
+    summary, description = _operation_metadata(Action.CREATE, resource_name)
+    _route(
+        router,
+        path,
+        ["POST"],
+        handler,
+        status_code=status.HTTP_201_CREATED,
+        summary=summary,
+        description=description,
+    )
 
 
 def _add_read_route(
@@ -318,6 +410,7 @@ def _add_read_route(
     id_type: Any,
     service_dep: Any,
     strategy: Any,
+    resource_name: str,
 ) -> None:
     async def handler(request, id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.read(id)
@@ -327,7 +420,8 @@ def _add_read_route(
         return _cached_json_response(request, _dump(projected, context), header)
 
     handler.__annotations__ = {"request": Request, "id": id_type, "service": Service}
-    _route(router, f"{path}/{{id}}", ["GET"], handler)
+    summary, description = _operation_metadata(Action.READ, resource_name)
+    _route(router, f"{path}/{{id}}", ["GET"], handler, summary=summary, description=description)
 
 
 def _add_update_route(
@@ -339,6 +433,7 @@ def _add_update_route(
     id_type: Any,
     service_dep: Any,
     strategy: Any,
+    resource_name: str,
 ) -> None:
     async def handler(request, id, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         updated = await service.update(_update_dto(dto_model, id_field, id, payload))
@@ -353,16 +448,28 @@ def _add_update_route(
         "payload": models.update_request,
         "service": Service,
     }
-    _route(router, f"{path}/{{id}}", ["PATCH"], handler)
+    summary, description = _operation_metadata(Action.UPDATE, resource_name)
+    _route(router, f"{path}/{{id}}", ["PATCH"], handler, summary=summary, description=description)
 
 
-def _add_delete_route(router: APIRouter, path: str, id_type: Any, service_dep: Any) -> None:
+def _add_delete_route(
+    router: APIRouter, path: str, id_type: Any, service_dep: Any, resource_name: str
+) -> None:
     async def handler(id, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         await service.delete(id)
         return None
 
     handler.__annotations__ = {"id": id_type, "service": Service}
-    _route(router, f"{path}/{{id}}", ["DELETE"], handler, status_code=status.HTTP_204_NO_CONTENT)
+    summary, description = _operation_metadata(Action.DELETE, resource_name)
+    _route(
+        router,
+        f"{path}/{{id}}",
+        ["DELETE"],
+        handler,
+        status_code=status.HTTP_204_NO_CONTENT,
+        summary=summary,
+        description=description,
+    )
 
 
 def _add_search_route(
@@ -372,6 +479,7 @@ def _add_search_route(
     exposed: Resource[Any, Any],
     service_dep: Any,
     strategy: Any,
+    resource_name: str,
 ) -> None:
     """Register ``GET /{resource}`` — cursor-paginated, filterable, sortable search.
 
@@ -422,7 +530,8 @@ def _add_search_route(
         "values": dict,
         "service": Service,
     }
-    _route(router, path, ["GET"], handler)
+    summary, description = _operation_metadata(Action.SEARCH, resource_name)
+    _route(router, path, ["GET"], handler, summary=summary, description=description)
 
 
 def _add_count_route(
@@ -431,6 +540,7 @@ def _add_count_route(
     exposed: Resource[Any, Any],
     service_dep: Any,
     strategy: Any,
+    resource_name: str,
 ) -> None:
     """Register ``GET /{resource}/count`` — the count of matching rows.
 
@@ -455,7 +565,8 @@ def _add_count_route(
         return _cached_json_response(request, total, header)
 
     handler.__annotations__ = {"request": Request, "values": dict, "service": Service}
-    _route(router, f"{path}/count", ["GET"], handler)
+    summary, description = _operation_metadata(Action.COUNT, resource_name)
+    _route(router, f"{path}/count", ["GET"], handler, summary=summary, description=description)
 
 
 def _add_batch_read_route(
@@ -465,6 +576,7 @@ def _add_batch_read_route(
     id_type: Any,
     service_dep: Any,
     strategy: Any,
+    resource_name: str,
 ) -> None:
     async def handler(request, id=Query(default=[]), service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
         found = await service.batch_read(list(id))
@@ -474,7 +586,8 @@ def _add_batch_read_route(
         return _cached_json_response(request, _dump(items, context), header)
 
     handler.__annotations__ = {"request": Request, "id": list[id_type], "service": Service}
-    _route(router, f"{path}/batch-read", ["GET"], handler)
+    summary, description = _operation_metadata(Action.BATCH_READ, resource_name)
+    _route(router, f"{path}/batch-read", ["GET"], handler, summary=summary, description=description)
 
 
 def _add_batch_edit_route(
@@ -487,6 +600,7 @@ def _add_batch_edit_route(
     supported: frozenset[Action],
     service_dep: Any,
     strategy: Any,
+    resource_name: str,
 ) -> None:
     """Register ``POST /{resource}/batch-edit`` — mixed create / update / delete.
 
@@ -530,7 +644,10 @@ def _add_batch_edit_route(
         "payload": list[body_model],  # type: ignore[valid-type]
         "service": Service,
     }
-    _route(router, f"{path}/batch-edit", ["POST"], handler)
+    summary, description = _operation_metadata(Action.BATCH_EDIT, resource_name)
+    _route(
+        router, f"{path}/batch-edit", ["POST"], handler, summary=summary, description=description
+    )
 
 
 # ---------------------------------------------------------------------------
