@@ -34,13 +34,13 @@ until the first release.
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **`v2` reference app** (issue
   #113): model-first `SqlResource` over ORM models, a shared `SqlSessionManager`
-  in the manifest's `managers=`, `create_app`, a declared `BaseObjectFilter`,
-  `APP_*` config, and Alembic driven directly against `Base.metadata` (there is
+  in the manifest's `managers=`, `create_app`, `APP_*` config, and Alembic
+  driven directly against `Base.metadata` (there is
   no `resourcey migrate` in `v2` — that CLI reads the `v1` `ResourceyBase` /
   `FrameworkConfig.manifest`). `02_mongodb` is its **`v2` Mongo counterpart**
   (issue #80): DTO-first `MongoResource` over an embedded (`mongomock`) client,
-  a shared `MongoClientManager` in the manifest's `managers=`, `create_app`, a
-  declared `BaseObjectFilter`, and no migration step (the schema is implicit and
+  a shared `MongoClientManager` in the manifest's `managers=`, `create_app`, and
+  no migration step (the schema is implicit and
   `migrate_document` is the opt-in hook). `03_api_key_auth` is the **`v2`
   authentication app** (issue #124): the same model-first message board as 01,
   secured by `ApiKeyDependencyBuilder` passed to `create_app`, over a config-list

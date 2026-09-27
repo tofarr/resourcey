@@ -97,7 +97,7 @@ async def test_search_filter_text_contains(client: AsyncClient):
 
 
 async def test_unknown_filter_param_is_rejected(client: AsyncClient):
-    """A ``field__op`` outside the declared surface is a 400, not silently ignored."""
+    """A ``field__op`` with an unknown field is a 400, not silently ignored."""
     resp = await client.get("/messages?bogus__eq=1")
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "invalid_input"

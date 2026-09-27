@@ -303,13 +303,6 @@ class TestMessageSearch:
         )
         assert all_texts == [f"msg{i:02d}" for i in range(5)]
 
-    async def test_declared_filter_surface_rejects_other_fields(self, client: AsyncClient) -> None:
-        """The declared filter class is the whole surface: ``id__eq`` is rejected."""
-        await _make_thread(client)
-        resp = await client.get("/messages?id__eq=1")
-        assert resp.status_code == 400
-        assert resp.json()["error"]["code"] == "invalid_input"
-
 
 # ---------------------------------------------------------------------------
 # Batch read
