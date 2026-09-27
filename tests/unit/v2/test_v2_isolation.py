@@ -284,7 +284,10 @@ def test_the_auth_files_exist_without_an_init():
         "auth_api_key.py",
         "auth_api_key_resource.py",
         "auth_api_key_service.py",
+        "auth_authorized_dependency.py",
+        "auth_authorized_service.py",
         "auth_config.py",
+        "auth_policy.py",
     }
     assert not (auth / "__init__.py").exists()
 

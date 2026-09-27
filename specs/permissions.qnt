@@ -1,14 +1,22 @@
-// permissions.qnt — formal spec for RBAC permission computation (issue #4).
+// permissions.qnt — formal spec for v2 authorization policies (issue #127).
 //
-// Policy-union model: a principal's effective permission for a resource is
-// the OR-combination of every matching policy's reduced filter. A policy
-// reduces to a Filter for a given (user, action, groups) triple; "deny"
-// is the None filter (matches nothing), which contributes nothing to the
-// OR — it does NOT override other grants. There is no deny-wins override.
+// A Policy reduces to a Filter: which rows a principal may touch for an action.
+// This first rung carries one principal-independent policy per resource, so the
+// reduction takes the action alone; the OR-combination model is retained so a
+// per-principal *set* of policies can be added later without changing the
+// effective-filter law.
 //
-// This replaces the legacy grant/denial model. A policy is action-aware:
-// the same stored policy can grant READ yet deny CREATE, without separate
-// grant/denial records.
+// Union model: a principal's effective permission for a resource is the
+// OR-combination of every matching policy's reduced filter. "DenyAll" reduces
+// to the None filter (matches nothing), which contributes nothing to the OR —
+// it does NOT override other grants. There is no deny-wins override.
+//
+// Enforcement (the AuthorizedService matrix):
+//   - a denied Create is Forbidden (403);
+//   - a denied Read / Update / Delete is Hidden (404), so an out-of-scope id is
+//     indistinguishable from an absent one and existence does not leak;
+//   - a denied Search / Count / Batch action is Empty (an empty page / count 0 /
+//     None positions), never an error.
 //
 // Invariants:
 //   - unionNoOverride: a deny policy never suppresses a grant from another
@@ -19,52 +27,38 @@
 //     permitted.
 
 module permissions {
+  // The standard resource actions, mirroring v2/core/service.Action.
   type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
 
-  // A filter over items: All (match everything), None (match nothing), or
-  // Own (match items the principal created). Mirrors SearchFilter built-ins.
-  // Suffixed with F to avoid clashing with Quint's builtin None.
-  type Filter = AllF | NoneF | OwnF(str)
+  // A filter over rows: All (match everything) or None (match nothing). Mirrors
+  // the SearchFilter vocabulary (AllFilter / NoMatchFilter). Suffixed with F to
+  // avoid clashing with Quint's builtin None.
+  type Filter = AllF | NoneF
 
-  // A policy reduces to a Filter for (user, action, groups). A stored policy
-  // is action-aware — e.g. Permitted -> All for every action; Denied -> None
-  // for every action; ReadOnly -> All for read/search/count, None otherwise;
-  // Creator -> Own for non-create actions the policy grants, None for create
-  // unless on_create grants.
-  // Creator carries a record of grant flags: grantOwn (own items),
-  // grantOthers (others' items), grantCreate (create action).
-  type Policy =
-    Permitted | Denied | ReadOnly | Creator({grantOwn: bool, grantOthers: bool, grantCreate: bool})
+  // A policy as stored. All three built-ins are principal-independent.
+  type Policy = AllowAll | DenyAll | ReadOnly
 
-  // Reduce ReadOnly: All for read-like actions, None otherwise.
-  pure def readOnlyFilter(act: Action): Filter =
-    if (act == Read or act == Search or act == Count) AllF else NoneF
+  // An enforcement decision, mirroring the AuthorizedService matrix.
+  type Decision = Allowed | Forbidden | Hidden | Empty
 
-  // Reduce Creator for a non-create action.
-  pure def creatorNonCreate(grantOwn: bool, grantOthers: bool, user: str): Filter =
-    if (grantOwn and grantOthers) AllF
-    else if (grantOwn) OwnF(user)
-    else if (grantOthers) AllF
-    else NoneF
+  // Reduce COUNT / BATCH_* to their singular CRUD action (normalize_action):
+  // counting reuses the search permission and batching reuses the action it
+  // batches.
+  pure def normalizeAction(act: Action): Action =
+    if (act == Count) Search
+    else if (act == BatchRead) Read
+    else if (act == BatchEdit) Update
+    else act
 
-  // Reduce Creator for a given action.
-  pure def creatorFilter(r: {grantOwn: bool, grantOthers: bool, grantCreate: bool},
-                         user: str, act: Action): Filter =
-    if (act == Create) (if (r.grantCreate) AllF else NoneF)
-    else creatorNonCreate(r.grantOwn, r.grantOthers, user)
-
-  // Reduce a single policy to its Filter for (user, action, groups).
-  pure def reducePolicy(p: Policy, user: str, act: Action, groups: Set[str]): Filter =
+  // Reduce a single policy to its Filter for an action.
+  pure def reducePolicy(p: Policy, act: Action): Filter =
     match p {
-      Permitted => AllF |
-      Denied => NoneF |
-      ReadOnly => readOnlyFilter(act) |
-      Creator(r) => creatorFilter(r, user, act)
+      AllowAll => AllF |
+      DenyAll => NoneF |
+      ReadOnly =>
+        val n = normalizeAction(act)
+        if (n == Read or n == Search) AllF else NoneF
     }
-
-  // The principal's policies for a resource (parameterised for testability).
-  pure def policiesFor(user: str, ps: str -> Set[Policy]): Set[Policy] =
-    if (ps.keys().contains(user)) ps.get(user) else Set()
 
   // Whether a filter is the All (match-everything) filter.
   pure def isAll(f: Filter): bool =
@@ -74,120 +68,185 @@ module permissions {
   pure def isNone(f: Filter): bool =
     match f { NoneF => true | _ => false }
 
-  // Extract the owner string from an OwnF filter (assumes input is OwnF).
-  pure def ownOwner(f: Filter): str =
-    match f { OwnF(u) => u | _ => "" }
-
   // OR-combine two filters: the union of what each admits.
-  // All is the annihilator (All OR x = All); None is the identity (None OR x = x);
-  // Own OR Own = Own; Own OR None = Own; Own OR All = All.
+  // All is the annihilator (All OR x = All); None is the identity (None OR x = x).
   pure def orFilter(a: Filter, b: Filter): Filter =
     if (isAll(a) or isAll(b)) AllF
     else if (isNone(a)) b
-    else if (isNone(b)) a
-    else {
-      // Both are OwnF — union is OwnF if same owner, else AllF.
-      val u = ownOwner(a)
-      val v = ownOwner(b)
-      if (u == v) OwnF(u) else AllF
-    }
+    else a
 
-  // The effective filter for (user, resource, action): the OR of every
-  // policy's reduction. Empty policy set -> None (deny / fail-closed).
-  pure def effectiveFilter(user: str, act: Action, groups: Set[str],
-                           ps: str -> Set[Policy]): Filter =
-    policiesFor(user, ps).fold(NoneF, (acc, p) => orFilter(acc, reducePolicy(p, user, act, groups)))
+  // The principal's policies for a resource (parameterised for testability).
+  pure def policiesFor(user: str, ps: str -> Set[Policy]): Set[Policy] =
+    if (ps.keys().contains(user)) ps.get(user) else Set()
+
+  // The effective filter for (user, action): the OR of every policy's
+  // reduction. Empty policy set -> None (deny / fail-closed).
+  pure def effectiveFilter(user: str, act: Action, ps: str -> Set[Policy]): Filter =
+    policiesFor(user, ps).fold(NoneF, (acc, p) => orFilter(acc, reducePolicy(p, act)))
 
   // Whether an action is permitted: the effective filter is not None.
-  pure def isPermitted(user: str, act: Action, groups: Set[str],
-                       ps: str -> Set[Policy]): bool =
-    not(isNone(effectiveFilter(user, act, groups, ps)))
+  pure def isPermitted(user: str, act: Action, ps: str -> Set[Policy]): bool =
+    not(isNone(effectiveFilter(user, act, ps)))
+
+  // The enforcement decision for an action and its effective filter — the
+  // AuthorizedService matrix.
+  pure def enforce(act: Action, f: Filter): Decision =
+    if (isAll(f)) Allowed
+    else match act {
+      Create => Forbidden |
+      Read => Hidden |
+      Update => Hidden |
+      Delete => Hidden |
+      _ => Empty  // Search / Count / BatchRead / BatchEdit -> empty / None positions
+    }
 
   // Invariant: a deny policy never suppresses a grant from another policy.
-  // Adding a Denied policy to a set that already permits must not remove
-  // permission (union, not deny-wins).
-  pure def unionNoOverride(user: str, act: Action, groups: Set[str],
+  pure def unionNoOverride(user: str, act: Action,
                            base: Set[Policy], denied: Set[Policy],
                            ps: str -> Set[Policy]): bool = {
     val psBase = Map(user -> base)
     val psBoth = Map(user -> base.union(denied))
-    isPermitted(user, act, groups, psBase) implies
-      isPermitted(user, act, groups, psBoth)
+    isPermitted(user, act, psBase) implies isPermitted(user, act, psBoth)
   }
 
   // Invariant: permission requires at least one policy to grant (reduce to a
   // non-None filter) for that action.
-  pure def permittedImpliesSomeGrant(user: str, act: Action, groups: Set[str],
+  pure def permittedImpliesSomeGrant(user: str, act: Action,
                                      ps: str -> Set[Policy]): bool = {
     val pols = policiesFor(user, ps)
-    isPermitted(user, act, groups, ps) implies
-      pols.exists(p => not(isNone(reducePolicy(p, user, act, groups))))
+    isPermitted(user, act, ps) implies
+      pols.exists(p => not(isNone(reducePolicy(p, act))))
   }
 
   // Invariant: when every policy denies an action, it is not permitted.
-  pure def deniedImpliesNoGrant(user: str, act: Action, groups: Set[str],
+  pure def deniedImpliesNoGrant(user: str, act: Action,
                                 ps: str -> Set[Policy]): bool = {
     val pols = policiesFor(user, ps)
-    (pols.forall(p => isNone(reducePolicy(p, user, act, groups)))) implies
-      not(isPermitted(user, act, groups, ps))
+    (pols.forall(p => isNone(reducePolicy(p, act)))) implies
+      not(isPermitted(user, act, ps))
   }
+
+  // Every policy set over the three built-ins (2^3 = 8).
+  pure val policySets: Set[Set[Policy]] =
+    Set(Set(), Set(AllowAll), Set(DenyAll), Set(ReadOnly),
+        Set(AllowAll, DenyAll), Set(AllowAll, ReadOnly), Set(DenyAll, ReadOnly),
+        Set(AllowAll, DenyAll, ReadOnly))
+
+  // Every action.
+  pure val allActions: Set[Action] =
+    Set(Create, Read, Update, Delete, Search, Count, BatchRead, BatchEdit)
 
   // Tests
 
-  run permittedGrantsAccess = {
-    val ps = Map("alice" -> Set(Permitted))
+  run allowAllIsAllForEveryAction = {
+    allActions.forall(a => reducePolicy(AllowAll, a) == AllF)
+  }
+
+  run denyAllIsNoneForEveryAction = {
+    allActions.forall(a => reducePolicy(DenyAll, a) == NoneF)
+  }
+
+  run readOnlyGrantsReadLikeAndDeniesTheRest = {
     all {
-      assert(isPermitted("alice", Read, Set(), ps)),
-      assert(isPermitted("alice", Create, Set(), ps)),
+      assert(reducePolicy(ReadOnly, Read) == AllF),
+      assert(reducePolicy(ReadOnly, Search) == AllF),
+      assert(reducePolicy(ReadOnly, Count) == AllF),
+      assert(reducePolicy(ReadOnly, BatchRead) == AllF),
+      assert(reducePolicy(ReadOnly, Create) == NoneF),
+      assert(reducePolicy(ReadOnly, Update) == NoneF),
+      assert(reducePolicy(ReadOnly, Delete) == NoneF),
+      assert(reducePolicy(ReadOnly, BatchEdit) == NoneF),
     }
   }
 
-  run deniedBlocksAccess = {
-    val ps = Map("alice" -> Set(Denied))
+  run normalizeActionReducesDerivedMembers = {
     all {
-      assert(not(isPermitted("alice", Read, Set(), ps))),
-      assert(not(isPermitted("alice", Create, Set(), ps))),
+      assert(normalizeAction(Count) == Search),
+      assert(normalizeAction(BatchRead) == Read),
+      assert(normalizeAction(BatchEdit) == Update),
+      assert(normalizeAction(Create) == Create),
+    }
+  }
+
+  // Enforcement: a denied create is forbidden, a denied read is hidden, and a
+  // denied collection read is empty (not an error).
+  run enforcementMatrix = {
+    all {
+      assert(enforce(Create, NoneF) == Forbidden),
+      assert(enforce(Read, NoneF) == Hidden),
+      assert(enforce(Update, NoneF) == Hidden),
+      assert(enforce(Delete, NoneF) == Hidden),
+      assert(enforce(Search, NoneF) == Empty),
+      assert(enforce(Count, NoneF) == Empty),
+      assert(enforce(BatchRead, NoneF) == Empty),
+      assert(enforce(BatchEdit, NoneF) == Empty),
+    }
+  }
+
+  // Enforcement: an All filter permits every action.
+  run enforcementAllowsEverything = {
+    allActions.forall(a => enforce(a, AllF) == Allowed)
+  }
+
+  run allowAllGrantsAccess = {
+    val ps = Map("alice" -> Set(AllowAll))
+    all {
+      assert(isPermitted("alice", Read, ps)),
+      assert(isPermitted("alice", Create, ps)),
+      assert(isPermitted("alice", BatchEdit, ps)),
+    }
+  }
+
+  run denyAllBlocksAccess = {
+    val ps = Map("alice" -> Set(DenyAll))
+    all {
+      assert(not(isPermitted("alice", Read, ps))),
+      assert(not(isPermitted("alice", Create, ps))),
     }
   }
 
   run emptyPoliciesDenies = {
     val ps = Map("alice" -> Set())
-    assert(not(isPermitted("alice", Read, Set(), ps)))
+    assert(not(isPermitted("alice", Read, ps)))
   }
 
   run readOnlyGrantsReadNotCreate = {
     val ps = Map("alice" -> Set(ReadOnly))
     all {
-      assert(isPermitted("alice", Read, Set(), ps)),
-      assert(isPermitted("alice", Search, Set(), ps)),
-      assert(isPermitted("alice", Count, Set(), ps)),
-      assert(not(isPermitted("alice", Create, Set(), ps))),
-      assert(not(isPermitted("alice", Update, Set(), ps))),
+      assert(isPermitted("alice", Read, ps)),
+      assert(isPermitted("alice", Search, ps)),
+      assert(isPermitted("alice", Count, ps)),
+      assert(not(isPermitted("alice", Create, ps))),
+      assert(not(isPermitted("alice", Update, ps))),
     }
   }
 
   run denyDoesNotOverrideGrant = {
-    // A Permitted policy + a Denied policy -> still permitted (union model).
-    val ps = Map("alice" -> Set(Permitted, Denied))
-    assert(isPermitted("alice", Read, Set(), ps))
-  }
-
-  run creatorOwnOnly = {
-    // Creator grants own items read, denies others and create.
-    val ps = Map("alice" -> Set(Creator({grantOwn: true, grantOthers: false, grantCreate: false})))
+    // An AllowAll policy + a DenyAll policy -> still permitted (union model).
+    val ps = Map("alice" -> Set(AllowAll, DenyAll))
     all {
-      assert(isPermitted("alice", Read, Set(), ps)),
-      assert(not(isPermitted("alice", Create, Set(), ps))),
+      assert(isPermitted("alice", Read, ps)),
+      assert(isPermitted("alice", Create, ps)),
     }
   }
 
   run unionCombinesGrants = {
-    // One policy grants create, another grants read -> both permitted.
-    val ps = Map("alice" -> Set(Creator({grantOwn: false, grantOthers: false, grantCreate: true}), ReadOnly))
+    // ReadOnly grants reads; AllowAll adds the writes -> both permitted.
+    val ps = Map("alice" -> Set(ReadOnly, AllowAll))
     all {
-      assert(isPermitted("alice", Create, Set(), ps)),
-      assert(isPermitted("alice", Read, Set(), ps)),
-      assert(not(isPermitted("alice", Update, Set(), ps))),
+      assert(isPermitted("alice", Create, ps)),
+      assert(isPermitted("alice", Read, ps)),
     }
+  }
+
+  // The union invariants hold for every policy set and action.
+  run invariantsHold = {
+    policySets.forall(useSet =>
+      allActions.forall(a =>
+        unionNoOverride("alice", a, useSet, Set(DenyAll), Map("alice" -> useSet)) and
+        permittedImpliesSomeGrant("alice", a, Map("alice" -> useSet)) and
+        deniedImpliesNoGrant("alice", a, Map("alice" -> useSet))
+      )
+    )
   }
 }
