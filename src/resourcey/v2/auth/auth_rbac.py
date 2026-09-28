@@ -41,6 +41,7 @@ from typing import Any, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.auth.auth_policy import Policy
@@ -85,6 +86,10 @@ class User(RbacBase):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Stored for administration, but not yet consulted on the auth path: an API
+    # key is validated on its own row, so ``enabled=False`` does not by itself
+    # revoke access. Wiring that (a check when a key's owner is resolved) is a
+    # later rung.
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -158,7 +163,12 @@ class RolePermission(RbacBase):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     role_id: Mapped[UUID] = mapped_column(ForeignKey("roles.id", ondelete="CASCADE"), index=True)
     resource: Mapped[str] = mapped_column(String(128), index=True)
-    permission: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    # ``JSONB`` on PostgreSQL: the resolver de-duplicates with ``SELECT DISTINCT
+    # permission``, which needs an equality operator plain ``json`` does not have.
+    # ``with_variant`` keeps the portable ``JSON`` everywhere else (SQLite tests).
+    permission: Mapped[dict[str, Any]] = mapped_column(
+        JSON().with_variant(JSONB(), "postgresql"), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -222,3 +232,13 @@ def rbac_resources(
         )
         for model in RBAC_MODELS
     ]
+
+
+def rbac_resource_paths() -> tuple[str, ...]:
+    """The REST paths :func:`rbac_resources` serves, in the same order.
+
+    A caller granting a role access to the RBAC tables (an admin) must name every
+    path, so deriving them here keeps a role grant from silently drifting out of
+    sync with the served surface.
+    """
+    return tuple(SqlResource(model).get_resource_path() for model in RBAC_MODELS)

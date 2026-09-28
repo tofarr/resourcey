@@ -588,9 +588,34 @@ def test_rbac_resources_are_exported() -> None:
     assert len(rbac_resources(session_factory=object())) == len(RBAC_MODELS)
 
 
+def test_rbac_resource_paths_match_served_resources() -> None:
+    """``rbac_resource_paths`` names exactly what ``rbac_resources`` serves.
+
+    A role grant on the RBAC tables is keyed by path, so the two must not drift.
+    """
+    from resourcey.v2.auth.auth_rbac import rbac_resource_paths, rbac_resources
+
+    served = tuple(r.get_resource_path() for r in rbac_resources(session_factory=object()))
+    assert rbac_resource_paths() == served
+
+
 def test_policy_from_rows_skips_corrupt_rows() -> None:
     """A corrupt / unknown policy row is skipped, never crashing or over-denying."""
     from resourcey.v2.auth.auth_rbac_store import policy_from_rows
 
     assert policy_from_rows([{"kind": "Nope"}, "not-a-dict"]) == []  # type: ignore[list-item]
     assert len(policy_from_rows([{"kind": "AllowAll"}])) == 1
+
+
+def test_permission_column_is_jsonb_on_postgres() -> None:
+    """``SELECT DISTINCT permission`` needs an equality operator: ``jsonb``, not ``json``.
+
+    Plain PostgreSQL ``json`` has no ``=``, so the resolver's de-duplication query
+    fails at runtime (SQLite tolerates it, so the in-memory suite would not catch
+    it). Pin the dialect type so the portable ``JSON`` cannot regress Postgres.
+    """
+    from sqlalchemy.dialects import postgresql, sqlite
+
+    column = RolePermission.__table__.c.permission
+    assert column.type.compile(dialect=postgresql.dialect()) == "JSONB"
+    assert column.type.compile(dialect=sqlite.dialect()) == "JSON"

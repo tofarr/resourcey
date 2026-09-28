@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 import pytest_asyncio
@@ -33,6 +33,7 @@ from resourcey.v2.http.app import create_app
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.util.search_filter import (
+    MAX_IN_VALUES,
     AllFilter,
     AndFilter,
     AttrFilter,
@@ -174,6 +175,18 @@ class TestCoreFilterMatches:
         assert "contains" in operators_for_annotation(str | None)
         assert operators_for_annotation(bool) == frozenset({"eq", "in"})
         assert operators_for_annotation(Row) == frozenset({"eq", "in"})
+
+    def test_non_scalar_annotations_get_no_operators(self) -> None:
+        # A JSON ``dict`` / list column is not scalarly comparable, so it must
+        # expose no query surface -- in particular a ``list[str]`` must not be
+        # mistaken for a ``str`` (which would offer ``contains`` / ordering).
+        assert operators_for_annotation(list[str]) == frozenset()
+        assert operators_for_annotation(list[int]) == frozenset()
+        assert operators_for_annotation(dict[str, int]) == frozenset()
+        assert operators_for_annotation(dict) == frozenset()
+        assert operators_for_annotation(list[str] | None) == frozenset()
+        # The scalar wrappers are still unwrapped.
+        assert operators_for_annotation(Annotated[int, "x"]) == operators_for_annotation(int)
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +549,22 @@ class TestFilterSurface:
         client, _ = api_client
         resp = await client.get("/widgets", params={"id__gt": "not-an-int"})
         assert resp.status_code == 422
+
+    async def test_bad_in_item_is_400(self, api_client) -> None:
+        """A malformed `in` item is bad input, not a 500."""
+        client, _ = api_client
+        resp = await client.get("/widgets", params={"id__in": "1,not-an-int"})
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_input"
+
+    async def test_over_cap_in_is_400(self, api_client) -> None:
+        """An `in` set past MAX_IN_VALUES is bad input, not a 500."""
+        client, _ = api_client
+        resp = await client.get(
+            "/widgets", params={"id__in": ",".join(str(i) for i in range(MAX_IN_VALUES + 1))}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_input"
 
     async def test_filters_appear_in_openapi(self, api_client) -> None:
         client, _ = api_client

@@ -47,7 +47,7 @@ from typing import Annotated, Any, Literal, TypeVar, cast
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, TypeAdapter, create_model
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, create_model
 from sqlalchemy.exc import IntegrityError
 
 from resourcey.v2.cache.cache_header import CacheHeader
@@ -322,7 +322,12 @@ def _resolve_filters(
         clauses.append((attribute, op, _coerce_filter_value(op, value, annotation)))
     if not clauses:
         return None
-    return build_filter(clauses)
+    try:
+        return build_filter(clauses)
+    except ValidationError as exc:
+        # A leaf's own validation (e.g. an ``in`` set over the cap) is bad input,
+        # not a server fault.
+        raise InvalidInputError(f"Invalid filter value: {exc}") from exc
 
 
 def _coerce_filter_value(op: str, value: Any, annotation: Any) -> Any:
@@ -333,6 +338,9 @@ def _coerce_filter_value(op: str, value: Any, annotation: Any) -> Any:
     before the ``IN`` predicate binds it, so a typed set filter accepts the same
     string form a single-value filter already does. Every other operator is
     already coerced by FastAPI via its typed query parameter.
+
+    A malformed item is an ``InvalidInputError`` (``400``), matching the ``422``
+    FastAPI gives a bad single-value param, rather than escaping as a ``500``.
     """
     if op != "in" or not isinstance(value, str):
         return value
@@ -340,7 +348,10 @@ def _coerce_filter_value(op: str, value: Any, annotation: Any) -> Any:
     if annotation is None:
         return items
     adapter = TypeAdapter(annotation)
-    return [adapter.validate_python(item) for item in items]
+    try:
+        return [adapter.validate_python(item) for item in items]
+    except ValidationError as exc:
+        raise InvalidInputError(f"Invalid value for {op!r} filter: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

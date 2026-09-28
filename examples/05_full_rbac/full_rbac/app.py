@@ -44,7 +44,7 @@ from resourcey.v2.auth.auth_api_key_resource import config_api_key_resource, con
 from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_config import ApiKeysConfig
 from resourcey.v2.auth.auth_policy import AllowAll, Owner, ReadOnly
-from resourcey.v2.auth.auth_rbac import rbac_resources
+from resourcey.v2.auth.auth_rbac import rbac_resource_paths, rbac_resources
 from resourcey.v2.auth.auth_rbac_resolver import RbacPolicyResolver
 from resourcey.v2.auth.auth_rbac_store import SqlRbacStore
 from resourcey.v2.core.errors import ResourceyConfigError
@@ -63,16 +63,9 @@ VIEWER = "viewer"
 AUTHOR = "author"
 DENIED = "denied"
 
-# The REST paths the RBAC resource set is served at (``rbac_resources``).
-RBAC_RESOURCE_PATHS: tuple[str, ...] = (
-    "users",
-    "groups",
-    "group-users",
-    "roles",
-    "group-roles",
-    "role-permissions",
-    "resource-acls",
-)
+# The REST paths the RBAC resource set is served at, derived from the same
+# ``rbac_resources`` builder so a grant can never drift from the served surface.
+RBAC_RESOURCE_PATHS: tuple[str, ...] = rbac_resource_paths()
 
 # The permission rules, as (role, resource) -> policy. Seeding writes these into
 # ``role_permissions``; the resolver reads them back per request.

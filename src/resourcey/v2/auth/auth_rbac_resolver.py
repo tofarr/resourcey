@@ -128,6 +128,11 @@ class RbacPolicyResolver(PolicyResolver):
         For an app that writes the RBAC tables and wants the change to take
         effect before :attr:`cache_ttl` lapses. With no arguments the whole
         cache is cleared.
+
+        The cache is **process-local**: with multiple workers / pods this clears
+        only the calling worker, so :attr:`cache_ttl` (not this call) is the
+        bound a cross-worker deployment can rely on. With the default
+        ``cache_ttl=None`` there is no cache to clear.
         """
         if principal_id is None and resource is None:
             self._cache.clear()

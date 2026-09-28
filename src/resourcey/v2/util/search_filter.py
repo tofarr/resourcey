@@ -42,7 +42,8 @@ from abc import abstractmethod
 from collections.abc import Iterable, Mapping
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Annotated, Any, Generic, TypeVar, cast, get_args, get_origin
+from types import UnionType
+from typing import Annotated, Any, Generic, TypeVar, Union, cast, get_args, get_origin
 from uuid import UUID
 
 from pydantic import ConfigDict, PrivateAttr, SkipValidation, field_validator
@@ -491,15 +492,26 @@ _ORDERABLE_OPS = _EQ_ONLY | _ORDERED_OPS
 
 _ORDERABLE_TYPES = (int, float, Decimal, datetime, date, time)
 _STRING_TYPES = (str, UUID)
+# A JSON column projects to a ``dict`` / ``list`` annotation; none of these is
+# scalarly comparable, so a filter on one would push an unsupported operator.
+_CONTAINER_TYPES = (dict, list, set, frozenset, tuple)
 
 
 def _base_annotation(annotation: Any) -> Any:
-    """Strip ``Optional`` / ``Annotated`` down to the underlying scalar type."""
-    if get_origin(annotation) is None:
-        return annotation
-    args = [a for a in get_args(annotation) if a is not type(None)]
-    if len(args) == 1:
-        return _base_annotation(args[0])
+    """Strip ``Optional`` / ``Annotated`` down to the underlying scalar type.
+
+    Only ``Annotated`` and a union (``Optional`` / ``X | None``) are unwrapped; a
+    generic container (``list[str]``, ``dict``) is returned as-is, so
+    :func:`operators_for_annotation` can reject it rather than mistake a
+    ``list[str]`` column for a ``str``.
+    """
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _base_annotation(get_args(annotation)[0])
+    if origin in (Union, UnionType):
+        args = [a for a in get_args(annotation) if a is not type(None)]
+        if len(args) == 1:
+            return _base_annotation(args[0])
     return annotation
 
 
@@ -517,6 +529,8 @@ def operators_for_annotation(annotation: Any) -> frozenset[str]:
     if isinstance(base, type):
         if issubclass(base, bool):
             return _EQ_ONLY
+        if issubclass(base, _CONTAINER_TYPES):
+            return frozenset()
         if issubclass(base, _ORDERABLE_TYPES):
             return _ORDERABLE_OPS
         if issubclass(base, _STRING_TYPES):
