@@ -8,9 +8,8 @@ server-authoritative ``User`` / ``Group`` / ``GroupUser`` / ``Role`` /
 
 The workflow is **model-first**, like every ``v2`` SQL resource: the ORM models
 here are the schema of record and the framework infers the DTO from them. The
-model is ported from v1's deferred design
-(``resourcey.auth.auth_models`` ``User`` / ``UserPermission``), completed with
-the group / role tables v1 shipped only as a placeholder.
+model builds on the original framework's deferred user design, completed with
+the group / role tables that shipped only as a placeholder.
 
 Tables
 ------

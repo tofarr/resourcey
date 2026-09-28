@@ -3,9 +3,6 @@
 Vendored from the OpenHands Software Agent SDK (written by the same author) so
 that resourcey has no external dependency on the SDK. Behaviour is identical;
 only the import path and the deprecated `OpenHandsModel` alias were trimmed.
-
-This is the ``v2`` home for the vendored module (issue #82); the legacy
-``resourcey.util.models`` copy remains until v1 is removed.
 """
 
 import inspect

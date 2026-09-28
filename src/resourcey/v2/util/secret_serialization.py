@@ -16,9 +16,7 @@ applied to every :class:`~pydantic.SecretStr` field:
 The helpers here are wired onto generated models via ``field_serializer`` /
 ``field_validator`` (see :mod:`resourcey.v2.core.dto`); they take the pydantic
 ``SerializationInfo`` / ``ValidationInfo`` when available so the context flows
-through. A copy of the ``v1`` module
-(:mod:`resourcey.util.secret_serialization`), kept self-contained so ``v2/util``
-imports only Pydantic and the standard library.
+through.
 
 This module is part of ``v2/util`` (the bottom layer): it imports no other
 ``resourcey`` module.

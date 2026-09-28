@@ -36,9 +36,7 @@ until the first release.
   standalone projects. `01_message_board` is the **`v2` reference app** (issue
   #113): model-first `SqlResource` over ORM models, a shared `SqlSessionManager`
   in the manifest's `managers=`, `create_app`, `APP_*` config, and Alembic
-  driven directly against `Base.metadata` (there is
-  no `resourcey migrate` in `v2` — that CLI reads the `v1` `ResourceyBase` /
-  `FrameworkConfig.manifest`). `02_mongodb` is its **`v2` Mongo counterpart**
+  driven directly against `Base.metadata`. `02_mongodb` is its **`v2` Mongo counterpart**
   (issue #80): DTO-first `MongoResource` over an embedded (`mongomock`) client,
   a shared `MongoClientManager` in the manifest's `managers=`, `create_app`, and
   no migration step (the schema is implicit and
@@ -134,9 +132,9 @@ and `auth_config.py` (`ApiKeysConfig` / `ApiKeyConfig` / `SessionCookieConfig`).
 It imports **only `v2`**, and `v2/http` must not import `v2/auth` (the app
 supplies the builder), so no cycle exists.
 
-The remaining `v1` package `src/resourcey/auth/` (users, sessions, OAuth,
-permissions) stays in place until it too is ported; `v2/auth` must never import
-it at runtime (pinned by the `v2` isolation test).
+`v2/auth` is the only authentication package; the legacy `v1` packages
+(including `src/resourcey/auth/`) have been removed. `v2/auth` must never
+import code outside `v2/` at runtime (pinned by the `v2` isolation test).
 
 Key semantics: the key is a `SecretStr` and is stored **only as a SHA-256
 digest**; a presented key is validated by hashing it and searching for the
@@ -155,9 +153,9 @@ lives beside the API-key code in **`src/resourcey/v2/auth/`**:
   a `SearchFilter` via `async def to_search_filter(user_id, action)`; built-ins
   **`AllowAll`** (`AllFilter`), **`DenyAll`** (`NoMatchFilter`), **`ReadOnly`**
   (`AllFilter` for read / search / count / batch_read, else `NoMatchFilter`). It is named
-  `Policy`, not v1's `Permission`: a *permission* is the computed right, the
-  *policy* is the rule that computes it (the project is pre-release, so clarity
-  beats v1 compatibility; `specs/permissions.qnt` already calls the rule a
+  `Policy`, not the older `Permission`: a *permission* is the computed right,
+  the *policy* is the rule that computes it (the project is pre-release, so
+  clarity beats compatibility; `specs/permissions.qnt` already calls the rule a
   `Policy`). The principal is an explicit argument to the reduction, not state
   on the policy, so a `Policy` stays storable; `user_id` is `None` for now and
   is the seam for the later users/groups/roles work. The built-in reductions use
@@ -362,14 +360,11 @@ bounding a membership change, and the caller-scoping derivation.
 
 ### Storage backends and the shared paging base
 
-The `v1` package `resourcey.resource` ships only the SQL backend,
-`SqlResource`/`SqlService`; the `v1` `resourcey.list` and `resourcey.mongo`
-packages have been **deleted** in favour of their `v2` counterparts. The `v2`
-backends are `v2/sql` (see below), `v2/mongo` (issue #80), and `v2/list`
-(issue #116). Storage-agnostic paging/sort/cursor/cache logic for the `v1` SQL
-path lives in `src/resourcey/resource/paged_service.py` (`PagedService`) — a
-new backend subclasses it and implements only its data access, never a copy of
-the cursor or sort-validation code.
+The framework ships three storage backends, all under `v2/`: `v2/sql` (see
+below), `v2/mongo` (issue #80), and `v2/list` (issue #116). The legacy `v1`
+`resourcey.resource`, `resourcey.list`, and `resourcey.mongo` packages have
+been removed. A new backend subclasses `Resource`/`Service` and implements only
+its data access, never a copy of the shared cursor or sort-validation code.
 
 `v2/list`'s `ListResource` is **read-only**: it narrows `actions` to
 `read`/`search`/`count`/`batch_read` so no write route is ever mounted. It is
@@ -381,11 +376,11 @@ caller cannot mutate the served collection through a result. The list *is* the
 storage, delivered through the same service seam; there is no table and no
 migration.
 
-The `v1` manifest is declared with resource **instances**, not types:
+A `v2` manifest is declared with resource **instances**, not types:
 
 ```python
-manifest = ResourceManifest(resources=(Thread(), Message()))
-app = manifest.create_app()
+manifest = Manifest(resources=(SqlResource(Thread), SqlResource(Message)))
+app = create_app(manifest)
 ```
 
 Because instances carry their own configuration, a resource needing per-app
@@ -395,12 +390,10 @@ instance.
 
 ### `v2/core` — the DTO / Resource / Service layer
 
-`src/resourcey/v2/core/` is a new, deliberately minimal package (issue #75)
-that runs **parallel to** the existing packages: it states the architecture in
-terms of **DTO**, **Resource**, **Service**, plus a **Manifest**, and the
-existing modules are migrated onto it later. Nothing existing is removed by it,
-and it is not a refactor. It sits one rung above the `v2/util` bottom layer and
-imports only `v2/util` (the `Missing` sentinel) among project packages.
+`src/resourcey/v2/core/` is a deliberately minimal package (issue #75) that
+states the architecture in terms of **DTO**, **Resource**, **Service**, plus a
+**Manifest**. It sits one rung above the `v2/util` bottom layer and imports only
+`v2/util` (the `Missing` sentinel) among project packages.
 
 Four files, no `__init__.py`:
 
@@ -421,8 +414,8 @@ Four files, no `__init__.py`:
   sentinel on the wire boundary, and the route converts request→DTO through the
   single sanctioned hop `request_to_dto` (`model_dump(exclude_unset=True)` +
   `model_validate`). `Missing` is a usable
-  annotation type (core schema + serializes to `null`), unlike the legacy
-  `resourcey.resource.missing.MISSING`. The six REST models are field-selection
+  annotation type (core schema + serializes to `null`). The six REST models are
+  field-selection
   **projections** of the DTO, never hand-written. Both `DTO` and `DtoField`
   expose a free-form `metadata: dict[str, Any]` that `core` never reads: class
   metadata is inherited/merged down the MRO (keyword or body, and not a field),
@@ -613,9 +606,9 @@ backend subclasses `Resource`/`Service` and inherits the rest.
   fields are left bare so the `v2/core` conventions apply; a read-only resource
   never exercises the create path, so those defaults are simply unused.
 
-### `v2/encryption` — the migrated encryption service (issue #78)
+### `v2/encryption` — the encryption service (issue #78)
 
-`src/resourcey/v2/encryption/` mirrors v1's layout and holds the migrated
+`src/resourcey/v2/encryption/` holds the
 `EncryptionService` (`encrypt_value` / `decrypt_value`, the cursor path, plus
 `create_jwe_token` / `decrypt_jwe_token`, the auth-token path) and the key
 config (`EncryptionKeysConfig` / `EncryptionKeyConfig`, with the
@@ -827,10 +820,9 @@ identifier (the tie-breaker never mirrors); and (4) a cursor is accepted only
 under the `(sort_field, ascending)` it was built for. The single-attribute model
 is unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
 
-### `v2/cache` — the migrated cache surface (issue #92)
+### `v2/cache` — the cache surface (issue #92)
 
-`src/resourcey/v2/cache/` mirrors the old `resourcey.cache` layout (no
-`__init__.py`):
+`src/resourcey/v2/cache/` (no `__init__.py`):
 
 * `cache_header.py` — `CacheHeader` (the `etag` / `updated_at` / `expire_at` /
   `private` value object and the `is_modified` matrix). `private` marks a
@@ -1121,17 +1113,16 @@ distinct keys, and the `ready`-implies-uploaded / ETag-matches-medium /
 
 `v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/filestore`,
 `v2/auth`, `v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and `v2/http`
-are **parallel** to the existing packages — nothing
-existing is removed by them and they are not a refactor. The old `v1`
-packages/modules (and the old `resourcey.encryption`) stay in place until a
-follow-up removal. A test asserts that no module under `v2/` makes a **runtime**
+are the framework: the legacy `v1` packages/modules (and the old
+`resourcey.encryption`) have been removed. A test asserts that no module under
+`v2/` makes a **runtime**
 import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
 v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
 pins the **layer ranks**
 `util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}`:
 no module imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`,
 and `v2/list` implement whatever small helpers they need locally rather than
-reaching for `resourcey.util`.
+reaching for `v2/util`.
 
 ### `v2/util` and `v2/config` — the config rung
 
@@ -1142,8 +1133,7 @@ the dependency-free vendored leaves now live: `models.py`
 here by issue #86), plus the non-vendored `cursor.py` (the storage-agnostic
 keyset cursor codec, extracted from `v2/sql` by issue #116) and the shared
 `naming.py` / `singleton.py` / `search_filter.py` / `sort_order.py` leaves.
-They are copies, not moves — v1 `resourcey/util/` is untouched until it is
-removed. `v2/util` imports **no project package** at all (not even `v2/core`),
+`v2/util` imports **no project package** at all (not even `v2/core`),
 so the layer ranks are a clean
 
     util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}
@@ -1239,9 +1229,9 @@ covers build/parse failures only; `ServiceError` / `NotFoundError` stay in
 the transport maps (`ConflictError` is what a backend's duplicate-key failure
 becomes, so the 409 mapping needs no driver import).
 
-The `v2` isolation test is widened to cover **all** of `v2/`: no module under
-`v2/` may make a runtime import of any `resourcey` code outside `v2/`, with no
-exemption for the legacy `resourcey.util`. It also asserts the core file set is
+The `v2` isolation test covers **all** of `v2/`: no module under
+`v2/` may make a runtime import of any `resourcey` code outside `v2/`. It also
+asserts the core file set is
 exactly `{dto, errors, manifest, resource, service}.py` and that no `v2` module
 imports `openhands`.
 
@@ -1305,7 +1295,7 @@ they need directly.
 
 ## Vendored utilities
 
-`resourcey.util.env_parser` and `resourcey.util.models` (including
+`resourcey.v2.util.env_parser` and `resourcey.v2.util.models` (including
 `DiscriminatedUnionMixin`) are vendored from the OpenHands Software Agent SDK.
 They must remain self-contained: **no `openhands` import may be introduced**.
 When upgrading behaviour from upstream, copy the logic, do not add a

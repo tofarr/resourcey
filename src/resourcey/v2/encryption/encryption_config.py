@@ -1,4 +1,4 @@
-"""Encryption key configuration (issue #78, migrated from ``resourcey.encryption``).
+"""Encryption key configuration (issue #78).
 
 ``EncryptionKeyConfig`` describes a single symmetric key used for at-rest
 field encryption. A root config block holds the single ``encryption_key``

@@ -1,16 +1,16 @@
 ---
 name: config
-description: Typed environment-variable parsing via resourcey.util.env_parser (and its v2 copy), BaseConfig's per-class instance cache, and polymorphic models via DiscriminatedUnionMixin. Load when working on configuration or polymorphic models.
+description: Typed environment-variable parsing via resourcey.v2.util.env_parser, BaseConfig's per-class instance cache, and polymorphic models via DiscriminatedUnionMixin. Load when working on configuration or polymorphic models.
 version: "1.0.0"
 ---
 
 # Configuration
 
-## `v2` layout (issue #82)
+## Layout (issue #82)
 
-New configuration work goes in `v2`, which runs parallel to v1:
+Configuration lives in `v2`:
 
-* `resourcey.v2.util.env_parser` — the env parser (copy of the v1 module).
+* `resourcey.v2.util.env_parser` — the env parser.
 * `resourcey.v2.util.models` — `DiscriminatedUnionMixin`.
 * `resourcey.v2.util.import_paths` — dotted-path resolution.
 * `resourcey.v2.config.config_base` — `BaseConfig`, `get_config_prefix`,
@@ -115,7 +115,7 @@ without wiring one in; `encryption_service=` overrides.
 
 ## env_parser
 
-`resourcey.util.env_parser` (and the `v2` copy) converts environment variables
+`resourcey.v2.util.env_parser` converts environment variables
 into typed pydantic models. It supports complex nested types and polymorphism
 that `pydantic-settings` cannot express. Vendored from the OpenHands Software
 Agent SDK — **no runtime dependency on the SDK**.
@@ -135,7 +135,7 @@ template = to_env(DatabaseConfig(host="localhost", port=5432), prefix="DB")
 
 ## DiscriminatedUnionMixin
 
-`resourcey.util.models.DiscriminatedUnionMixin` (and the `v2` copy) adds a
+`resourcey.v2.util.models.DiscriminatedUnionMixin` adds a
 `kind` discriminator to a pydantic model. Subclasses are serialized with
 `kind = ClassName`; on deserialization the correct subclass is chosen. Abstract
 bases (those extending `abc.ABC`) are never instantiated directly. Vendored

@@ -3,8 +3,10 @@
 Asserts that no module under ``resourcey/v2/`` makes a **runtime** import of any
 ``resourcey`` module *outside* ``v2/`` — that is what pins ``v2`` as a
 self-contained layer (its ``core``, ``config``, ``encryption``, ``sql``, and
-``util`` packages import only each other and the wider third-party stack, never
-the legacy ``v1`` packages). Imports under ``if TYPE_CHECKING:`` are allowed
+``util`` packages import only each other and the wider third-party stack).
+Since the legacy packages have been removed, this is a structural guarantee;
+the test remains a regression guard against reintroducing a cross-layer import.
+Imports under ``if TYPE_CHECKING:`` are allowed
 (they do not execute at runtime, and the existing base relies on that to avoid
 cycles), so the check is a static AST walk that tracks whether an import sits
 inside a ``TYPE_CHECKING`` guard.

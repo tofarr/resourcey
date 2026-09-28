@@ -188,9 +188,8 @@ router = APIRouter(
 
 ## Migrations
 
-v2 has **no** `resourcey migrate` wrapper (that CLI reads the v1
-`ResourceyBase` / `FrameworkConfig.manifest`, which do not exist in v2). Since
-SQLAlchemy is the schema of record, the example drives **Alembic directly**
+There is **no** `resourcey migrate` wrapper. Since SQLAlchemy is the schema of
+record, the example drives **Alembic directly**
 against `api_key_auth.models.Base.metadata`.
 
 The committed revision under `migrations/versions/` was generated with:
@@ -225,8 +224,8 @@ against an isolated database created by applying the committed migration.
 
 - This posture grants the holder of a key access to **every** resource; it
   models no principal and no per-action authorization. Per-user permissions
-  (users, sessions, and a policy engine) live in `resourcey.auth` and plug into
-  the same `DependencyBuilder` seam shown here.
+  (stored users/groups/roles and a per-request policy resolver) live in
+  `resourcey.v2.auth` and plug into the same `DependencyBuilder` seam shown here.
 - The DB-backed key source (`stored_api_key_resource` / `stored_api_key_view` in
   `resourcey.v2.auth.auth_api_key_resource`) mints and revokes keys through the
   REST surface (`POST /api-keys`, …); this example uses the config-list source
