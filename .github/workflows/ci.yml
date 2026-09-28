@@ -60,6 +60,8 @@ jobs:
         run: quint test specs/sorting.qnt --main=sorting --match "^(law1_totalOrder|law2_keysetAgreement|law3_descendingIsTheMirror|law4_cursorSortBinding)$"
       - name: Run cache-defaults spec tests
         run: quint test specs/cache_defaults.qnt --main=cache_defaults --match "^(readOnlyIsOptimistic|writeActionForcesValidator|writableWithUpdatedAtGetsLastModified|writableWithoutUpdatedAtGetsEtag|readOnlyDefaultHasPositiveWindow|readOnlyWindowIsPrivate|selectionIsTotal|invariantsHold)$"
+      - name: Run filestore spec tests
+        run: quint test specs/filestore.qnt --main=filestore --match "^(handshakeReachesReady|completeRequiresAnObject|completeVerifiesSize|completeIsIdempotentOnce|downloadRequiresReady|uploadRequiresARow|keysAreUnique|capabilityIsBound|deleteRemovesTheObject|invariantsHold)$"
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
