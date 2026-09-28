@@ -1,6 +1,6 @@
 """Alembic environment for the simple-roles example.
 
-In v2 the ORM models *are* the schema of record, so autogeneration diffs against
+Here the ORM models *are* the schema of record, so autogeneration diffs against
 ``simple_roles.models.Base.metadata`` directly (no resource manifest, no
 ``ResourceyBase``). The accepted API keys and their roles still live in the
 environment; ``users`` is the stored-principal table the keys' ``PRINCIPAL_ID``
@@ -9,7 +9,7 @@ values name.
 The database URL comes from the same ``APP_SQL_CONNECTIONS_0_URL`` the app reads,
 converted to its *synchronous* counterpart because Alembic drives a sync engine.
 
-Alembic needs the environment loaded (v2 does no .env loading): run it with
+Alembic needs the environment loaded (the framework does no .env loading): run it with
 ``uv run --env-file .env alembic ...`` or export ``APP_SQL_CONNECTIONS_0_URL``.
 """
 
@@ -37,7 +37,7 @@ def _database_url() -> str:
     if not url:
         raise RuntimeError(
             "Set APP_SQL_CONNECTIONS_0_URL (or sqlalchemy.url in alembic.ini) "
-            "before running Alembic; v2 does no .env loading. Try "
+            "before running Alembic; the framework does no .env loading. Try "
             "`uv run --env-file .env alembic ...`."
         )
     return _sync_database_url(url)

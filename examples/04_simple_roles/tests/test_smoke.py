@@ -16,17 +16,17 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from resourcey.v2.auth.auth_api_key import (
+from resourcey.auth.auth_api_key import (
     API_KEY_CHALLENGE,
     API_KEY_HEADER_NAME,
     ApiKeyAuthenticator,
 )
-from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
-from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.auth.auth_role import AppRole, role_key
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.http.app import create_app
-from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
+from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.auth.auth_role import AppRole, role_key
+from resourcey.core.manifest import Manifest
+from resourcey.http.app import create_app
+from resourcey.sql.sql_resource import SqlResource
 from simple_roles.app import Role, build_auth
 from simple_roles.message import MessageResource
 from simple_roles.models import Base, Message, Thread

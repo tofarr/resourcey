@@ -54,9 +54,9 @@ paging, sort, filters, and cache headers are identical across all three.
 
 | Backend | Base class | Storage |
 |---|---|---|
-| SQL | `resourcey.v2.sql.SqlResource` | SQLAlchemy 2 (async) table |
-| Mongo | `resourcey.v2.mongo.MongoResource` | an async `motor` collection |
-| List | `resourcey.v2.list.ListResource` | an in-process list of Pydantic objects |
+| SQL | `resourcey.sql.SqlResource` | SQLAlchemy 2 (async) table |
+| Mongo | `resourcey.mongo.MongoResource` | an async `motor` collection |
+| List | `resourcey.list.ListResource` | an in-process list of Pydantic objects |
 
 A **list-backed** resource is read-only: it narrows its actions to
 `read` / `search` / `count` / `batch_read` and serves data already modelled as
@@ -68,7 +68,7 @@ no columns. The list *is* the storage, so there is no table and no migration.
 
 ```python
 from pydantic import BaseModel
-from resourcey.v2.list.list_resource import ListResource
+from resourcey.list.list_resource import ListResource
 
 
 class Country(BaseModel):
@@ -90,21 +90,20 @@ manifest = Manifest(resources=(resource,))
 copy of the stored object, so a caller cannot mutate the served collection
 through a result. Pass `defensive=False` to serve the stored objects directly.
 
-## The `v2/core` package — DTO, Resource, Service, Manifest
+## The `core` package — DTO, Resource, Service, Manifest
 
-`src/resourcey/v2/core/` is a new, deliberately minimal package that states the
-architecture in terms of three constructs plus a manifest. It runs **parallel
-to** the existing packages; the existing modules are migrated onto it later, as
-an iterative follow-up, and nothing existing is removed by it.
+`src/resourcey/core/` is a deliberately minimal package that states the
+architecture in terms of three constructs plus a manifest. It is the foundation
+every backend and transport layer is built on.
 
 The split separates **the DTO** (the data object you work with internally) from
 **the six REST models** (the wire shapes), which the older code entangled, and
 does away with six hand-written models per resource — those are now *derived*.
 
 ```python
-from resourcey.v2.core.dto import DTO
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.resource import SqlResource
+from resourcey.core.dto import DTO
+from resourcey.core.manifest import Manifest
+from resourcey.core.resource import SqlResource
 
 
 class Thread(DTO):
@@ -129,11 +128,11 @@ The four files:
   (`in_create_request`, `in_create_response`, `in_update_request`,
   `in_update_response`, `in_read_response`, `in_search_response` — all default
   `True`, superseding the older `creatable` / `updatable` / `readable` triple).
-  Tag a field with `Annotated[T, DtoField(...)]` — the canonical Pydantic v2
-  mechanism, and the one `v1` already uses for `ResourceyField`; it keeps the
-  real field type (the assignment form `key: str = DtoField(...)` is a type
-  error under `mypy --strict`), and no explicit `| Missing` is needed because
-  the generator widens every field itself:
+  Tag a field with `Annotated[T, DtoField(...)]` — the canonical Pydantic
+  mechanism; it keeps the real field type (the assignment form
+  `key: str = DtoField(...)` is a type error under `mypy --strict`), and no
+  explicit `| Missing` is needed because the generator widens every field
+  itself:
 
   ```python
   class MyStoredKey(DTO):
@@ -226,19 +225,20 @@ session-per-operation both live:
 `ctx` is a plain `MutableMapping` keyed by module-level sentinels, so a caller
 can pre-seed storage (the escape hatch) and every resource in the call adopts
 it. `AppContext` (app-scoped) stays a separate concept. HTTP construction
-(`create_app`) is deliberately **not** part of `v2/core` — it belongs to the
+(`create_app`) is deliberately **not** part of `core` — it belongs to the
 transport layer, where the per-request service dependency is built through a
 configurable `DependencyBuilder` (its default opens the resource's own service
-over the request-scoped `ctx`). `v2/util` is the bottom layer: an isolation
-test pins the layer ranks `util < core < {sql, http, config, cache,
-encryption}`, so no module imports a higher layer at runtime.
+over the request-scoped `ctx`). `util` is the bottom layer: an isolation test
+pins the layer ranks `util < core < {sql, mongo, list, view, filestore, http,
+config, cache, encryption, auth}`, so no module imports a higher layer at
+runtime.
 
-### `v2` configuration — env-driven edges
+### Configuration — env-driven edges
 
-`v2/core` stays config-free (a service is built from the objects it is handed),
+`core` stays config-free (a service is built from the objects it is handed),
 while the two env-driven *edges* — SQL connections and encryption keys — are
 `BaseConfig` blocks that live with what they configure: `SqlConfig` in
-`v2/sql/`, `EncryptionKeysConfig` in `v2/encryption/`. All read the one
+`sql/`, `EncryptionKeysConfig` in `encryption/`. All read the one
 process-wide prefix, `APP` by default, so connection `n` is
 `APP_SQL_CONNECTIONS_<n>_NAME` / `_URL` / `_PASSWORD` and the key is
 `APP_ENCRYPTION_KEY_ID` / `_VALUE` (plus `APP_DECRYPTION_KEYS_<n>_*` for
@@ -250,8 +250,8 @@ An app composes the blocks by inheritance and calls the composed config once at
 its entry point:
 
 ```python
-from resourcey.v2.encryption.encryption_config import EncryptionKeysConfig
-from resourcey.v2.sql.sql_config import SqlConfig
+from resourcey.encryption.encryption_config import EncryptionKeysConfig
+from resourcey.sql.sql_config import SqlConfig
 
 
 class AppConfig(SqlConfig, EncryptionKeysConfig):
@@ -267,8 +267,8 @@ print(config.generate_env_template())  # a commented .env skeleton, secrets reda
 the same env namespace). Framework internals resolve their own block;
 `SqlResource` uses `get_encryption_service()` / `get_sql_session_manager()` by
 default and accepts an explicit `encryption_service=` / `session_factory=` to
-override. `v2` does no `.env` loading — use `uvicorn --env-file` or a wrapper
-script to populate the environment.
+override. The framework does no `.env` loading — use `uvicorn --env-file` or a
+wrapper script to populate the environment.
 
 ## Stack
 
@@ -284,7 +284,7 @@ script to populate the environment.
 
 ## Authorization (users, groups, roles)
 
-`resourcey.v2.auth` secures a resource through two composable seams: an
+`resourcey.auth` secures a resource through two composable seams: an
 `Authenticator` (API-key and cookie authenticators) that produces a
 `Principal`, and a `PolicyResolver` that maps that principal to `Policy` rules.
 The built-ins are `AllowAll` / `DenyAll` / `ReadOnly` / `Owner`, with a
@@ -296,14 +296,14 @@ and a denied search/count yields an empty page / `0`.
 
 ## Configuration
 
-A typed environment-variable parser is bundled in `resourcey.v2.util.env_parser`
+A typed environment-variable parser is bundled in `resourcey.util.env_parser`
 (vendored from the
 [OpenHands Software Agent SDK](https://github.com/OpenHands/software-agent-sdk/blob/28e8ed273617992e9556410804f54937cc059878/openhands-agent-server/openhands/agent_server/env_parser.py),
 written by the same author). It supports complex nested types and polymorphism
 that `pydantic-settings` cannot express. There is **no runtime dependency** on
 the SDK.
 
-A `DiscriminatedUnionMixin` is also bundled in `resourcey.v2.util.models` for
+A `DiscriminatedUnionMixin` is also bundled in `resourcey.util.models` for
 polymorphic models keyed by a `kind` discriminator — likewise vendored from
 the SDK with no dependency.
 

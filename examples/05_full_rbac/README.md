@@ -13,7 +13,7 @@ everything else from the store.
 
 The credential (an API key) names a **user**. That user's **groups** carry
 **roles**, and each role has **permissions** — a `resource` name plus a
-[`Policy`](../../src/resourcey/v2/auth/auth_policy.py). The resolver walks that
+[`Policy`](../../src/resourcey/auth/auth_policy.py). The resolver walks that
 chain for the target resource and OR-combines the matching policies.
 
 Seeded roles:
@@ -33,7 +33,7 @@ its own messages. `denied`'s `DenyAll` never suppresses another role's grant
 ## Resolution, scaling, and freshness
 
 `RbacPolicyResolver` (in
-[`auth_rbac_resolver.py`](../../src/resourcey/v2/auth/auth_rbac_resolver.py))
+[`auth_rbac_resolver.py`](../../src/resourcey/auth/auth_rbac_resolver.py))
 resolves, per request:
 
 1. the principal's groups (`group_users`),
@@ -81,7 +81,7 @@ uv run --env-file .env python -m full_rbac.seed          # seed users/groups/rol
 uv run --env-file .env uvicorn full_rbac.app:app --port 8085
 ```
 
-`v2` does no `.env` loading of its own, so the `--env-file` flag (uvicorn's, or
+the framework does no `.env` loading of its own, so the `--env-file` flag (uvicorn's, or
 `uv run --env-file`) populates the process environment.
 
 ## Try it

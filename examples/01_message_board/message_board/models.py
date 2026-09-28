@@ -1,12 +1,12 @@
 """SQLAlchemy models for the message board.
 
-The ``v2`` SQL workflow is **model-first**: the ORM model is the schema of
+The framework's SQL workflow is **model-first**: the ORM model is the schema of
 record and the framework infers the DTO (and the six REST models) from it. So
 this is where the resource fields are declared — column types map back to Python
 annotations, nullability widens the annotation to ``ann | None``, and the
 columns' ``default`` / ``onupdate`` become the DTO's create / update defaults.
 
-``Message.thread_id`` is a real foreign-key column to ``threads.id``. ``v2``
+``Message.thread_id`` is a real foreign-key column to ``threads.id``. The framework
 projects plain columns only (a FK column is an ordinary scalar field), which is
 exactly what this example needs.
 """
@@ -28,7 +28,7 @@ class Base(DeclarativeBase):
     """Declarative base for the message-board tables.
 
     Alembic autogenerates against ``Base.metadata`` (there is no ``ResourceyBase``
-    in ``v2`` — the ORM models are the schema of record).
+    in the framework — the ORM models are the schema of record).
     """
 
 

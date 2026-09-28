@@ -39,7 +39,7 @@
 //     principal-independent built-ins is not.
 
 module roles {
-  // The standard resource actions, mirroring v2/core/service.Action.
+  // The standard resource actions, mirroring core/service.Action.
   type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
 
   // A filter over rows: the chain NoMatchF <= OwnF <= AllF.

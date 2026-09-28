@@ -18,8 +18,8 @@ from uuid import UUID, uuid4
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from full_rbac.app import ADMIN, AUTHOR, DENIED, ROLE_PERMISSIONS, VIEWER
-from resourcey.v2.auth.auth_policy import DenyAll
-from resourcey.v2.auth.auth_rbac import (
+from resourcey.auth.auth_policy import DenyAll
+from resourcey.auth.auth_rbac import (
     Group,
     GroupRole,
     GroupUser,
@@ -103,8 +103,8 @@ def _main() -> None:
     """CLI entry point: seed using the app's configured connection."""
     import os
 
-    from resourcey.v2.sql.session_manager import SqlSessionManager
-    from resourcey.v2.sql.sql_config import SqlConfig
+    from resourcey.sql.session_manager import SqlSessionManager
+    from resourcey.sql.sql_config import SqlConfig
 
     async def run() -> None:
         manager = SqlSessionManager(SqlConfig.get_instance())
@@ -113,7 +113,7 @@ def _main() -> None:
 
     if not os.environ.get("APP_SQL_CONNECTIONS_0_URL"):
         raise RuntimeError(
-            "Set APP_SQL_CONNECTIONS_0_URL (v2 does no .env loading). Try "
+            "Set APP_SQL_CONNECTIONS_0_URL (the framework does no .env loading). Try "
             "`uv run --env-file .env python -m full_rbac.seed`."
         )
     asyncio.run(run())

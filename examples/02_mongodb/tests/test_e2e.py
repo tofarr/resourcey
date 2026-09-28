@@ -1,4 +1,4 @@
-"""End-to-end REST API tests for the v2 MongoDB message-board example.
+"""End-to-end REST API tests for the MongoDB message-board example.
 
 Each test runs against an **isolated embedded MongoDB database** — a unique
 database name per test on the in-process mongomock server (no external MongoDB
@@ -21,8 +21,8 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from message_board.app import build_app
-from resourcey.v2.mongo.mongo_client import MongoClientManager
-from resourcey.v2.mongo.mongo_config import MongoConfig, MongoConnectionConfig
+from resourcey.mongo.mongo_client import MongoClientManager
+from resourcey.mongo.mongo_config import MongoConfig, MongoConnectionConfig
 
 
 @pytest_asyncio.fixture

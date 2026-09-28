@@ -1,4 +1,4 @@
-"""Smoke test for the v2 message-board example app.
+"""Smoke test for the message-board example app.
 
 Exercises the full HTTP path (create thread → create message → filter) against
 an in-memory SQLite database via httpx's ASGI transport. Storage is injected
@@ -17,14 +17,14 @@ from sqlalchemy.pool import StaticPool
 
 from message_board.message import MessageResource
 from message_board.models import Base, Message, Thread
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.http.app import create_app
-from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.core.manifest import Manifest
+from resourcey.http.app import create_app
+from resourcey.sql.sql_resource import SqlResource
 
 
 @pytest_asyncio.fixture
 async def client() -> AsyncClient:
-    """A v2 app over a shared in-memory SQLite database."""
+    """An app over a shared in-memory SQLite database."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", poolclass=StaticPool)
     maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     async with engine.begin() as conn:

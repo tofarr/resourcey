@@ -3,7 +3,7 @@
 Builds on the API-key-auth example (03) and adds the Part 2 role vocabulary: a
 small, per-app set of roles carried on an API key's definition and translated to
 policies **in one place** by a
-:class:`~resourcey.v2.auth.auth_role.RolePolicyResolver`.
+:class:`~resourcey.auth.auth_role.RolePolicyResolver`.
 
 Every resource is **readable by default** — anonymous callers included — because
 reads are public reference data on this board. What a role *gates* is the
@@ -13,7 +13,7 @@ writes:
   writes it.
 * ``messages`` — owned by ``author_id``: everyone reads it, a ``USER`` may
   create, and may update / delete **its own** rows (the
-  :class:`~resourcey.v2.auth.auth_policy.Owner` policy), and a ``MODERATOR``
+  :class:`~resourcey.auth.auth_policy.Owner` policy), and a ``MODERATOR``
   may create / update / delete any row. So a ``USER`` reads *all of* threads and
   messages but only edits *its own* messages — the example's headline rule.
 * ``users`` — the stored **principal**. A key's ``PRINCIPAL_ID`` must name an
@@ -37,7 +37,7 @@ Run with::
 
     uvicorn simple_roles.app:app --env-file .env
 
-Note the ``--env-file``: ``v2`` does no ``.env`` loading of its own.
+Note the ``--env-file``: the framework does no ``.env`` loading of its own.
 """
 
 from __future__ import annotations
@@ -46,18 +46,18 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
-from resourcey.v2.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
-from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
-from resourcey.v2.auth.auth_config import ApiKeysConfig
-from resourcey.v2.auth.auth_policy import AllowAll, Owner, ReadOnly
-from resourcey.v2.auth.auth_role import AppRole, RolePolicyResolver
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.resource import Resource
-from resourcey.v2.http.app import create_app
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
-from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.auth.auth_api_key import ApiKeyAuthenticator
+from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
+from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
+from resourcey.auth.auth_config import ApiKeysConfig
+from resourcey.auth.auth_policy import AllowAll, Owner, ReadOnly
+from resourcey.auth.auth_role import AppRole, RolePolicyResolver
+from resourcey.core.manifest import Manifest
+from resourcey.core.resource import Resource
+from resourcey.http.app import create_app
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
+from resourcey.sql.sql_resource import SqlResource
 from simple_roles.message import MessageResource
 from simple_roles.models import Message, Thread
 from simple_roles.user import user_resource, user_view

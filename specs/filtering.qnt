@@ -1,4 +1,4 @@
-// filtering.qnt — laws for v2 filtering (issue #79).
+// filtering.qnt — laws for filtering (issue #79).
 //
 // Two laws are pinned here, both storage-agnostic:
 //
@@ -22,7 +22,7 @@
 //   Law 5 (set leaf, #136): the `In` leaf of a set of values agrees with `Eq`
 //   for a one-value set and with the `Or` of its `Eq`s for a multi-value set;
 //   its NULL-safe negated form agrees with the in-memory complement; an empty
-//   set matches nothing (fail-closed), unlike v1's "no restriction".
+//   set matches nothing (fail-closed), unlike a naive "no restriction".
 //
 // Quint rejects recursive type declarations (QNT099), so a genuine recursive
 // filter tree cannot be written; the tree is unrolled into a flat clause list,
@@ -161,7 +161,7 @@ module filtering {
   // An `In` leaf is the set analogue of `Eq`: a one-value set is `Eq`, and a
   // multi-value set is the Or of its `Eq`s. Its pushed-down SQL is
   // `col IN (...)` positive / `col IS NULL OR col NOT IN (...)` negated, and an
-  // empty set matches nothing (fail-closed, NOT v1's "no restriction").
+  // empty set matches nothing (fail-closed, NOT a naive "no restriction").
 
   pure def memIn(row: Row, vs: Set[int]): bool =
     match row {

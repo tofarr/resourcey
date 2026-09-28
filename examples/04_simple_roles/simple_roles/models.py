@@ -1,6 +1,6 @@
 """SQLAlchemy models for the simple-roles example.
 
-The ``v2`` SQL workflow is **model-first**, so the ORM models here are the schema
+The framework's SQL workflow is **model-first**, so the ORM models here are the schema
 of record and the framework infers the DTO (and the six REST models) from them.
 
 Three tables (the example's point):
@@ -32,7 +32,7 @@ from uuid import UUID
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Uuid
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from resourcey.v2.core.dto import DtoField
+from resourcey.core.dto import DtoField
 
 # The ``author_id`` column is server-stamped, never client-supplied: mark it so
 # on the column's ``info`` (the documented escape hatch) rather than in the DTO.
@@ -54,7 +54,7 @@ def _utc_now() -> datetime:
 class Base(DeclarativeBase):
     """Declarative base for the simple-roles tables.
 
-    Alembic autogenerates against ``Base.metadata`` (``v2`` has no
+    Alembic autogenerates against ``Base.metadata`` (the framework has no
     ``ResourceyBase`` — the ORM models are the schema of record).
     """
 

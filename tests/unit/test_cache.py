@@ -1,0 +1,714 @@
+"""Tests for caching (issue #92).
+
+Covers the value objects and strategies, the default selection on
+:class:`~resourcey.sql.sql_resource.SqlResource`, and the HTTP-layer integration:
+``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires`` emission and
+``304 Not Modified`` conditional-request short-circuit on read / search / count
+/ batch-read / batch-edit / create.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel
+from sqlalchemy import DateTime, String
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from resourcey.cache.cache_defaults import (
+    DEFAULT_READ_ONLY_EXPIRE_IN,
+    DefaultCacheStrategyMixin,
+    default_cache_strategy,
+)
+from resourcey.cache.cache_header import CacheHeader
+from resourcey.cache.cache_strategy import (
+    CacheStrategy,
+    ETagCacheStrategy,
+    LastModifiedCacheStrategy,
+    OptimisticCacheStrategy,
+)
+from resourcey.core.dto import DTO
+from resourcey.core.manifest import Manifest
+from resourcey.core.service import Action
+from resourcey.sql.sql_resource import SqlResource
+
+
+class Item(BaseModel):
+    id: int
+    label: str
+    updated_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# CacheHeader.is_modified matrix
+# ---------------------------------------------------------------------------
+
+
+def test_etag_match_is_not_modified():
+    assert CacheHeader(etag='"abc"').is_modified(CacheHeader(etag='"abc"')) is False
+
+
+def test_etag_mismatch_is_modified():
+    assert CacheHeader(etag='"abc"').is_modified(CacheHeader(etag='"def"')) is True
+
+
+def test_etag_missing_client_validator_is_modified():
+    assert CacheHeader(etag='"abc"').is_modified(CacheHeader(etag=None)) is True
+
+
+def test_etag_list_any_token_matches():
+    assert CacheHeader(etag='"abc"').is_modified(CacheHeader(etag='"def", "abc"')) is False
+
+
+def test_etag_star_matches_any():
+    assert CacheHeader(etag='"abc"').is_modified(CacheHeader(etag="*")) is False
+
+
+def test_updated_at_at_or_before_client_is_not_modified():
+    server = CacheHeader(updated_at=datetime(2026, 1, 1, tzinfo=UTC))
+    assert server.is_modified(CacheHeader(updated_at=datetime(2026, 1, 2, tzinfo=UTC))) is False
+
+
+def test_updated_at_after_client_is_modified():
+    server = CacheHeader(updated_at=datetime(2026, 1, 2, tzinfo=UTC))
+    assert server.is_modified(CacheHeader(updated_at=datetime(2026, 1, 1, tzinfo=UTC))) is True
+
+
+def test_no_validators_always_modified():
+    assert CacheHeader().is_modified(CacheHeader(etag='"x"')) is True
+
+
+def test_has_any():
+    assert CacheHeader().has_any() is False
+    assert CacheHeader(etag='"x"').has_any() is True
+    assert CacheHeader(expire_at=datetime.now(UTC)).has_any() is True
+    assert CacheHeader(private=True).has_any() is True
+
+
+def test_cache_response_headers_prepend_private():
+    from resourcey.http.routes import _cache_response_headers
+
+    fresh = CacheHeader(expire_at=datetime.now(UTC) + timedelta(seconds=30), private=True)
+    assert _cache_response_headers(fresh)["Cache-Control"].startswith("private, max-age=")
+    # A private validator-only header revalidates but also stays out of shared
+    # caches; the freshness branch is not the only place ``private`` applies.
+    revalidating = CacheHeader(etag='"x"', private=True)
+    assert _cache_response_headers(revalidating)["Cache-Control"] == "private, no-cache"
+
+
+# ---------------------------------------------------------------------------
+# Strategies
+# ---------------------------------------------------------------------------
+
+
+def test_etag_strategy_is_stable_and_input_sensitive():
+    a = ETagCacheStrategy().get_cache_header([Item(id=1, label="x")])
+    b = ETagCacheStrategy().get_cache_header([Item(id=1, label="x")])
+    c = ETagCacheStrategy().get_cache_header([Item(id=1, label="y")])
+    assert a.etag == b.etag
+    assert a.etag != c.etag
+    assert a.etag is not None and a.etag.startswith('"') and a.etag.endswith('"')
+
+
+def test_etag_strategy_skips_none_and_separates_items():
+    # A batch result may carry positional ``None`` gaps; they hold no state.
+    a = ETagCacheStrategy().get_cache_header([Item(id=1, label="x"), None])
+    b = ETagCacheStrategy().get_cache_header([Item(id=1, label="x")])
+    assert a.etag == b.etag
+
+
+def test_last_modified_uses_max_updated_at():
+    items = [
+        Item(id=1, label="x", updated_at=datetime(2026, 1, 1, tzinfo=UTC)),
+        Item(id=2, label="y", updated_at=datetime(2026, 1, 5, tzinfo=UTC)),
+    ]
+    header = LastModifiedCacheStrategy().get_cache_header(items)
+    assert header.updated_at == datetime(2026, 1, 5, tzinfo=UTC)
+    assert header.etag is None
+
+
+def test_last_modified_normalizes_naive_datetimes():
+    header = LastModifiedCacheStrategy().get_cache_header(
+        [Item(id=1, label="x", updated_at=datetime(2025, 6, 1))]
+    )
+    assert header.updated_at is not None
+    assert header.updated_at.tzinfo is not None
+
+
+def test_optimistic_produces_only_freshness():
+    header = OptimisticCacheStrategy(expire_in=60).get_cache_header([Item(id=1, label="x")])
+    assert header.expire_at is not None
+    assert header.etag is None and header.updated_at is None
+
+
+def test_optimistic_requires_positive_expire_in():
+    with pytest.raises(ValueError, match="expire_in > 0"):
+        OptimisticCacheStrategy(expire_in=0)
+
+
+def test_negative_expire_in_rejected_on_base():
+    with pytest.raises(ValueError, match=">= 0"):
+        ETagCacheStrategy(expire_in=-1)
+
+
+def test_expire_in_sets_expire_at():
+    header = ETagCacheStrategy(expire_in=30).get_cache_header([Item(id=1, label="x")])
+    assert header.expire_at is not None
+
+
+def test_count_cache_header_varies_with_count():
+    strategy = ETagCacheStrategy()
+    assert strategy.count_cache_header(3).etag != strategy.count_cache_header(4).etag
+    assert strategy.count_cache_header(3).etag == strategy.count_cache_header(3).etag
+
+
+def test_count_cache_header_honours_expire_in():
+    header = ETagCacheStrategy(expire_in=15).count_cache_header(0)
+    assert header.expire_at is not None
+
+
+def test_optimistic_count_cache_header_has_no_validator():
+    # The optimistic contract is "no validators anywhere": the count route gets
+    # freshness only, matching the read routes.
+    header = OptimisticCacheStrategy(expire_in=30).count_cache_header(3)
+    assert header.etag is None
+    assert header.updated_at is None
+    assert header.expire_at is not None
+
+
+def test_private_flag_round_trips_and_reaches_the_header():
+    strategy = OptimisticCacheStrategy(expire_in=30, private=True)
+    assert strategy.get_cache_header([]).private is True
+    assert strategy.count_cache_header(0).private is True
+    assert strategy.model_dump()["private"] is True
+    assert CacheStrategy.model_validate(strategy.model_dump()).private is True
+
+
+def test_strategy_satisfies_the_core_placeholder_seam():
+    # ``core`` names the concept; the concrete base extends it so a strategy
+    # is usable through the core-level ``get_cache_header`` / ``count_cache_header``.
+    from resourcey.core.service import CacheStrategy as CoreCacheStrategy
+
+    strategy = ETagCacheStrategy()
+    assert isinstance(strategy, CoreCacheStrategy)
+    assert strategy.get_cache_header([Item(id=1, label="x")]).etag is not None
+    assert strategy.count_cache_header(0).etag is not None
+
+
+def test_strategy_round_trips_as_a_discriminated_union():
+    strategy: CacheStrategy[Any] = LastModifiedCacheStrategy(expire_in=5)
+    dumped = strategy.model_dump()
+    assert dumped["kind"] == "LastModifiedCacheStrategy"
+    restored = CacheStrategy.model_validate(dumped)
+    assert isinstance(restored, LastModifiedCacheStrategy)
+    assert restored.expire_in == 5
+
+
+# ---------------------------------------------------------------------------
+# Default selection
+# ---------------------------------------------------------------------------
+
+
+class CacheBase(DeclarativeBase):
+    pass
+
+
+class NoUpdated(CacheBase):
+    __tablename__ = "no_updated"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(50))
+
+
+class HasUpdated(CacheBase):
+    __tablename__ = "has_updated"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    label: Mapped[str] = mapped_column(String(50))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ReadOnly(SqlResource[Any, Any]):
+    """A resource narrowed to the read subset, for the read-only default."""
+
+    def get_supported_actions(self) -> frozenset[Action]:
+        return frozenset({Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ})
+
+
+def test_default_is_etag_without_updated_at():
+    resource = SqlResource(NoUpdated, session_factory=_factory())
+    assert isinstance(
+        default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions()),
+        ETagCacheStrategy,
+    )
+
+
+def test_default_is_last_modified_with_updated_at():
+    resource = SqlResource(HasUpdated, session_factory=_factory())
+    assert isinstance(
+        default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions()),
+        LastModifiedCacheStrategy,
+    )
+
+
+def test_default_is_optimistic_for_read_only():
+    # A read-only surface cannot change, so it gets a freshness window rather
+    # than a validator — scoped ``private`` since read-only does not imply the
+    # same bytes for every caller.
+    resource = ReadOnly(NoUpdated, session_factory=_factory())
+    strategy = default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions())
+    assert isinstance(strategy, OptimisticCacheStrategy)
+    assert strategy.expire_in == DEFAULT_READ_ONLY_EXPIRE_IN
+    assert strategy.private is True
+
+
+def test_read_only_wins_over_updated_at():
+    # Even with an ``updated_at`` field, a read-only resource is optimistic.
+    resource = ReadOnly(HasUpdated, session_factory=_factory())
+    strategy = default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions())
+    assert isinstance(strategy, OptimisticCacheStrategy)
+
+
+def test_mixin_keeps_the_abstract_contract():
+    # The mixin must not drop the two hooks from ``Resource``'s abstract set by
+    # defining concrete overrides: a backend that forgets one fails at
+    # instantiation, not at the first request.
+    from resourcey.core.resource import Resource
+
+    class Incomplete(DefaultCacheStrategyMixin, Resource[Any, Any]):
+        def get_supported_actions(self) -> frozenset[Action]:
+            return frozenset({Action.READ})
+
+    with pytest.raises(TypeError, match="get_rest_models"):
+        Incomplete()  # type: ignore[abstract]
+
+
+# ---------------------------------------------------------------------------
+# SqlResource.get_cache_strategy
+# ---------------------------------------------------------------------------
+
+
+def _factory() -> async_sessionmaker[AsyncSession]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    return async_sessionmaker(engine, expire_on_commit=False)
+
+
+def test_sql_resource_picks_the_default_strategy():
+    resource = SqlResource(NoUpdated, session_factory=_factory())
+    assert isinstance(resource.get_cache_strategy(), ETagCacheStrategy)
+
+
+def test_sql_resource_strategy_is_stable_per_instance():
+    resource = SqlResource(NoUpdated, session_factory=_factory())
+    assert resource.get_cache_strategy() is resource.get_cache_strategy()
+
+
+def test_sql_resource_read_only_defaults_to_optimistic():
+    resource = ReadOnly(HasUpdated, session_factory=_factory())
+    strategy = resource.get_cache_strategy()
+    assert isinstance(strategy, OptimisticCacheStrategy)
+    assert strategy.expire_in == DEFAULT_READ_ONLY_EXPIRE_IN
+
+
+def test_sql_resource_override_seam():
+    class Optimistic(SqlResource[Any, Any]):
+        def get_cache_strategy(self) -> CacheStrategy[Any]:
+            return OptimisticCacheStrategy(expire_in=42)
+
+    resource = Optimistic(NoUpdated, session_factory=_factory())
+    strategy = resource.get_cache_strategy()
+    assert isinstance(strategy, OptimisticCacheStrategy)
+    assert strategy.expire_in == 42
+
+
+def test_mixin_is_reusable_outside_sql():
+    # The default policy lives in a storage-agnostic mixin, so a non-SQL backend
+    # inherits it by supplying only the DTO/rest-models and action surface.
+    class Tiny(DefaultCacheStrategyMixin):
+        def __init__(self, dto: type[DTO], actions: frozenset[Action]) -> None:
+            self._dto = dto
+            self._actions = actions
+
+        def get_rest_models(self) -> Any:
+            return self._dto.get_rest_models()
+
+        def get_supported_actions(self) -> frozenset[Action]:
+            return self._actions
+
+    class WithUpdated(DTO):
+        id: int
+        label: str
+        updated_at: datetime
+
+    read_actions = frozenset({Action.READ, Action.SEARCH, Action.COUNT})
+    assert isinstance(
+        Tiny(WithUpdated, frozenset(Action)).get_cache_strategy(), LastModifiedCacheStrategy
+    )
+    assert isinstance(Tiny(WithUpdated, read_actions).get_cache_strategy(), OptimisticCacheStrategy)
+
+
+def test_two_dtos_from_the_same_class_get_distinct_strategies():
+    # One SqlResource class serves many DTOs, so the strategy must be resolved
+    # per instance rather than cached on the class.
+    maker = _factory()
+    no_updated = SqlResource(NoUpdated, session_factory=maker)
+    has_updated = SqlResource(HasUpdated, session_factory=maker)
+    assert isinstance(no_updated.get_cache_strategy(), ETagCacheStrategy)
+    assert isinstance(has_updated.get_cache_strategy(), LastModifiedCacheStrategy)
+
+
+# ---------------------------------------------------------------------------
+# HTTP integration
+# ---------------------------------------------------------------------------
+
+
+async def _make_client(manifest: Manifest, app: FastAPI) -> AsyncIterator[AsyncClient]:
+    async with manifest:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+
+
+@pytest_asyncio.fixture
+async def client() -> AsyncIterator[AsyncClient]:
+    from resourcey.http.app import create_app
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = SqlResource(NoUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for c in _make_client(manifest, create_app(manifest)):
+        yield c
+    await engine.dispose()
+
+
+async def test_read_emits_etag_and_no_cache(client: AsyncClient):
+    created = await client.post("/items", json={"label": "x"})
+    assert created.status_code == 201
+    assert "etag" in created.headers
+    rid = created.json()["id"]
+
+    read = await client.get(f"/items/{rid}")
+    assert read.status_code == 200
+    assert read.headers["etag"] == created.headers["etag"]
+    # A validator with no freshness window forces revalidation.
+    assert read.headers["cache-control"] == "no-cache"
+
+
+async def test_read_304_on_matching_etag(client: AsyncClient):
+    created = await client.post("/items", json={"label": "x"})
+    etag = created.headers["etag"]
+    rid = created.json()["id"]
+
+    revalidated = await client.get(f"/items/{rid}", headers={"If-None-Match": etag})
+    assert revalidated.status_code == 304
+    assert revalidated.content == b""
+    assert revalidated.headers["etag"] == etag
+
+
+async def test_read_200_on_mismatched_etag(client: AsyncClient):
+    created = await client.post("/items", json={"label": "x"})
+    rid = created.json()["id"]
+    response = await client.get(f"/items/{rid}", headers={"If-None-Match": '"deadbeef"'})
+    assert response.status_code == 200
+
+
+async def test_search_emits_etag_and_304(client: AsyncClient):
+    await client.post("/items", json={"label": "a"})
+    first = await client.get("/items")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    assert (await client.get("/items", headers={"If-None-Match": etag})).status_code == 304
+
+
+async def test_search_etag_changes_when_results_change(client: AsyncClient):
+    first = await client.get("/items")
+    await client.post("/items", json={"label": "a"})
+    second = await client.get("/items")
+    assert first.headers["etag"] != second.headers["etag"]
+
+
+async def test_count_emits_etag_and_304(client: AsyncClient):
+    await client.post("/items", json={"label": "a"})
+    first = await client.get("/items/count")
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    assert (await client.get("/items/count", headers={"If-None-Match": etag})).status_code == 304
+
+
+async def test_count_etag_changes_with_count(client: AsyncClient):
+    first = await client.get("/items/count")
+    await client.post("/items", json={"label": "a"})
+    second = await client.get("/items/count")
+    assert first.headers["etag"] != second.headers["etag"]
+
+
+async def test_batch_read_emits_etag_and_304(client: AsyncClient):
+    created = (await client.post("/items", json={"label": "a"})).json()
+    first = await client.get("/items/batch-read", params={"id": [created["id"]]})
+    assert first.status_code == 200
+    etag = first.headers["etag"]
+    second = await client.get(
+        "/items/batch-read",
+        params={"id": [created["id"]]},
+        headers={"If-None-Match": etag},
+    )
+    assert second.status_code == 304
+
+
+async def test_batch_edit_emits_etag(client: AsyncClient):
+    created = (await client.post("/items", json={"label": "a"})).json()
+    edited = await client.post(
+        "/items/batch-edit", json=[{"kind": "Update", "item": {"id": created["id"], "label": "b"}}]
+    )
+    assert edited.status_code == 200
+    assert "etag" in edited.headers
+
+
+async def test_validator_only_last_modified_emits_no_cache():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = SqlResource(HasUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        created = await client.post("/items", json={"label": "x"})
+        assert "last-modified" in created.headers
+        rid = created.json()["id"]
+        read = await client.get(f"/items/{rid}")
+        assert read.headers["cache-control"] == "no-cache"
+        # The Last-Modified value is a valid second-precision HTTP date; sending
+        # it back short-circuits to 304.
+        revalidated = await client.get(
+            f"/items/{rid}", headers={"If-Modified-Since": read.headers["last-modified"]}
+        )
+        assert revalidated.status_code == 304
+    await engine.dispose()
+
+
+async def test_expiring_strategy_emits_cache_control_and_expires():
+    class EtagExpiring(SqlResource[Any, Any]):
+        def get_cache_strategy(self) -> CacheStrategy[Any]:
+            return ETagCacheStrategy(expire_in=120)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = EtagExpiring(NoUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        created = await client.post("/items", json={"label": "x"})
+        rid = created.json()["id"]
+        read = await client.get(f"/items/{rid}")
+        assert read.headers["cache-control"].startswith("max-age=")
+        assert "expires" in read.headers
+    await engine.dispose()
+
+
+async def test_read_only_resource_emits_freshness_only():
+    # A read-only resource defaults to optimistic caching: no validators, just a
+    # caller-scoped freshness window. It has no write route, so seed a row directly.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = ReadOnly(HasUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+    async with maker() as session:
+        session.add(HasUpdated(label="x", updated_at=datetime.now(UTC)))
+        await session.commit()
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        search = await client.get("/items")
+        assert search.status_code == 200
+        assert "etag" not in search.headers
+        assert "last-modified" not in search.headers
+        # ``private`` keeps the caller-scoped window out of shared caches.
+        assert search.headers["cache-control"].startswith("private, max-age=")
+        assert "expires" in search.headers
+    await engine.dispose()
+
+
+async def test_read_only_resource_count_has_no_validator():
+    # The ``count`` sub-route must honour the same "no validators" rule as the
+    # read routes; the base count ETag would contradict the optimistic contract.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = ReadOnly(HasUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+    async with maker() as session:
+        session.add(HasUpdated(label="x", updated_at=datetime.now(UTC)))
+        await session.commit()
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        counted = await client.get("/items/count")
+        assert counted.status_code == 200
+        assert "etag" not in counted.headers
+        assert "last-modified" not in counted.headers
+        assert counted.headers["cache-control"].startswith("private, max-age=")
+        assert "expires" in counted.headers
+    await engine.dispose()
+
+
+async def test_optimistic_strategy_emits_freshness_only():
+    class Optimistic(SqlResource[Any, Any]):
+        def get_cache_strategy(self) -> CacheStrategy[Any]:
+            return OptimisticCacheStrategy(expire_in=60)
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = Optimistic(NoUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        created = await client.post("/items", json={"label": "x"})
+        rid = created.json()["id"]
+        read = await client.get(f"/items/{rid}")
+        assert "etag" not in read.headers
+        assert "last-modified" not in read.headers
+        assert read.headers["cache-control"].startswith("max-age=")
+    await engine.dispose()
+
+
+async def test_no_strategy_emits_no_cache_headers():
+    class Uncached(SqlResource[Any, Any]):
+        def get_cache_strategy(self) -> Any:
+            return None
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = Uncached(NoUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        created = await client.post("/items", json={"label": "x"})
+        assert "etag" not in created.headers
+        rid = created.json()["id"]
+        read = await client.get(f"/items/{rid}")
+        assert "etag" not in read.headers
+        assert "cache-control" not in read.headers
+    await engine.dispose()
+
+
+async def test_invalid_if_modified_since_is_treated_as_modified():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = SqlResource(HasUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        created = await client.post("/items", json={"label": "x"})
+        rid = created.json()["id"]
+        response = await client.get(f"/items/{rid}", headers={"If-Modified-Since": "not-a-date"})
+        assert response.status_code == 200
+    await engine.dispose()
+
+
+async def test_mutation_routes_still_emit_etag_without_304():
+    # Unsafe methods emit the validator but never short-circuit to 304.
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    items = SqlResource(NoUpdated, session_factory=maker, path="/items")
+    async with engine.begin() as conn:
+        await conn.run_sync(items.metadata.create_all)
+
+    from resourcey.http.app import create_app
+
+    manifest: Manifest = Manifest(resources=[items])
+    async for client in _make_client(manifest, create_app(manifest)):
+        created = await client.post("/items", json={"label": "x"})
+        etag = created.headers["etag"]
+        rid = created.json()["id"]
+        updated = await client.patch(
+            f"/items/{rid}",
+            json={"label": "y"},
+            headers={"If-None-Match": etag},
+        )
+        assert updated.status_code == 200
+        assert updated.json()["label"] == "y"
+    await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Strategy privacy (caller-scoped responses)
+# ---------------------------------------------------------------------------
+
+
+def test_with_private_forces_private_and_is_idempotent():
+    strategy = ETagCacheStrategy()
+    assert strategy.cache_is_private() is False
+    forced = strategy.with_private(True)
+    assert forced.cache_is_private() is True
+    assert forced.private is True
+    # A no-op request returns the same object (no allocation on the common path).
+    assert strategy.with_private(False) is strategy
+    assert forced.with_private(True) is forced
+
+
+def test_optimistic_strategy_reports_its_own_window_as_private():
+    assert OptimisticCacheStrategy(expire_in=30, private=True).cache_is_private() is True
+    assert OptimisticCacheStrategy(expire_in=30).cache_is_private() is False
+
+
+def test_forced_private_validator_header_revalidates_but_stays_out_of_shared_cache():
+    from resourcey.http.routes import _cache_response_headers
+
+    header = ETagCacheStrategy().with_private(True).get_cache_header([])
+    headers = _cache_response_headers(header)
+    assert headers["Cache-Control"] == "private, no-cache"
+
+
+def test_private_strategy_leaves_a_none_strategy_and_placeholder_alone():
+    from resourcey.core.service import CacheStrategy as CoreCacheStrategy
+    from resourcey.http.routes import _private_strategy
+
+    class _Service:
+        def __init__(self, private: bool) -> None:
+            self._private = private
+
+        def response_is_private(self) -> bool:
+            return self._private
+
+    assert _private_strategy(None, _Service(True)) is None
+    # A core placeholder has no ``with_private`` and yields no validator.
+    placeholder = CoreCacheStrategy()
+    assert _private_strategy(placeholder, _Service(True)) is placeholder
+    # A non-private service leaves the strategy unchanged.
+    base = ETagCacheStrategy()
+    assert _private_strategy(base, _Service(False)) is base

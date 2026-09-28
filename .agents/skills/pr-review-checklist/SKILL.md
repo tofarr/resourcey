@@ -18,7 +18,7 @@ Before approving a PR, verify:
 * **Escape hatches** — new abstractions do not lock out direct access to
   FastAPI / SQLAlchemy / Alembic.
 * **Vendored utilities** — no `openhands` import introduced in
-  `resourcey.v2.util.*`.
+  `resourcey.util.*`.
 * **Style** — `ruff` and `mypy --strict` clean; methods short and
   single-purpose; no `__all__`; comments only for the non-obvious.
 * **Migrations** — schema changes produce a reviewed Alembic migration.

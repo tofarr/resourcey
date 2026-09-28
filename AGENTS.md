@@ -33,15 +33,15 @@ until the first release.
   `04_simple_roles`, `05_full_rbac` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
-  standalone projects. `01_message_board` is the **`v2` reference app** (issue
+  standalone projects. `01_message_board` is the **reference app** (issue
   #113): model-first `SqlResource` over ORM models, a shared `SqlSessionManager`
   in the manifest's `managers=`, `create_app`, `APP_*` config, and Alembic
-  driven directly against `Base.metadata`. `02_mongodb` is its **`v2` Mongo counterpart**
+  driven directly against `Base.metadata`. `02_mongodb` is its **Mongo counterpart**
   (issue #80): DTO-first `MongoResource` over an embedded (`mongomock`) client,
   a shared `MongoClientManager` in the manifest's `managers=`, `create_app`, and
   no migration step (the schema is implicit and
-  `migrate_document` is the opt-in hook). `03_api_key_auth` is the **`v2`
-  authentication app** (issue #124): the same model-first message board as 01,
+  `migrate_document` is the opt-in hook). `03_api_key_auth` is the
+  **authentication app** (issue #124): the same model-first message board as 01,
   secured by an `AuthorizedDependencyBuilder` (authenticating with an
   `ApiKeyAuthenticator`, granting `AllowAll`) passed to `create_app`, over a
   config-list key resource (`ApiKeysConfig` → `config_api_key_resource` /
@@ -50,7 +50,7 @@ until the first release.
   (the builder is constructed explicitly in `app.py`). The no-auth transport
   default is named `OpenDependencyBuilder`, so `build_app` always passing the
   API-key builder reads as the deliberate choice it is rather than a hidden
-  fallback. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
+  fallback. `04_simple_roles` is the **authorization app** (issue #132): the
   same message board, but with a per-app `Role` vocabulary carried on each API
   key (`APP_API_KEYS_<n>_ROLES_<m>`) and a single `RolePolicyResolver` mapping
   role -> policy (global + per-resource). Reads are **public by default** — the
@@ -71,10 +71,10 @@ until the first release.
   only `ADMIN`'s global `AllowAll`). Two fixed principals are seeded by
   the committed Alembic migration and by `simple_roles/seed.py` (the ids the
   `.env` keys name). This is 04's identity-store rung; the store-backed groups /
-  roles / per-request resolution land in `05_full_rbac`. `v2` does
+  roles / per-request resolution land in `05_full_rbac`. The framework does
   no `.env` loading, so its run/debug commands pass
   `uvicorn --env-file .env` / `uv run --env-file .env`. `05_full_rbac` is the
-  **`v2` store-backed RBAC app** (issue #133, Part 3 of the auth roadmap): the
+  **store-backed RBAC app** (issue #133, Part 3 of the auth roadmap): the
   same board, but the credential carries only a `principal_id` and the roles /
   groups / permissions live in real `users` / `groups` / `group_users` /
   `roles` / `group_roles` / `role_permissions` / `resource_acls` tables, resolved
@@ -116,11 +116,10 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
   `DiscriminatedUnionMixin`.
 * `pr-review-checklist` — checklist for agents reviewing PRs.
 
-### `auth` and the `v2/auth` successor
+### `auth` — authentication and authorization
 
-`src/resourcey/auth2/` (issue #63), the **v1** API-key authentication seam, has
-been **deleted** now that its `v2` port is complete. Authentication work lives
-in **`src/resourcey/v2/auth/`**: `auth_principal.py` (the `Principal` /
+`src/resourcey/auth/` is the authentication and authorization package (issues
+#63 / #118 / #127 / #131 / #132 / #133): `auth_principal.py` (the `Principal` /
 `PrincipalKind` / `AuthResult` vocabulary, the `Authenticator` seam, the
 `CompositeAuthenticator`, and the lenient/strict principal dependencies),
 `auth_api_key.py` (the `ApiKeyAuthenticator`), `auth_cookie.py` (the
@@ -129,12 +128,11 @@ inner `SqlResource`, the config-list inner `ListResource`, the exposed
 `ResourceView`s, and the key-generation helpers), `auth_api_key_service.py`
 (`StoredApiKeyService` / `ConfigApiKeyService`, both exposing `find_by_key`),
 and `auth_config.py` (`ApiKeysConfig` / `ApiKeyConfig` / `SessionCookieConfig`).
-It imports **only `v2`**, and `v2/http` must not import `v2/auth` (the app
-supplies the builder), so no cycle exists.
+It imports only the lower framework layers, and `http` must not import `auth`
+(the app supplies the builder), so no cycle exists.
 
-`v2/auth` is the only authentication package; the legacy `v1` packages
-(including `src/resourcey/auth/`) have been removed. `v2/auth` must never
-import code outside `v2/` at runtime (pinned by the `v2` isolation test).
+`auth` must never import code outside the framework at runtime (pinned by the
+isolation test).
 
 Key semantics: the key is a `SecretStr` and is stored **only as a SHA-256
 digest**; a presented key is validated by hashing it and searching for the
@@ -144,10 +142,10 @@ disclosed exactly once, in the `201` create response, through the
 `specs/auth.qnt`. Selection is the explicit `dependency_builder=` argument on
 `create_app` / `add_to_app` (config-driven builder selection is a later rung).
 
-### `v2/auth` authorization (issue #127)
+### `auth` authorization (issue #127)
 
 Authorization (what a caller *may do*, as distinct from #118's authentication)
-lives beside the API-key code in **`src/resourcey/v2/auth/`**:
+lives beside the API-key code in **`src/resourcey/auth/`**:
 
 * `auth_policy.py` — **`Policy`** (a `DiscriminatedUnionMixin`) reduces itself to
   a `SearchFilter` via `async def to_search_filter(user_id, action)`; built-ins
@@ -163,7 +161,7 @@ lives beside the API-key code in **`src/resourcey/v2/auth/`**:
   parameterization `AllFilter[Any](...)` is a distinct class the SQL/Mongo
   translation registries do not know).
 * `auth_authorized_service.py` — **`AuthorizedService`** wraps a resource's own
-  service and enforces the reduced filter per action, porting v1's
+  service and enforces the reduced filter per action, preserving the
   `SecuredService` semantics: a denied **create** raises `ForbiddenError` (403);
   an out-of-scope **read** / **update** / **delete** raises `NotFoundError`
   (404) so existence is not leaked; a denied **search** / **count** `and_`-and-pushes
@@ -186,7 +184,7 @@ lives beside the API-key code in **`src/resourcey/v2/auth/`**:
   scheme is declared without changing the route signature. The resolved policy
   set replaces #127's one-policy-per-app assumption.
 
-### `v2/auth` authentication — the principal pipeline (issue #131)
+### `auth` authentication — the principal pipeline (issue #131)
 
 `auth_principal.py` states the authentication half in one place:
 
@@ -237,19 +235,19 @@ to go back and re-check the principal), distinct from the browser cookie's
 `SessionCookieConfig` (`auth_config.py`) holds the env-driven cookie settings.
 
 `ForbiddenError` and the singular `normalize_action` (`COUNT`→`SEARCH`,
-`BATCH_READ`→`READ`, `BATCH_EDIT`→`UPDATE`) live in `v2/core/service.py`;
-`ForbiddenError` is mapped to `403 forbidden` in `v2/http/routes.py`'s error
+`BATCH_READ`→`READ`, `BATCH_EDIT`→`UPDATE`) live in `core/service.py`;
+`ForbiddenError` is mapped to `403 forbidden` in `http/routes.py`'s error
 envelope. Caching (#92) and authorization compose through a **caller-scope
 seam**: `Policy.scopes_to_caller` (a `ClassVar`, default `True` = safe;
 `AllowAll` / `DenyAll` / `ReadOnly` declare `False`) plus
-`Service.response_is_private()` (`False` in `v2/core`, overridden by
-`AuthorizedService` from the resolved policies). `v2/http/routes.py` forces
+`Service.response_is_private()` (`False` in `core`, overridden by
+`AuthorizedService` from the resolved policies). `http/routes.py` forces
 `private` onto the cache header when the service reports a caller-scoped
 response, so a shared cache neither stores nor revalidates it — an `ETag` alone
 cannot stop a shared cache serving one principal's slice to another. See
 `specs/permissions.qnt` / `specs/cache_defaults.qnt`.
 
-### `v2/auth` simple roles (issue #132)
+### `auth` simple roles (issue #132)
 
 Part 2 of the auth roadmap gives a deployment a small, **per-app** role
 vocabulary carried on the credential and translated to policies in **one place**
@@ -294,7 +292,7 @@ framework never imports app code to interpret a credential.
   call-scoped `ctx` under `auth_principal.PRINCIPAL_CTX_KEY`, so a resource
   service (which receives the same ctx) can read it — e.g. an `Owner`-scoped
   resource stamping the owner on a create row. The key is a plain string so
-  `v2/core` need not import `v2/auth`.
+  `core` need not import `auth`.
 
 `specs/roles.qnt` pins the role → policy reduction and the union laws (in `make
 specs` and CI): the `Owner` scoping (own rows for read / by-id writes, unscoped
@@ -302,13 +300,13 @@ create, denied anonymous), unknown-role / un-roled fail-closed defaults,
 per-resource scoping (a role reading all of X but only its own rows of Y), the
 union of several roles, and that a deny-only role never overrides a grant.
 
-### `v2/auth` full RBAC — the stored rung (issue #133)
+### `auth` full RBAC — the stored rung (issue #133)
 
 Part 3 replaces Part 2's app-level, credential-carried roles with a **store**.
-Three modules, all importing only `v2`:
+Three modules, all importing only the lower framework layers:
 
 * `auth_rbac.py` — the ORM models + the exposed resource set, **model-first**
-  like every `v2` SQL resource. `User` (`id`/`email`/`username`/`enabled`),
+  like every SQL resource. `User` (`id`/`email`/`username`/`enabled`),
   `Group`, `GroupUser` (membership), `Role` (the stored counterpart of Part 2's
   role strings), `GroupRole` (role assignment to a group), `RolePermission` (the
   core RBAC unit: a `resource` name + a JSON-serialized `Policy`), and
@@ -326,7 +324,7 @@ Three modules, all importing only `v2`:
   session source is an `async_sessionmaker` **or** a zero-arg callable returning
   one (sync or async), so a store can be built before the app lifecycle (a
   `SqlSessionManager` only hands out makers once entered). `ACL_MAX_IDS = 100`
-  caps the enumeration path (v1's bound carried forward); beyond it the join /
+  caps the enumeration path (the carried-forward bound); beyond it the join /
   subquery flavour is the answer. `policy_from_rows` skips a corrupt row rather
   than crashing or over-denying.
 * `auth_rbac_resolver.py` — **`RbacPolicyResolver`**, Part 1's `PolicyResolver`
@@ -360,13 +358,13 @@ bounding a membership change, and the caller-scoping derivation.
 
 ### Storage backends and the shared paging base
 
-The framework ships three storage backends, all under `v2/`: `v2/sql` (see
-below), `v2/mongo` (issue #80), and `v2/list` (issue #116). The legacy `v1`
+The framework ships three storage backends: `sql` (see below), `mongo` (issue
+#80), and `list` (issue #116). The earlier
 `resourcey.resource`, `resourcey.list`, and `resourcey.mongo` packages have
 been removed. A new backend subclasses `Resource`/`Service` and implements only
 its data access, never a copy of the shared cursor or sort-validation code.
 
-`v2/list`'s `ListResource` is **read-only**: it narrows `actions` to
+`list`'s `ListResource` is **read-only**: it narrows `actions` to
 `read`/`search`/`count`/`batch_read` so no write route is ever mounted. It is
 installed with the models it serves (`ListResource(models=[...])`) and the
 wrapped Pydantic model is projected onto a `DTO` declaration — there is no
@@ -376,7 +374,7 @@ caller cannot mutate the served collection through a result. The list *is* the
 storage, delivered through the same service seam; there is no table and no
 migration.
 
-A `v2` manifest is declared with resource **instances**, not types:
+A manifest is declared with resource **instances**, not types:
 
 ```python
 manifest = Manifest(resources=(SqlResource(Thread), SqlResource(Message)))
@@ -388,12 +386,12 @@ inputs is simply constructed with them — that is how a `ListResource` gets its
 data (`ListResource(countries)`), and how a caller can override a hook per
 instance.
 
-### `v2/core` — the DTO / Resource / Service layer
+### `core` — the DTO / Resource / Service layer
 
-`src/resourcey/v2/core/` is a deliberately minimal package (issue #75) that
+`src/resourcey/core/` is a deliberately minimal package (issue #75) that
 states the architecture in terms of **DTO**, **Resource**, **Service**, plus a
-**Manifest**. It sits one rung above the `v2/util` bottom layer and imports only
-`v2/util` (the `Missing` sentinel) among project packages.
+**Manifest**. It sits one rung above the `util` bottom layer and imports only
+`util` (the `Missing` sentinel) among project packages.
 
 Four files, no `__init__.py`:
 
@@ -448,7 +446,7 @@ Four files, no `__init__.py`:
   stored values); timestamps appear in every response shape and no request
   shape.
 * `resource.py` — `Resource` is a **genuine ABC**: every method is abstract, so
-  `v2/core` keeps no behaviour and a backend supplies the whole contract. It is
+  `core` keeps no behaviour and a backend supplies the whole contract. It is
   generic over the DTO `T` and the identifier type `K` (`Resource[T, K]`), so
   `get_service` returns a `Service[T, K]` and the id surface is typed by `K`
   rather than `Any`. The abstract surface is the DTO / REST-model getters
@@ -460,7 +458,7 @@ Four files, no `__init__.py`:
   CM, so the call site is `async with await get_service(ctx)`), registration
   (`on_register` / `get_manifest`), and the lifecycle (`__aenter__` /
   `__aexit__`). Core stays free of storage *and* transport: the per-request
-  FastAPI dependency is built in `v2/http`, not here.
+  FastAPI dependency is built in `http`, not here.
 * `service.py` — `Service` is generic over the DTO `T` and the identifier type
   `K`, declares the eight actions, and *is* the async context manager; a call
   before `__aenter__` raises. `search` / `count` take a standard `SearchFilter`
@@ -488,14 +486,14 @@ Four files, no `__init__.py`:
   async context managers (e.g. a `SqlSessionManager`): they are entered **before**
   the resources and exited **after** them, so a resource can still use a manager
   while shutting down. The slot is deliberately generic (`AbstractAsyncContextManager`)
-  rather than sql-typed, since `v2/core` must not import `v2/sql`.
+  rather than sql-typed, since `core` must not import `sql`.
 
-HTTP construction (`create_app`) is **not** part of `v2/core` — it belongs to
+HTTP construction (`create_app`) is **not** part of `core` — it belongs to
 the transport layer.
 
-### `v2/sql` — the SQLAlchemy backend (issues #78 / #89 / #74)
+### `sql` — the SQLAlchemy backend (issues #78 / #89 / #74)
 
-`src/resourcey/v2/sql/` is the SQL backend on top of `v2/core`, laid out like
+`src/resourcey/sql/` is the SQL backend on top of `core`, laid out like
 `core` (flat files by role, no `__init__.py`). The workflow is **model-first**:
 a developer defines the SQLAlchemy ORM model they already work with, and the
 framework infers the DTO from it. SQLAlchemy is the schema of record, so
@@ -512,8 +510,8 @@ a developer can drop straight back to SQLAlchemy.
   from — defaulting to the process-wide `get_sql_session_manager()` and its
   first connection. Because resolving a connection is async,
   `SqlResource.get_service` is **async**. The file is named `sql_resource.py`
-  (and `sql_service.py`) so it is not confused with `v2/core/resource.py` /
-  `v2/core/service.py`.
+  (and `sql_service.py`) so it is not confused with `core/resource.py` /
+  `core/service.py`.
 * `sql_service.py` — `SqlService` holds the call-scoped `ctx` and the session
   factory and implements the eight actions. `search` does keyset cursor
   pagination ordered by the identifier, or by a validated `sort` field (with
@@ -556,17 +554,17 @@ a developer can drop straight back to SQLAlchemy.
   issue).
 * `cursor.py` — the SQL keyset `WHERE` predicate (`keyset_predicate`); it
   re-exports the storage-agnostic cursor *codec* (`encode_cursor` /
-  `decode_cursor`) from `v2/util/cursor.py` so the tamper-proof encoding is
+  `decode_cursor`) from `util/cursor.py` so the tamper-proof encoding is
   shared with the non-SQL backends while SQLAlchemy stays out of them. The
-  cursor is a JWE from `v2/encryption`.
+  cursor is a JWE from `encryption`.
 
-There is no `v2/sql/migration.py`: with SQLAlchemy as the schema of record,
+There is no `sql/migration.py`: with SQLAlchemy as the schema of record,
 migrations are delegated to SQLAlchemy and Alembic rather than generated from
 the framework's own in-memory models.
 
-### `v2/list` — the read-only list backend (issue #116)
+### `list` — the read-only list backend (issue #116)
 
-`src/resourcey/v2/list/` is a `v2` backend alongside `v2/sql`: a resource built
+`src/resourcey/list/` is a backend alongside `sql`: a resource built
 from an application-supplied list of Pydantic models and served **read-only**,
 for in-process reference data (country codes, feature flags, catalog entries)
 that should be exposed over the same REST surface without being copied into a
@@ -581,7 +579,7 @@ backend subclasses `Resource`/`Service` and inherits the rest.
   `DefaultCacheStrategyMixin` (a read-only resource therefore resolves to
   `OptimisticCacheStrategy(expire_in=600, private=True)` with no per-backend
   code), and narrows `get_supported_actions()` to exactly
-  `{read, search, count, batch_read}`. Because `v2/http/routes.py` mounts a
+  `{read, search, count, batch_read}`. Because `http/routes.py` mounts a
   route only for a declared action, **no write route exists** — a write is a
   `405`, not an unimplemented handler. `defensive=True` deep-copies every
   output (`model_copy(deep=True)`); `defensive=False` serves the stored object
@@ -593,7 +591,7 @@ backend subclasses `Resource`/`Service` and inherits the rest.
   (filters via `SearchFilter.matches`, orders via `SortOrder.compare` with the
   identifier appended as a tie-breaker, then keyset-pages), `count`, and
   `batch_read` (positionally aligned, `None` for a miss). Paging reuses the
-  shared `v2/util/cursor.py` codec and mirrors the SQL `keyset_predicate` in
+  shared `util/cursor.py` codec and mirrors the SQL `keyset_predicate` in
   memory (NULLs first ascending / last descending; only the sort-key comparison
   mirrors for descending); a cursor reused under a different `(sort_field,
   ascending)` is rejected (`InvalidInputError` → 400). Write methods keep the
@@ -603,12 +601,12 @@ backend subclasses `Resource`/`Service` and inherits the rest.
   nullability carry across, the identifier is `id` (or an explicit
   `id_field_name=`), and an explicit `DtoField` (an `Annotated` tag or
   `Field(json_schema_extra={"dto_field": ...})`) is honoured verbatim. Other
-  fields are left bare so the `v2/core` conventions apply; a read-only resource
+  fields are left bare so the `core` conventions apply; a read-only resource
   never exercises the create path, so those defaults are simply unused.
 
-### `v2/encryption` — the encryption service (issue #78)
+### `encryption` — the encryption service (issue #78)
 
-`src/resourcey/v2/encryption/` holds the
+`src/resourcey/encryption/` holds the
 `EncryptionService` (`encrypt_value` / `decrypt_value`, the cursor path, plus
 `create_jwe_token` / `decrypt_jwe_token`, the auth-token path) and the key
 config (`EncryptionKeysConfig` / `EncryptionKeyConfig`, with the
@@ -626,12 +624,12 @@ construction and cursor pagination works without a caller wiring one in; the
 (`EncryptionKeyConfig(value="changeme")` plus a warning) instead of a build
 failure; a partially specified key (an id with no value) stays a hard
 `ResourceyConfigError`. It sits in its own package (not `core`, which stays
-crypto-free, and not `sql`, so a future `v2` auth can use it without reaching
+crypto-free, and not `sql`, so the auth layer can use it without reaching
 into `sql`).
 
-### `v2/http` — the transport layer (issue #87)
+### `http` — the transport layer (issue #87)
 
-`src/resourcey/v2/http/` holds HTTP assembly as **free functions**, not methods
+`src/resourcey/http/` holds HTTP assembly as **free functions**, not methods
 on `Manifest` (which stays a plain container) and with no lazy imports:
 
 * `app.py` — `create_app(manifest, *, cors_origins=None,
@@ -648,7 +646,7 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   `get_service_dependency(resource) -> Callable[..., object]`; it returns an
   ordinary FastAPI dependency whose author may declare any parameter FastAPI
   can wire (the `Request`, other `Depends(...)`, i.e. an auth dependency) — the
-  same composition the `v1` builder used, so the seam covers authentication as
+  same composition the earlier builder used, so the seam covers authentication as
   well as authorization. `OpenDependencyBuilder` is the default: it applies
   **no** authentication or authorization, building the resource's own service
   over the request-scoped `ctx` and yielding it — so its name flags an
@@ -657,7 +655,7 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   request-state key is `resourcey_ctx`), shared by every resource in one
   request. The builder lives here, not on the `Manifest`, because it is
   transport code (`Request` is annotated `starlette.requests.Request`) and
-  `v2/core` must not import `v2/http`; the manifest stays a plain container.
+  `core` must not import `http`; the manifest stays a plain container.
   The seam is **authorization only** — it cannot add or remove routes (that is
   `get_exposed_resource()`'s sole call), and a restrictive posture returns a
   dependency that *denies* rather than nothing, keeping the route visible in
@@ -684,26 +682,27 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   union — which is narrowed to the `Create` / `Delete` actions the resource
   declares, so a batch cannot reach an action the declaration omits.
 
-Where the port differs from `v1`: `get_rest_models()` replaces the
+Where the design differs from the earlier iteration: `get_rest_models()` replaces
 create/update/read model getters, so each action maps explicitly to its shape
 (`create` → `create_response`, so a one-time-reveal field survives); services
 return DTO instances, so the response is **projected** onto the REST model
-(dropping `MISSING`) in the transport; `v1`'s filter surface is back (issue
+(dropping `MISSING`) in the transport; the filter surface is back (issue
 #79) and its sort surface is back too (issue #97), so search is `limit` +
 `cursor` + `sort` / `desc` + the `<field>__<op>` filter params. Caching is back
-(issue #92) — see the `v2/cache` section below. The service dependency is built
+(issue #92) — see the `cache` section below. The service dependency is built
 through the configured `DependencyBuilder` behind the one private helper
 (`_service_dependency`). The error envelope maps only what
-`v2` has now — `NotFoundError`→404, `IntegrityError`→409, `ServiceError`→500,
+the framework has now — `NotFoundError`→404, `IntegrityError`→409,
+`ServiceError`→500,
 pydantic→422 (kept by FastAPI) — and #83 extends the same function. The
 service's `serialization_context()` (issue #118) is threaded into
 `_project` / `_dump` / `_header_for`, so the wire body (and the ETag that
 hashes it) reflects the secret-serialization convention rather than always
 redacting.
 
-### `v2/util/search_filter.py` and `v2/sql/filter_converter.py` — filtering (issue #79)
+### `util/search_filter.py` and `sql/filter_converter.py` — filtering (issue #79)
 
-Filtering is two-level. `v2/util/search_filter.py` (the bottom layer) holds the
+Filtering is two-level. `util/search_filter.py` (the bottom layer) holds the
 storage-agnostic core: `SearchFilter[T]` is a frozen, generic
 `DiscriminatedUnionMixin` whose only method is `matches(value) -> bool`, with the
 standard node types `AllFilter`, `NoMatchFilter`, `AndFilter`, `OrFilter`,
@@ -721,7 +720,7 @@ tree via `create_standard_filter()`, cached in a `PrivateAttr` (never a field, s
 it stays out of `model_dump`, which the count ETag hashes). The derived query
 surface helper `operators_for_annotation` fixes the op set by field type.
 
-`v2/sql/filter_converter.py` is the only v2 file importing SQLAlchemy for
+`sql/filter_converter.py` is the only framework file importing SQLAlchemy for
 filtering. It consumes a *standard* tree (an object filter has already lowered),
 dispatched through **three registries** — logical (`All`/`NoMatch`/`And`/`Or`/
 `Not`, no column), attribute (`Attr`, which resolves a name to a column and binds
@@ -733,7 +732,7 @@ otherwise) so it agrees with the in-memory `matches` complement on NULL rows,
 where naive SQL `NOT` would drop them. `SqlFilterConverter` splits `resolve()`
 (the only IO phase; empty today) from `apply()` (pure statement building). Pushdown
 is all-or-nothing: an unconvertible node raises `UnsupportedFilterError` (a
-`v2/core/errors.py` error, mapped by transport to `501 unsupported_filter`) unless
+`core/errors.py` error, mapped by transport to `501 unsupported_filter`) unless
 the resource sets `allow_filter_iteration = True`, which materialises matching ids
 in memory — an unbounded scan behind a public `GET` is otherwise a DoS, and
 silently skipping a filter could leak a permission scope. A frozen
@@ -744,7 +743,7 @@ The query surface: `Resource.get_filter_operators()` returns the derived surface
 (each field's allowed ops) and `Resource.get_search_filter_type()` returns `None`
 by default; `SqlResource` derives the surface from the read model so a field is
 filterable exactly when it is readable (a wrapper that projects `secret` away
-still rejects `?secret__eq=`). `v2/http/routes.py` synthesises one typed `Query`
+still rejects `?secret__eq=`). `http/routes.py` synthesises one typed `Query`
 param per `<attribute>__<op>` for OpenAPI, and `_resolve_filters` rejects any
 unknown `field__op` key with `InvalidInputError` (400) — FastAPI silently ignores
 unknown query params, so a typo must not be dropped. The count route's ETag hashes
@@ -760,21 +759,22 @@ positive pushdown agrees with `matches` on every row — the "convertible ⇒ SQ
 agrees" property the all-or-nothing policy rests on. The flat unrolling means
 `Or`/`Not` normalisation is not expressed.
 
-### `v2/util/sort_order.py` and `v2/sql/sort_converter.py` — sorting (issue #97)
+### `util/sort_order.py` and `sql/sort_converter.py` — sorting (issue #97)
 
-Sorting mirrors filtering, one rung lower in surface. `v2/util/sort_order.py`
+Sorting mirrors filtering, one rung lower in surface. `util/sort_order.py`
 holds the storage-agnostic core: `SortOrder[T]` is a frozen, generic
 `DiscriminatedUnionMixin` whose only method is `compare(a, b) -> CompareResult`
 (`LESS` / `GREATER` / `SAME`), and the initial standard node is
 `AttrSortOrder[ObjT, ValT]` (`attribute`, `descending`) — a single attribute,
-ascending or descending, the `v1` surface. `compare` is the in-memory reference
+ascending or descending, the initial surface. `compare` is the in-memory reference
 semantics (an in-memory backend and the spec use it) and orders by one attribute
 only; `None` sorts first so it is total on a nullable attribute. The identifier
 tie-breaker that makes *paging* total is the backend's job (an `ORDER BY` with
 the identifier appended and the matching keyset predicate), so it is not in the
 node. Multi-attribute sort is a later rung — the union makes it additive.
 
-`v2/sql/sort_converter.py` is the only v2 file importing SQLAlchemy for sorting.
+`sql/sort_converter.py` is the only framework file importing SQLAlchemy for
+sorting.
 A single registry keyed on the `SortOrder` type (extensible via
 `register_sort_order`), resolved through a frozen `SqlSortContext(columns,
 id_column)` carrying only the resource's **sortable** columns — the same security
@@ -784,7 +784,7 @@ order leaks the hidden value). `apply(stmt, sort_order)` returns
 tie-breaker, with an import-time completeness assert so a new node without a
 handler fails at startup.
 
-The keyset cursor grew to the `v1` shape: `encode_cursor(..., sort_field,
+The keyset cursor has the fuller shape: `encode_cursor(..., sort_field,
 ascending, sort_key, id_value)` and `decode_cursor` returns the tuple, with
 `sort_field=None` for the default identifier-ordered case.
 `keyset_predicate(sort_column, id_column, cursor_key, cursor_id, ascending)`
@@ -799,13 +799,13 @@ comparison when the sort column *is* the id column. `SqlService.search` validate
 the sort field, orders by it, and **rejects** a cursor whose `(sort_field,
 ascending)` does not match the current request (`InvalidInputError` → 400) rather
 than applying the key against the wrong column; changing the sort of a paged
-request therefore means starting a new search (no cursor), matching `v1`. A
+request therefore means starting a new search (no cursor). A
 malformed cursor surfaces as `InvalidInputError` (400), not a 500.
 
 The sort surface: `Resource.get_sortable_fields() -> frozenset[str]` is derived
 from the read model (readable ⇒ sortable) and `Resource.get_sort_order_type()`
 returns `None` by default; `SqlResource` derives the surface from `read_response`
-so `?sort=secret` is rejected. `v2/http/routes.py` exposes typed `sort` / `desc`
+so `?sort=secret` is rejected. `http/routes.py` exposes typed `sort` / `desc`
 query params on search and passes them through; unknown or non-sortable fields
 return 400. `count` is order-free and unaffected. Sorting changes the order of
 the returned items and the ETag already hashes the ordered projection, so
@@ -820,9 +820,9 @@ identifier (the tie-breaker never mirrors); and (4) a cursor is accepted only
 under the `(sort_field, ascending)` it was built for. The single-attribute model
 is unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
 
-### `v2/cache` — the cache surface (issue #92)
+### `cache` — the cache surface (issue #92)
 
-`src/resourcey/v2/cache/` (no `__init__.py`):
+`src/resourcey/cache/` (no `__init__.py`):
 
 * `cache_header.py` — `CacheHeader` (the `etag` / `updated_at` / `expire_at` /
   `private` value object and the `is_modified` matrix). `private` marks a
@@ -831,7 +831,7 @@ is unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
 * `cache_strategy.py` — the concrete `CacheStrategy` base plus
   `ETagCacheStrategy` / `LastModifiedCacheStrategy` / `OptimisticCacheStrategy`.
   The concrete base is a `DiscriminatedUnionMixin` **and** extends
-  `resourcey.v2.core.service.CacheStrategy` (the placeholder `v2/core` names),
+  `resourcey.core.service.CacheStrategy` (the placeholder `core` names),
   so a strategy satisfies the core-level seam while its behaviour lives in
   `cache`. `get_cache_header(items, *, context=...)` hashes the read-model
   projection; `count_cache_header(count, filters)` handles the bare-integer
@@ -856,12 +856,12 @@ is unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
   concrete overrides, drop them from `Resource`'s abstract set (a backend that
   forgets one still fails at instantiation).
 
-The wiring: `Resource.get_cache_strategy()` returns `None` in `v2/core` (which
+The wiring: `Resource.get_cache_strategy()` returns `None` in `core` (which
 stays dependency-free); `SqlResource` mixes in `DefaultCacheStrategyMixin` and
 so resolves the default **per instance** (one `SqlResource` class serves many
 DTOs, so a class-level cache would leak between them) and caches it on the
 instance. A developer overrides the same hook to change the policy.
-`v2/http/routes.py` reads the exposed resource's strategy once, passes it to
+`http/routes.py` reads the exposed resource's strategy once, passes it to
 every route builder, and each handler emits `ETag` / `Last-Modified` /
 `Cache-Control` / `Expires` and short-circuits a conditional `GET`/`HEAD` to
 `304 Not Modified`; a validator with no freshness window forces revalidation
@@ -871,17 +871,17 @@ the freshness directive. `specs/cache_defaults.qnt` pins the selection and the
 Only the projected REST representation is hashed, so the ETag validates exactly
 the bytes sent.
 
-### `v2/mongo` — the MongoDB backend (issue #80)
+### `mongo` — the MongoDB backend (issue #80)
 
-`src/resourcey/v2/mongo/` is the non-SQL proof of the `v2` seams, laid out like
+`src/resourcey/mongo/` is the non-SQL proof of the framework seams, laid out like
 `sql` (flat files by role, no `__init__.py`) and sitting at the same layer rank.
 The workflow is **DTO-first**: Mongo has no schema of record, so the developer
 declares a `DTO` and hands it to the resource —
 `MongoResource(ThreadDTO, name="main")`. The DTO declaration drives the six REST
 models, the identifier, and the query surface (the read model *is* the filter /
 sort surface — the same security gate `SqlResource` uses). A bare `id: UUID`
-gets a server-side `uuid4` create default from the `v2/core` conventions, so
-`v1`'s `_make_id_optional` hack is gone, and `created_at` / `updated_at` are
+gets a server-side `uuid4` create default from the `core` conventions, so
+the earlier `_make_id_optional` hack is gone, and `created_at` / `updated_at` are
 framework-owned.
 
 * `mongo_resource.py` — `MongoResource` (a `Resource` subclass) serves a DTO
@@ -947,13 +947,13 @@ framework-owned.
   (`password=None` would clear a URL-embedded password).
 
 `mongodb = ["motor>=3.6"]` stays the only place `motor` is required:
-`v2/mongo` is import-safe without it, and building a real client without it
+`mongo` is import-safe without it, and building a real client without it
 fails with an actionable `ImportError` naming `resourcey[mongodb]`. `mongomock`
 / `pymongo` remain dev-only for the embedded path and tests.
 
-### `v2/view` — the configured wrapper (issue #121)
+### `view` — the configured wrapper (issue #121)
 
-`src/resourcey/v2/view/` holds `ResourceView`, the `v2` successor to `v1`'s
+`src/resourcey/view/` holds `ResourceView`, the successor to the earlier
 `WrapperResourceBase` (#62), but **configuration-driven** rather than
 subclass-driven, so a projection is an instance:
 
@@ -980,7 +980,7 @@ recomputed, because the query surface and cache policy derive from the DTO /
 REST models and the action set:
 
 * **Field projection** — the DTO is re-derived from the inner declaration via a
-  new `derive_dto(dto, field_overrides=...)` in `v2/core/dto.py`. It re-declares
+  new `derive_dto(dto, field_overrides=...)` in `core/dto.py`. It re-declares
   every field with its *resolved* `DtoField` made explicit and merges the
   per-field override onto it with `DtoField.with_overrides`, so the `DTO`
   conventions do **not** re-run (a bare `id` keeps its `uuid4` factory). The
@@ -1005,7 +1005,7 @@ REST models and the action set:
 * **Actions** — normalized (`normalize_actions`), and `exposed_actions` must be a
   subset of the inner's: a view **narrows**, never widens.
 
-`v2/core/service.py` gains `normalize_actions(actions)` — a batch action is
+`core/service.py` gains `normalize_actions(actions)` — a batch action is
 dropped when its singular action is absent (`batch_read` needs `read`;
 `batch_edit` needs at least one of create / update / delete). It is applied
 where actions are consumed: `register_routes` (so routes and the batch body
@@ -1024,9 +1024,9 @@ lifecycle (e.g. `MongoResource.ensure_indexes()`) still runs; register the
 **view**, not the inner (registering both double-enters the inner and mounts
 duplicate routes). The layer ranks gain `view` at the backend rank.
 
-### `v2/filestore` — pre-signed-URL files (issue #117)
+### `filestore` — pre-signed-URL files (issue #117)
 
-`src/resourcey/v2/filestore/` adds **file bytes** as a first-class resource
+`src/resourcey/filestore/` adds **file bytes** as a first-class resource
 without putting the bytes on a request path. The *metadata* (name, size, MIME
 type, checksum, the medium's ETag, status, opaque storage key) is an ordinary
 model-first `SqlResource`, so it gets the standard surface plus cache headers;
@@ -1072,11 +1072,11 @@ API's auth) moves the bytes.
 * `s3_file_store.py` — the production medium: native SigV4 pre-signed URLs
   (`presign_*` is local, no network round trip) and client put/get/head/delete.
   `boto3` is imported **lazily**, only when a real client is built (an explicit
-  `client=` is the escape hatch), so `v2/filestore` imports without the extra;
+  `client=` is the escape hatch), so `filestore` imports without the extra;
   the optional dependency is `s3` (`resourcey[s3]`), and a single-`PUT` cap
   applies (`S3_MAX_PUT_BYTES`; multipart is out of scope).
 * `signed_url.py` — the framework-signed capability for the SQL / local
-  mediums: `mint_signed_url` produces a JWE over `v2/encryption` carrying
+  mediums: `mint_signed_url` produces a JWE over `encryption` carrying
   `{"k": key, "op": "put"|"get"}` plus `iat` / `exp`, and `verify_signed_url`
   rejects (400) a malformed / tampered token, an expired one (the codec does
   **not** enforce `exp`, so the caller must), one presented for the wrong
@@ -1109,67 +1109,64 @@ the completion guards (object present, size matches, not already ready),
 distinct keys, and the `ready`-implies-uploaded / ETag-matches-medium /
 `pending`-has-no-ETag invariants. It is part of `make specs` and CI.
 
-### `v2/` isolation
+### Framework isolation
 
-`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/filestore`,
-`v2/auth`, `v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and `v2/http`
-are the framework: the legacy `v1` packages/modules (and the old
-`resourcey.encryption`) have been removed. A test asserts that no module under
-`v2/` makes a **runtime**
-import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
-v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
-pins the **layer ranks**
+`core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `encryption`,
+`util`, `config`, `cache`, and `http` are the framework, and the earlier
+packages/modules have been removed. A test pins the **layer ranks**
 `util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}`:
-no module imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`,
-and `v2/list` implement whatever small helpers they need locally rather than
-reaching for `v2/util`.
+no module imports a strictly-higher project layer at runtime (a static AST walk
+covering every layer in one rule), `if TYPE_CHECKING:` imports still allowed.
+`sql`, `mongo`, and `list` implement whatever small helpers they need locally
+rather than reaching for `util`.
 
-### `v2/util` and `v2/config` — the config rung
+### `util` and `config` — the config rung
 
-`src/resourcey/v2/util/` (issue #82) is the **bottom layer** of `v2` and where
+`src/resourcey/util/` (issue #82) is the **bottom layer** and where
 the dependency-free vendored leaves now live: `models.py`
 (`DiscriminatedUnionMixin`), `import_paths.py` (dotted-path resolution),
 `env_parser.py`, and `missing.py` (the `Missing` / `MISSING` sentinel, moved
 here by issue #86), plus the non-vendored `cursor.py` (the storage-agnostic
-keyset cursor codec, extracted from `v2/sql` by issue #116) and the shared
+keyset cursor codec, extracted from `sql` by issue #116) and the shared
 `naming.py` / `singleton.py` / `search_filter.py` / `sort_order.py` leaves.
-`v2/util` imports **no project package** at all (not even `v2/core`),
+`util` imports **no project package** at all (not even `core`),
 so the layer ranks are a clean
 
     util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}
 
-and `v2/core` may import `v2/util` — the dependency runs one way.
+and `core` may import `util` — the dependency runs one way.
 
-`src/resourcey/v2/util/secret_serialization.py` (issue #118) is the `v2` port of
-v1's context-driven secret convention: `dump_secret_str` / `load_secret_str` read
+`src/resourcey/util/secret_serialization.py` (issue #118) is the port of the
+earlier context-driven secret convention: `dump_secret_str` / `load_secret_str`
+read
 an `encryption_service` (encrypt / decrypt at the storage boundary) or
 `expose_secrets` (plaintext) from the pydantic context, and otherwise **redact**;
 encryption wins over exposure. It is wired onto generated models by
-`v2/core/dto.py` (`_secret_base`, so every generated REST shape carries the
+`core/dto.py` (`_secret_base`, so every generated REST shape carries the
 serializer / validator), a service supplies its context through
-`Service.serialization_context()` in `v2/core/service.py`, and
-`v2/http/routes.py` threads it through `_project` / `_dump`.
+`Service.serialization_context()` in `core/service.py`, and
+`http/routes.py` threads it through `_project` / `_dump`.
 `specs/secret_serialization.qnt` pins the precedence.
 
-`src/resourcey/v2/util/cursor.py` (issue #80) is the storage-agnostic half of
+`src/resourcey/util/cursor.py` (issue #80) is the storage-agnostic half of
 the pagination cursor: the tamper-proof, type-tagged codec
-(`encode_cursor` / `decode_cursor` over the JWE from `v2/encryption`) that both
-`v2/sql` and `v2/mongo` share. `keyset_predicate` — the ``WHERE`` clause — stays
-in `v2/sql/cursor.py` because it imports SQLAlchemy, and that module re-exports
-the codec so existing `resourcey.v2.sql.cursor` importers keep working; `v2/mongo`
+(`encode_cursor` / `decode_cursor` over the JWE from `encryption`) that both
+`sql` and `mongo` share. `keyset_predicate` — the ``WHERE`` clause — stays
+in `sql/cursor.py` because it imports SQLAlchemy, and that module re-exports
+the codec so existing `resourcey.sql.cursor` importers keep working; `mongo`
 builds its own Mongo keyset query.
 
-`src/resourcey/v2/util/naming.py` holds the shared name helpers `camel_to_kebab`
+`src/resourcey/util/naming.py` holds the shared name helpers `camel_to_kebab`
 (inserts `-` boundaries without lowercasing), `camel_to_snake` (the same
 boundaries with `_`), `pluralize` (a small `s` / `es` rule preserving case), and
 `humanize` (camel/kebab/snake identifier → Title Case words, e.g. `api-keys` →
 `Api Keys`), public and reusable by any backend — e.g. `SqlResource` composes
 `camel_to_kebab` + `pluralize` for its default `get_resource_path`,
 `MongoResource` composes `camel_to_snake` + `pluralize` for its collection name,
-and `v2/http/routes.py` composes `humanize` + `pluralize` for its default
-OpenAPI tag. They were formerly private to `v2/core/resource.py`.
+and `http/routes.py` composes `humanize` + `pluralize` for its default
+OpenAPI tag. They were formerly private to `core/resource.py`.
 
-`src/resourcey/v2/util/singleton.py` (issue #95) is a second, non-vendored
+`src/resourcey/util/singleton.py` (issue #95) is a second, non-vendored
 leaf: a small `Singleton` mixin for the process-wide pieces the framework
 keeps accruing (a dependency builder, a cache, the search-filter leaves like
 `AllFilter` / `NoMatchFilter`). Constructing
@@ -1184,21 +1181,22 @@ validation. `clear_singleton_cache()` mirrors
 `BaseConfig.clear_instance_cache()` and clears only the class it is called on.
 It imports only the standard library.
 
-**One sentinel.** `Missing` / `MISSING` from `v2/util/missing.py` is the only
-definition in `v2`; `v2/util/env_parser.py`, `v2/core/dto.py`,
-`v2/config/lazy_field.py`, and `v2/sql/sql_service.py` import it and there is no
+**One sentinel.** `Missing` / `MISSING` from `util/missing.py` is the only
+definition in the framework; `util/env_parser.py`, `core/dto.py`,
+`config/lazy_field.py`, and `sql/sql_service.py` import it and there is no
 re-export. A test pins `env_parser.MISSING is missing.MISSING` so a future
 re-copy of the vendored file cannot quietly reintroduce a second sentinel.
 
-`src/resourcey/v2/config/` ships the generic machinery only: `config_base.py`
-and `lazy_field.py`. There is **no** `config_loader.py` — `v2` does no `.env`
+`src/resourcey/config/` ships the generic machinery only: `config_base.py`
+and `lazy_field.py`. There is **no** `config_loader.py` — the framework does no
+`.env`
 loading of its own (`get_instance()` reads `os.environ` only; use
 `uvicorn --env-file` or a wrapper script). `FrameworkConfig`, `MigrationConfig`,
 `AuthConfig`, `IdpConfig`, and `DependencyBuilder` are deferred to a later PR,
 so there is no `config_framework.py` / `config_dependency.py` here yet, and no
-`config_runtime` at all (`v2` gains no `RESOURCEY_CONFIG_CLASS` selector). The
+`config_runtime` at all (no `RESOURCEY_CONFIG_CLASS` selector). The
 framework config *blocks* that do exist live with what they configure
-(`SqlConfig` in `v2/sql/`, `EncryptionKeysConfig` in `v2/encryption/`), and an
+(`SqlConfig` in `sql/`, `EncryptionKeysConfig` in `encryption/`), and an
 app composes them by inheritance — `class AppConfig(SqlConfig,
 EncryptionKeysConfig)` — so one `AppConfig.get_instance()` exposes every block
 and `generate_env_template()` covers them all. The app calls
@@ -1222,18 +1220,16 @@ all classes share one flat namespace, `BaseConfig.__init_subclass__` rejects —
 with a `TypeError` at class creation — a field name declared by two classes
 with **different** types, while a same-name/same-type redeclaration is allowed;
 `ClassVar` entries (`LazyField`) are not fields.
-`ResourceyConfigError` (with `ResourceyError`) lives in `v2/core/errors.py` and
+`ResourceyConfigError` (with `ResourceyError`) lives in `core/errors.py` and
 covers build/parse failures only; `ServiceError` / `NotFoundError` stay in
-`v2/core/service.py`. `InvalidInputError` / `UnsupportedFilterError` /
+`core/service.py`. `InvalidInputError` / `UnsupportedFilterError` /
 `ConflictError` also live there — the storage-neutral errors a backend raises and
 the transport maps (`ConflictError` is what a backend's duplicate-key failure
 becomes, so the 409 mapping needs no driver import).
 
-The `v2` isolation test covers **all** of `v2/`: no module under
-`v2/` may make a runtime import of any `resourcey` code outside `v2/`. It also
-asserts the core file set is
-exactly `{dto, errors, manifest, resource, service}.py` and that no `v2` module
-imports `openhands`.
+The isolation test covers **all** of `resourcey/`'s layers: it asserts the layer
+ranks, the core file set is exactly `{dto, errors, manifest, resource,
+service}.py`, and that no framework module imports `openhands`.
 
 ## Database configuration — one connection
 
@@ -1295,7 +1291,7 @@ they need directly.
 
 ## Vendored utilities
 
-`resourcey.v2.util.env_parser` and `resourcey.v2.util.models` (including
+`resourcey.util.env_parser` and `resourcey.util.models` (including
 `DiscriminatedUnionMixin`) are vendored from the OpenHands Software Agent SDK.
 They must remain self-contained: **no `openhands` import may be introduced**.
 When upgrading behaviour from upstream, copy the logic, do not add a

@@ -27,7 +27,7 @@ dev = [
     "mypy>=1.10",
     "mongomock>=4.3",
     "httpx>=0.27",
-    # Embedded Mongo client (resourcey.v2.mongo.embedded) imports pymongo
+    # Embedded Mongo client (resourcey.mongo.embedded) imports pymongo
     # directly; pin it in dev so it resolves without the mongodb extra.
     "pymongo>=4.18.1",
 ]
@@ -99,8 +99,8 @@ mypy_path = "src"
 # They are excluded from the strict check; remove the exclude once the
 # vendored code is fully annotated.
 exclude = [
-    "src/resourcey/v2/util/env_parser\\.py",
-    "src/resourcey/v2/util/models\\.py",
+    "src/resourcey/util/env_parser\\.py",
+    "src/resourcey/util/models\\.py",
 ]
 
 [[tool.mypy.overrides]]

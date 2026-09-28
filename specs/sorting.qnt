@@ -1,4 +1,4 @@
-// sorting.qnt — laws for v2 sorting (issue #97).
+// sorting.qnt — laws for sorting (issue #97).
 //
 // Four laws are pinned here, all storage-agnostic:
 //

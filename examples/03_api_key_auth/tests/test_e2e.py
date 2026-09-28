@@ -1,4 +1,4 @@
-"""End-to-end REST API tests for the v2 API-key-auth example (SQLite).
+"""End-to-end REST API tests for the API-key-auth example (SQLite).
 
 Each test runs against an **isolated SQLite database file** in a per-test tmp
 directory. The schema is created by applying the committed Alembic migration —
@@ -7,7 +7,7 @@ verified, not bypassed with ``create_all``.
 
 The app is assembled through the real config path: the isolated URL is set as
 ``APP_SQL_CONNECTIONS_0_URL`` and a fresh
-:class:`~resourcey.v2.sql.session_manager.SqlSessionManager` is built from
+:class:`~resourcey.sql.session_manager.SqlSessionManager` is built from
 ``SqlConfig.get_instance()``, then handed to
 :func:`api_key_auth.app.build_app` together with the accepted keys. Requests run
 through httpx's ASGI transport — the full request → auth → router → service →
@@ -26,10 +26,10 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 
 from api_key_auth.app import build_app
-from resourcey.v2.auth.auth_api_key import API_KEY_HEADER_NAME
-from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
+from resourcey.auth.auth_api_key import API_KEY_HEADER_NAME
+from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
 
 # The key the tests present; the same value ``.env`` sets.
 _API_KEY = "example-api-key"
@@ -64,7 +64,7 @@ def _keys(*values: str) -> ApiKeysConfig:
 
 @pytest_asyncio.fixture
 async def client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]:
-    """A fully wired, authenticated v2 REST client backed by a migrated SQLite file."""
+    """A fully wired, authenticated REST client backed by a migrated SQLite file."""
     db_path = tmp_path / "e2e.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")

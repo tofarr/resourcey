@@ -18,13 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from full_rbac.app import build_app, build_auth, manager_session_source
 from full_rbac.models import Base
 from full_rbac.seed import ADMIN_USER, VIEWER_USER, seed
-from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
-from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
-from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.auth.auth_rbac import RBAC_MODELS
-from resourcey.v2.auth.auth_rbac_resolver import RbacPolicyResolver
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
+from resourcey.auth.auth_api_key import ApiKeyAuthenticator
+from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
+from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.auth.auth_rbac import RBAC_MODELS
+from resourcey.auth.auth_rbac_resolver import RbacPolicyResolver
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
 
 
 def _keys() -> ApiKeysConfig:

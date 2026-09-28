@@ -30,7 +30,7 @@ uv run uvicorn message_board.app:app --env-file .env --port 8082
 
 The app listens on **port 8082**.
 
-Note the `--env-file .env`: `v2` does no `.env` loading of its own, so the
+Note the `--env-file .env`: the framework does no `.env` loading of its own, so the
 process environment must be populated by the caller. There is **no migration
 step** — MongoDB resources have no Alembic migrations; the schema is created
 implicitly on first write (see "Manual migration on read" below).

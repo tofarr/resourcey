@@ -5,20 +5,20 @@ environment**. There are no users, no sessions, no auth tables, and no
 `/auth/*` routes: a request that presents a valid key gets the full REST API,
 and anything else gets `401`.
 
-This is the end-to-end demonstration of the `v2` authentication seam —
-`resourcey.v2.auth` (issue #118) — and of
-the `v2/http` `DependencyBuilder` seam (issue #86), which applies the posture to
+This is the end-to-end demonstration of the authentication seam —
+`resourcey.auth` (issue #118) — and of
+the framework's `DependencyBuilder` seam (issue #86), which applies the posture to
 every resource from one object.
 
 ## What this example demonstrates
 
 | Concern | Where | Notes |
 | ------- | ----- | ----- |
-| API-key auth | `resourcey.v2.auth.auth_api_key.ApiKeyAuthenticator` | Reads accepted keys from config; no users, no DB, no sessions. |
+| API-key auth | `resourcey.auth.auth_api_key.ApiKeyAuthenticator` | Reads accepted keys from config; no users, no DB, no sessions. |
 | One-object posture | `api_key_auth/app.py` | An `AuthorizedDependencyBuilder` wraps the authenticator and is passed to `create_app(..., dependency_builder=...)`, so it secures every resource. |
 | Key rotation | `APP_API_KEYS_*` | A list: add the new key alongside the old, deploy, then remove the old. |
 | Fail-closed | builder default | An empty key list denies every request with `401`. |
-| Digest at rest | `v2/auth` | The key is hashed on load; the served entry holds only the SHA-256 digest. |
+| Digest at rest | `resourcey.auth` | The key is hashed on load; the served entry holds only the SHA-256 digest. |
 
 ## Resources
 
@@ -33,7 +33,7 @@ authentication; the key check is composed in by the `DependencyBuilder`.
 | API keys | `id`, `name` | Built from `APP_API_KEYS_*` and registered read-only; the key digest is never served. |
 
 The two message-board resources are **SQLAlchemy ORM models** in
-`api_key_auth/models.py` (v2 is model-first); the resources are thin
+`api_key_auth/models.py` (the framework is model-first); the resources are thin
 `SqlResource` subclasses over them. The key resource is a `ListResource` built
 from config, with a `ResourceView` hiding the digest — see
 [How it works](#how-it-works).
@@ -75,7 +75,7 @@ uv sync
 # 2. Apply the migration (creates api_key_auth.db).
 uv run --env-file .env alembic upgrade head
 
-# 3. Start the server. v2 does no .env loading, so pass the file explicitly.
+# 3. Start the server. The framework does no .env loading, so pass the file explicitly.
 uv run uvicorn api_key_auth.app:app --env-file .env --reload --port 8083
 ```
 
@@ -179,7 +179,7 @@ general-purpose dependency:
 
 ```python
 from fastapi import APIRouter, Depends
-from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
+from resourcey.auth.auth_api_key import ApiKeyAuthenticator
 
 router = APIRouter(
     dependencies=[Depends(ApiKeyAuthenticator(key_resource=key_inner).api_key_dependency)]
@@ -225,9 +225,9 @@ against an isolated database created by applying the committed migration.
 - This posture grants the holder of a key access to **every** resource; it
   models no principal and no per-action authorization. Per-user permissions
   (stored users/groups/roles and a per-request policy resolver) live in
-  `resourcey.v2.auth` and plug into the same `DependencyBuilder` seam shown here.
+  `resourcey.auth` and plug into the same `DependencyBuilder` seam shown here.
 - The DB-backed key source (`stored_api_key_resource` / `stored_api_key_view` in
-  `resourcey.v2.auth.auth_api_key_resource`) mints and revokes keys through the
+  `resourcey.auth.auth_api_key_resource`) mints and revokes keys through the
   REST surface (`POST /api-keys`, …); this example uses the config-list source
   because it keeps the keys entirely in the environment.
 - The key resource is exposed read-only at `GET /api-keys` (ids and names only —

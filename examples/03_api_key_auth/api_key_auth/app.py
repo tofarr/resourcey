@@ -4,16 +4,16 @@ Builds on example 01's message board (``Thread`` + ``Message``) and secures the
 whole REST API with environment-configured API keys — no users, no sessions, no
 auth tables, and no ``/auth/*`` routes.
 
-The ``v2`` app is assembled from the same three pieces as examples 01 / 02: a
-:class:`~resourcey.v2.sql.session_manager.SqlSessionManager` (the engines, built
+The app is assembled from the same three pieces as examples 01 / 02: a
+:class:`~resourcey.sql.session_manager.SqlSessionManager` (the engines, built
 from ``APP_SQL_CONNECTIONS_*``), a
-:class:`~resourcey.v2.core.manifest.Manifest` (the resource set and its
-lifecycle), and the :func:`~resourcey.v2.http.app.create_app` free function.
+:class:`~resourcey.core.manifest.Manifest` (the resource set and its
+lifecycle), and the :func:`~resourcey.http.app.create_app` free function.
 The security posture is the fourth piece: ``create_app``'s
 ``dependency_builder=`` argument, handed an
-:class:`~resourcey.v2.auth.auth_authorized_dependency.AuthorizedDependencyBuilder`
+:class:`~resourcey.auth.auth_authorized_dependency.AuthorizedDependencyBuilder`
 that authenticates with an
-:class:`~resourcey.v2.auth.auth_api_key.ApiKeyAuthenticator` and then grants the
+:class:`~resourcey.auth.auth_api_key.ApiKeyAuthenticator` and then grants the
 authenticated principal full access (the default ``AllowAllResolver``). The key
 check is composed in front of every resource's service dependency.
 
@@ -21,13 +21,13 @@ Run with::
 
     uvicorn api_key_auth.app:app --env-file .env
 
-Note the ``--env-file``: ``v2`` does no ``.env`` loading of its own, so the
+Note the ``--env-file``: the framework does no ``.env`` loading of its own, so the
 process environment must be populated by the caller (uvicorn, or a shell).
 
 Key source. The accepted keys come from the environment
 (``APP_API_KEYS_0_ID`` / ``_KEY``, ``APP_API_KEYS_1_*``, …, or the JSON-array
-form) via :class:`~resourcey.v2.auth.auth_config.ApiKeysConfig`, exposed as a
-read-only :class:`~resourcey.v2.list.list_resource.ListResource` built from that
+form) via :class:`~resourcey.auth.auth_config.ApiKeysConfig`, exposed as a
+read-only :class:`~resourcey.list.list_resource.ListResource` built from that
 config. The keys are hashed on load and never stored in a table, so the schema
 is just ``threads`` and ``messages`` and there is nothing to migrate for auth.
 
@@ -38,7 +38,7 @@ from every response and from the query surface).
 :func:`build_app` is the only assembly path and always wires the API-key builder
 via ``create_app(..., dependency_builder=builder)``, so every app it returns is
 authenticated. The framework's no-auth default is named
-:class:`~resourcey.v2.http.dependency_builder.OpenDependencyBuilder` precisely so
+:class:`~resourcey.http.dependency_builder.OpenDependencyBuilder` precisely so
 that dropping that argument reads as an explicit choice to serve an open API
 rather than a quiet fallback.
 """
@@ -51,16 +51,16 @@ from fastapi import FastAPI
 
 from api_key_auth.message import MessageResource
 from api_key_auth.models import Message, Thread
-from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
-from resourcey.v2.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
-from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
-from resourcey.v2.auth.auth_config import ApiKeysConfig
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.resource import Resource
-from resourcey.v2.http.app import create_app
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
-from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.auth.auth_api_key import ApiKeyAuthenticator
+from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
+from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
+from resourcey.auth.auth_config import ApiKeysConfig
+from resourcey.core.manifest import Manifest
+from resourcey.core.resource import Resource
+from resourcey.http.app import create_app
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
+from resourcey.sql.sql_resource import SqlResource
 
 # One manager for the whole app; it is entered by the manifest's lifecycle.
 default_session_manager = SqlSessionManager(SqlConfig.get_instance())

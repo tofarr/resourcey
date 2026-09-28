@@ -1,5 +1,5 @@
 // api_key.qnt — formal spec for the stored API-key resource (issue #63),
-// rewritten for the v2 port (issue #118): the key is a SecretStr stored only
+// rewritten for the port (issue #118): the key is a SecretStr stored only
 // as a digest, and the one-time reveal is the serialization context.
 //
 // An API key is a row. Its raw value is minted by the framework, its SHA-256

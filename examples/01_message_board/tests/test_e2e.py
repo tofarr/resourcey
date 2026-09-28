@@ -1,4 +1,4 @@
-"""End-to-end REST API tests for the v2 message-board example (SQLite).
+"""End-to-end REST API tests for the message-board example (SQLite).
 
 Each test runs against an **isolated SQLite database file** in a per-test tmp
 directory. The schema is created by applying the committed Alembic migration —
@@ -7,7 +7,7 @@ verified, not bypassed with ``create_all``.
 
 The app is assembled through the real config path: the isolated URL is set as
 ``APP_SQL_CONNECTIONS_0_URL`` and a fresh
-:class:`~resourcey.v2.sql.session_manager.SqlSessionManager` is built from
+:class:`~resourcey.sql.session_manager.SqlSessionManager` is built from
 ``SqlConfig.get_instance()``, then handed to :func:`message_board.app.build_app`.
 Requests run through httpx's ASGI transport — the full request → router →
 service → SQLAlchemy stack.
@@ -24,8 +24,8 @@ from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
 
 from message_board.app import build_app
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
 
 
 def _migrations_dir() -> Path:
@@ -48,7 +48,7 @@ def _apply_migration(async_url: str) -> None:
 
 @pytest_asyncio.fixture
 async def client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]:
-    """A fully wired v2 REST client backed by an isolated, migrated SQLite file."""
+    """A fully wired REST client backed by an isolated, migrated SQLite file."""
     db_path = tmp_path / "e2e.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")

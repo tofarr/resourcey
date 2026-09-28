@@ -41,10 +41,10 @@ from full_rbac.seed import (
     VIEWERS,
     seed,
 )
-from resourcey.v2.auth.auth_api_key import API_KEY_HEADER_NAME
-from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.auth.auth_policy import DenyAll
-from resourcey.v2.auth.auth_rbac import (
+from resourcey.auth.auth_api_key import API_KEY_HEADER_NAME
+from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.auth.auth_policy import DenyAll
+from resourcey.auth.auth_rbac import (
     GroupRole,
     GroupUser,
     Role,
@@ -52,8 +52,8 @@ from resourcey.v2.auth.auth_rbac import (
     User,
     policy_to_json,
 )
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
 
 ADMIN_KEY = "admin-key"
 VIEWER_KEY = "viewer-key"
@@ -100,7 +100,7 @@ class Env:
 
 @pytest_asyncio.fixture
 async def env(tmp_path: Path, monkeypatch) -> AsyncIterator[Env]:
-    """A fully wired, store-resolved v2 app backed by a migrated SQLite file."""
+    """A fully wired, store-resolved app backed by a migrated SQLite file."""
     db_path = tmp_path / "e2e.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")
