@@ -48,7 +48,7 @@ from resourcey.v2.filestore.file_config import FileStoreConfig
 from resourcey.v2.filestore.file_metadata import READY
 from resourcey.v2.filestore.file_store import GET_OPERATION, PUT_OPERATION, FileStore
 from resourcey.v2.filestore.signed_url import DEFAULT_SIGNED_URL_PATH, SignedFileStore
-from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
+from resourcey.v2.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
 from resourcey.v2.http.routes import _dump, _project
 
 
@@ -68,13 +68,13 @@ def register_file_routes(
         store: The medium the bytes move against.
         resource: The file-metadata resource the handshake authorizes through.
         dependency_builder: The seam the minting routes authorize through
-            (default :class:`~resourcey.v2.http.dependency_builder.DefaultDependencyBuilder`).
+            (default :class:`~resourcey.v2.http.dependency_builder.OpenDependencyBuilder`).
         config: TTLs / size cap (default ``FileStoreConfig.get_instance()``).
         prefix: An optional mount prefix.
     """
     exposed = resource.get_exposed_resource() or resource
     resolved_config = config if config is not None else FileStoreConfig.get_instance()
-    builder = dependency_builder if dependency_builder is not None else DefaultDependencyBuilder()
+    builder = dependency_builder if dependency_builder is not None else OpenDependencyBuilder()
     service_dep = _service_dependency(exposed, builder)
     dto_type = exposed.get_dto_type()
     read_model = exposed.get_rest_models().read_response

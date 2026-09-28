@@ -47,7 +47,6 @@ from resourcey.v2.auth.auth_policy import AllowAll, Owner, ReadOnly
 from resourcey.v2.auth.auth_rbac import rbac_resource_paths, rbac_resources
 from resourcey.v2.auth.auth_rbac_resolver import RbacPolicyResolver
 from resourcey.v2.auth.auth_rbac_store import SqlRbacStore
-from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.http.app import create_app
@@ -85,23 +84,6 @@ ROLE_PERMISSIONS: dict[tuple[str, str], Any] = {
 }
 
 
-def _verify_posture(builder: Any) -> None:
-    """Fail loudly unless the API-key posture is actually in effect.
-
-    ``create_app`` falls back to the no-auth ``DefaultDependencyBuilder`` when no
-    builder is supplied, so a misconfiguration would otherwise serve an open API.
-    """
-    if not isinstance(builder, AuthorizedDependencyBuilder) or not isinstance(
-        builder.authenticator, ApiKeyAuthenticator
-    ):
-        raise ResourceyConfigError(
-            "Example 05 requires the API-key posture: pass an "
-            "AuthorizedDependencyBuilder authenticating with an "
-            "ApiKeyAuthenticator to create_app "
-            f"(resolved {type(builder).__name__} instead)."
-        )
-
-
 def build_auth(
     session_source: Any,
     keys: ApiKeysConfig | None = None,
@@ -134,7 +116,6 @@ def build_auth(
         authenticator=ApiKeyAuthenticator(key_resource=key_inner),
         policy_resolver=resolver,
     )
-    _verify_posture(builder)
     return builder, config_api_key_view(key_inner)
 
 

@@ -49,8 +49,10 @@ until the first release.
   config-list key resource (`ApiKeysConfig` → `config_api_key_resource` /
   `config_api_key_view`) built from `APP_API_KEYS_*` — no auth table, no
   `DEPENDENCY_BUILDER_CLASS`
-  (the builder is constructed explicitly in `app.py`), and a `build_app` posture
-  guard. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
+  (the builder is constructed explicitly in `app.py`). The no-auth transport
+  default is named `OpenDependencyBuilder`, so `build_app` always passing the
+  API-key builder reads as the deliberate choice it is rather than a hidden
+  fallback. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
   same message board, but with a per-app `Role` vocabulary carried on each API
   key (`APP_API_KEYS_<n>_ROLES_<m>`) and a single `RolePolicyResolver` mapping
   role -> policy (global + per-resource): `ADMIN` full access, `MODERATOR`
@@ -628,8 +630,10 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   ordinary FastAPI dependency whose author may declare any parameter FastAPI
   can wire (the `Request`, other `Depends(...)`, i.e. an auth dependency) — the
   same composition the `v1` builder used, so the seam covers authentication as
-  well as authorization. `DefaultDependencyBuilder` is the default: it builds
-  the resource's own service over the request-scoped `ctx` and yields it. The
+  well as authorization. `OpenDependencyBuilder` is the default: it applies
+  **no** authentication or authorization, building the resource's own service
+  over the request-scoped `ctx` and yielding it — so its name flags an
+  intentionally public app rather than masking a forgotten builder. The
   public `request_ctx(request)` helper owns the call-scoped mapping (the
   request-state key is `resourcey_ctx`), shared by every resource in one
   request. The builder lives here, not on the `Manifest`, because it is

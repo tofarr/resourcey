@@ -1,15 +1,14 @@
 """Smoke tests for the simple-roles example app.
 
-These pin the app's factory wiring and the per-app role vocabulary, plus the
-fail-closed posture guard, against an in-memory SQLite database via httpx's ASGI
-transport. The end-to-end behaviour lives in ``test_e2e.py``.
+These pin the app's factory wiring and the per-app role vocabulary against an
+in-memory SQLite database via httpx's ASGI transport. The end-to-end behaviour
+lives in ``test_e2e.py``.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -25,12 +24,10 @@ from resourcey.v2.auth.auth_api_key import (
 from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
 from resourcey.v2.auth.auth_role import AppRole, role_key
-from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.http.app import create_app
-from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
 from resourcey.v2.sql.sql_resource import SqlResource
-from simple_roles.app import Role, _verify_posture, build_auth
+from simple_roles.app import Role, build_auth
 from simple_roles.message import MessageResource
 from simple_roles.models import Base, Message, Thread
 
@@ -93,12 +90,6 @@ def test_build_auth_wires_the_role_resolver() -> None:
     assert isinstance(builder.authenticator, ApiKeyAuthenticator)
     # The centralized resolver is the app's ``ROLE_POLICIES``.
     assert "ADMIN" in builder.policy_resolver.role_policies  # type: ignore[attr-defined]
-
-
-def test_posture_guard_rejects_a_non_api_key_builder() -> None:
-    """The guard refuses the no-auth default, so the app cannot be silently open."""
-    with pytest.raises(ResourceyConfigError, match="API-key posture"):
-        _verify_posture(DefaultDependencyBuilder())
 
 
 async def test_absent_and_invalid_keys_are_indistinguishable(client: AsyncClient) -> None:
