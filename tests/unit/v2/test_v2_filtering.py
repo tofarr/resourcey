@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 import pytest_asyncio
@@ -33,6 +33,7 @@ from resourcey.v2.http.app import create_app
 from resourcey.v2.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.util.search_filter import (
+    MAX_IN_VALUES,
     AllFilter,
     AndFilter,
     AttrFilter,
@@ -41,6 +42,7 @@ from resourcey.v2.util.search_filter import (
     EqFilter,
     GeFilter,
     GtFilter,
+    InFilter,
     LeFilter,
     LtFilter,
     NoMatchFilter,
@@ -89,6 +91,23 @@ class TestCoreFilterMatches:
         assert ContainsFilter(value="x").matches(["a", "x"])
         assert not ContainsFilter(value="x").matches(None)
         assert not ContainsFilter(value="x").matches(5)
+
+    def test_in_is_set_membership(self) -> None:
+        assert InFilter(values=(1, 3)).matches(1)
+        assert InFilter(values=(1, 3)).matches(3)
+        assert not InFilter(values=(1, 3)).matches(2)
+        # A list coerces to a tuple (the frozen tree needs a hashable child).
+        assert InFilter(values=[1, 3]).values == (1, 3)
+        assert hash(InFilter(values=(1, 3))) == hash(InFilter(values=(1, 3)))
+        # An empty set matches nothing -- fail-closed, never "no restriction".
+        assert not InFilter(values=()).matches(1)
+
+    def test_in_cap_is_enforced(self) -> None:
+        from resourcey.v2.util.search_filter import MAX_IN_VALUES
+
+        assert InFilter(values=tuple(range(MAX_IN_VALUES)))  # at the cap: fine
+        with pytest.raises(ValidationError, match="at most"):
+            InFilter(values=tuple(range(MAX_IN_VALUES + 1)))
 
     def test_attr_reads_objects_and_mappings(self) -> None:
         assert attr("score", GtFilter(value=3)).matches(Row(score=4))
@@ -144,12 +163,30 @@ class TestCoreFilterMatches:
         assert restored == flt
         assert restored.matches(Row(score=6, name="BOB"))
 
+    def test_build_filter_in_splits_a_comma_string(self) -> None:
+        flt = build_filter([("score", "in", "1, 3")])
+        assert flt == attr("score", InFilter(values=("1", "3")))
+        assert flt.matches(Row(score="3"))
+        assert not flt.matches(Row(score="2"))
+
     def test_operators_for_annotation(self) -> None:
-        assert operators_for_annotation(int) == frozenset({"eq", "gt", "ge", "lt", "le"})
+        assert operators_for_annotation(int) == frozenset({"eq", "in", "gt", "ge", "lt", "le"})
         assert "contains" in operators_for_annotation(str)
         assert "contains" in operators_for_annotation(str | None)
-        assert operators_for_annotation(bool) == frozenset({"eq"})
-        assert operators_for_annotation(Row) == frozenset({"eq"})
+        assert operators_for_annotation(bool) == frozenset({"eq", "in"})
+        assert operators_for_annotation(Row) == frozenset({"eq", "in"})
+
+    def test_non_scalar_annotations_get_no_operators(self) -> None:
+        # A JSON ``dict`` / list column is not scalarly comparable, so it must
+        # expose no query surface -- in particular a ``list[str]`` must not be
+        # mistaken for a ``str`` (which would offer ``contains`` / ordering).
+        assert operators_for_annotation(list[str]) == frozenset()
+        assert operators_for_annotation(list[int]) == frozenset()
+        assert operators_for_annotation(dict[str, int]) == frozenset()
+        assert operators_for_annotation(dict) == frozenset()
+        assert operators_for_annotation(list[str] | None) == frozenset()
+        # The scalar wrappers are still unwrapped.
+        assert operators_for_annotation(Annotated[int, "x"]) == operators_for_annotation(int)
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +308,23 @@ class TestSqlConversion:
         _maker, resource = sql_env
         assert await _ids(resource, attr("name", ContainsFilter(value="ALI"))) == [1]
 
+    async def test_in_positive_and_negated(self, sql_env) -> None:
+        """`In`: positive `col IN (...)`, negated NULL-safe `col IS NULL OR NOT IN`."""
+        _maker, resource = sql_env
+        assert await _ids(resource, attr("id", InFilter(values=(1, 3)))) == [1, 3]
+        # The complement includes the NULL row (3), as the in-memory complement does.
+        assert await _ids(resource, not_(attr("id", InFilter(values=(1, 3))))) == [2]
+        assert await _ids(resource, attr("score", InFilter(values=(5,)))) == [1]
+        # The NULL score row (3) belongs to the negated branch.
+        assert await _ids(resource, not_(attr("score", InFilter(values=(5,))))) == [2, 3]
+
+    async def test_empty_in_matches_nothing_fail_closed(self, sql_env) -> None:
+        """An empty set is a deny, never "no restriction" (fail-closed)."""
+        _maker, resource = sql_env
+        assert await _ids(resource, attr("id", InFilter(values=()))) == []
+        # Its complement matches everything, including the NULL row.
+        assert await _ids(resource, not_(attr("id", InFilter(values=())))) == [1, 2, 3]
+
     async def test_and_or(self, sql_env) -> None:
         _maker, resource = sql_env
         both = and_(attr("score", GtFilter(value=4)), attr("name", ContainsFilter(value="a")))
@@ -386,6 +440,7 @@ class TestSqlConversion:
             LtFilter,
             LeFilter,
             ContainsFilter,
+            InFilter,
         ):
             assert node_type in fc._OPERATOR_REGISTRY
         assert fc.is_operator(EqFilter(value=1))
@@ -457,6 +512,16 @@ class TestFilterSurface:
         resp = await client.get("/widgets", params={"id__gt": 1})
         assert [i["title"] for i in resp.json()["items"]] == ["beta", "gamma"]
 
+    async def test_http_in_filter_coerces_typed_values(self, api_client) -> None:
+        """`id__in` is a comma string on the wire, coerced to the column's type."""
+        client, _ = api_client
+        resp = await client.get("/widgets", params={"id__in": "1,3"})
+        assert resp.status_code == 200
+        assert [i["title"] for i in resp.json()["items"]] == ["alpha", "gamma"]
+        # An empty `in` matches nothing (fail-closed).
+        empty = await client.get("/widgets", params={"id__in": ""})
+        assert empty.json()["items"] == []
+
     async def test_http_count_filters(self, api_client) -> None:
         client, _ = api_client
         resp = await client.get("/widgets/count", params={"title__contains": "a"})
@@ -484,6 +549,22 @@ class TestFilterSurface:
         client, _ = api_client
         resp = await client.get("/widgets", params={"id__gt": "not-an-int"})
         assert resp.status_code == 422
+
+    async def test_bad_in_item_is_400(self, api_client) -> None:
+        """A malformed `in` item is bad input, not a 500."""
+        client, _ = api_client
+        resp = await client.get("/widgets", params={"id__in": "1,not-an-int"})
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_input"
+
+    async def test_over_cap_in_is_400(self, api_client) -> None:
+        """An `in` set past MAX_IN_VALUES is bad input, not a 500."""
+        client, _ = api_client
+        resp = await client.get(
+            "/widgets", params={"id__in": ",".join(str(i) for i in range(MAX_IN_VALUES + 1))}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "invalid_input"
 
     async def test_filters_appear_in_openapi(self, api_client) -> None:
         client, _ = api_client

@@ -59,6 +59,7 @@ from resourcey.v2.util.search_filter import (
     ContainsFilter,
     EqFilter,
     GtFilter,
+    InFilter,
     NoMatchFilter,
     OrFilter,
     SearchFilter,
@@ -720,6 +721,22 @@ class TestFiltering:
         async with await widgets.get_service() as service:
             found = await service.search(search_filter=build_filter([("label", "contains", "a.b")]))
         assert [w.label for w in found.items] == ["a.b"]
+
+    async def test_in_positive_and_negated(self, widgets) -> None:
+        """`$in` narrows to the set; its negated form matches the complement."""
+        await _seed(widgets, label="alpha", size=1)
+        await _seed(widgets, label="beta", size=2)
+        await _seed(widgets, label="gamma", size=3)
+        async with await widgets.get_service() as service:
+            inside = await service.search(search_filter=attr("size", InFilter(values=(1, 3))))
+            assert sorted(w.size for w in inside.items) == [1, 3]
+            outside = await service.search(
+                search_filter=not_(attr("size", InFilter(values=(1, 3))))
+            )
+            assert sorted(w.size for w in outside.items) == [2]
+            # An empty set matches nothing (fail-closed).
+            empty = await service.search(search_filter=attr("size", InFilter(values=())))
+            assert empty.items == []
 
     async def test_and_or_not_compose(self, widgets) -> None:
         await _seed(widgets, label="alpha", size=1)

@@ -51,7 +51,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 
-from sqlalchemy import Column, ColumnElement, and_, false, not_, or_
+from sqlalchemy import Column, ColumnElement, and_, false, not_, or_, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from resourcey.v2.core.errors import UnsupportedFilterError
@@ -63,6 +63,7 @@ from resourcey.v2.util.search_filter import (
     EqFilter,
     GeFilter,
     GtFilter,
+    InFilter,
     LeFilter,
     LtFilter,
     NoMatchFilter,
@@ -163,6 +164,30 @@ def _contains_negated(
 ) -> ColumnElement[bool]:
     # A NULL column does not contain the needle, so it belongs in the negation.
     return or_(column.is_(None), not_(column.ilike(_contains_pattern(value), escape="\\")))
+
+
+def _in_positive(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+    # An empty set matches nothing (fail-closed): return an explicit false rather
+    # than compile ``col IN ()`` (which SQLAlchemy warns about).
+    values = _naive_values(value)
+    if not values:
+        return false()
+    return cast("ColumnElement[bool]", column.in_(values))
+
+
+def _in_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+    # NULL-safe complement: a NULL column is not in the set, so it belongs in the
+    # negated branch (naive ``NOT IN`` would drop it as Unknown). The complement of
+    # an empty (matches-nothing) set is "matches everything".
+    values = _naive_values(value)
+    if not values:
+        return true()
+    return or_(column.is_(None), column.not_in(values))
+
+
+def _naive_values(value: Any) -> list[Any]:
+    """Normalise an ``InFilter``'s values for binding (aware datetimes -> UTC)."""
+    return [_naive(item) for item in value]
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +320,7 @@ register_operator(GeFilter, _ge_positive, _ge_negated)
 register_operator(LtFilter, _lt_positive, _lt_negated)
 register_operator(LeFilter, _le_positive, _le_negated)
 register_operator(ContainsFilter, _contains_positive, _contains_negated)
+register_operator(InFilter, _in_positive, _in_negated)
 
 
 def _assert_registries_are_complete() -> None:
@@ -304,7 +330,15 @@ def _assert_registries_are_complete() -> None:
     leaf added without a handler is caught here rather than at request time.
     """
     standard_logical = {AllFilter, NoMatchFilter, AndFilter, OrFilter, NotFilter}
-    standard_operators = {EqFilter, GtFilter, GeFilter, LtFilter, LeFilter, ContainsFilter}
+    standard_operators = {
+        EqFilter,
+        GtFilter,
+        GeFilter,
+        LtFilter,
+        LeFilter,
+        ContainsFilter,
+        InFilter,
+    }
     missing_logical = standard_logical - set(_LOGICAL_REGISTRY)
     missing_operators = standard_operators - set(_OPERATOR_REGISTRY)
     if missing_logical or missing_operators:

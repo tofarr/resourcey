@@ -19,13 +19,18 @@
 //   on every row (NULL included), the "convertible => SQL agrees with matches"
 //   property the all-or-nothing pushdown policy rests on.
 //
+//   Law 5 (set leaf, #136): the `In` leaf of a set of values agrees with `Eq`
+//   for a one-value set and with the `Or` of its `Eq`s for a multi-value set;
+//   its NULL-safe negated form agrees with the in-memory complement; an empty
+//   set matches nothing (fail-closed), unlike v1's "no restriction".
+//
 // Quint rejects recursive type declarations (QNT099), so a genuine recursive
 // filter tree cannot be written; the tree is unrolled into a flat clause list,
 // matching how resource_actions.qnt already models filters.
 module filtering {
   type Entity = int
 
-  type Clause = Eq(int) | Gt(int)
+  type Clause = Eq(int) | Gt(int) | In(Set[int])
 
   type Filter =
     | All
@@ -38,6 +43,7 @@ module filtering {
     match c {
       | Eq(v) => value == v
       | Gt(v) => value > v
+      | In(vs) => vs.contains(value)
     }
 
   pure def matches(value: Entity, f: Filter): bool =
@@ -151,6 +157,58 @@ module filtering {
   pure def nullSafeNegationAgreesGt(v: int): bool =
     rows.foldl(true, (acc, row) => acc and ((sqlNullSafeNotGt(row, v) == T) == memNegGt(row, v)))
 
+  // ---- Law 5: the set-valued leaf (#136) --------------------------------
+  // An `In` leaf is the set analogue of `Eq`: a one-value set is `Eq`, and a
+  // multi-value set is the Or of its `Eq`s. Its pushed-down SQL is
+  // `col IN (...)` positive / `col IS NULL OR col NOT IN (...)` negated, and an
+  // empty set matches nothing (fail-closed, NOT v1's "no restriction").
+
+  pure def memIn(row: Row, vs: Set[int]): bool =
+    match row {
+      | Val(r) => vs.contains(r)
+      | Null => false
+    }
+
+  pure def sqlIn(row: Row, vs: Set[int]): Tri =
+    match row {
+      | Val(r) => if (vs.contains(r)) T else F
+      | Null => Unknown
+    }
+
+  // SQL `c IS NULL OR c NOT IN (vs)` — the NULL-safe complement.
+  pure def sqlNullSafeNotIn(row: Row, vs: Set[int]): Tri =
+    match row {
+      | Val(r) => if (vs.contains(r)) F else T
+      | Null => T
+    }
+
+  pure def memNegIn(row: Row, vs: Set[int]): bool =
+    match row {
+      | Val(r) => not(vs.contains(r))
+      | Null => true
+    }
+
+  // A one-value `In` agrees with `Eq` on every row.
+  pure def singleInAgreesWithEq(v: int): bool =
+    rows.foldl(true, (acc, row) => acc and ((sqlIn(row, Set(v)) == T) == (sqlEq(row, v) == T)))
+
+  // A multi-value `In` agrees with the Or of its `Eq`s on every row.
+  pure def multiInAgreesWithOrE(vs: Set[int]): bool =
+    rows.foldl(
+      true,
+      (acc, row) => acc and ((sqlIn(row, vs) == T) == vs.exists(v => sqlEq(row, v) == T))
+    )
+
+  // The NULL-safe negated `In` agrees with the in-memory complement on every row
+  // (including NULL), the #136 negation law.
+  pure def nullSafeNegationAgreesIn(vs: Set[int]): bool =
+    rows.foldl(true, (acc, row) => acc and ((sqlNullSafeNotIn(row, vs) == T) == memNegIn(row, vs)))
+
+  // An empty set matches nothing — fail-closed, never "no restriction".
+  pure def emptyInMatchesNothing: bool =
+    rows.foldl(true, (acc, row) => acc and not(memIn(row, Set())))
+
+
   // ---- Law 4: positive pushdown is sound (all-or-nothing) ---------------
   // "Convertible => the SQL condition agrees with matches()". If the positive
   // condition were unsound, `_apply_filters` would either drop matching rows or
@@ -206,4 +264,18 @@ module filtering {
   // SQL agrees with matches()" property the all-or-nothing policy relies on.
   run law4_positivePushdownIsSound =
     positivePushdownIsSound(1) and positivePushdownIsSound(2)
+
+  // Law 5: the set-valued `In` leaf (#136) — one value is `Eq`, many agree with
+  // the Or of their `Eq`s, the NULL-safe negation agrees on every row (NULL
+  // included), and an empty set matches nothing.
+  run law5_inFilterAgreesWithEqAndOr =
+    all {
+      assert(singleInAgreesWithEq(1)),
+      assert(singleInAgreesWithEq(2)),
+      assert(multiInAgreesWithOrE(Set(1, 2))),
+      assert(multiInAgreesWithOrE(Set())),
+      assert(nullSafeNegationAgreesIn(Set(1, 2))),
+      assert(nullSafeNegationAgreesIn(Set())),
+      assert(emptyInMatchesNothing),
+    }
 }
