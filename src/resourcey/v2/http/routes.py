@@ -66,7 +66,7 @@ from resourcey.v2.core.service import (
     Update,
     normalize_actions,
 )
-from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
+from resourcey.v2.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
 from resourcey.v2.util.missing import MISSING
 from resourcey.v2.util.naming import humanize, pluralize
 from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
@@ -95,7 +95,7 @@ def register_routes(
 
     ``dependency_builder`` decides how the per-request service dependency is
     built (issue #86); it defaults to
-    :class:`~resourcey.v2.http.dependency_builder.DefaultDependencyBuilder`. It
+    :class:`~resourcey.v2.http.dependency_builder.OpenDependencyBuilder`. It
     is resolved on ``exposed``, so a projection's wrapped service is the
     projection's.
 
@@ -116,7 +116,7 @@ def register_routes(
         # Hidden resource: no routes. The (empty) router's tag is irrelevant.
         return APIRouter(tags=list(tags) if tags else [type(resource).__name__])
 
-    builder = dependency_builder if dependency_builder is not None else DefaultDependencyBuilder()
+    builder = dependency_builder if dependency_builder is not None else OpenDependencyBuilder()
     resource_name = _resource_display_name(exposed)
     router = APIRouter(
         tags=list(tags) if tags else [_default_tag(exposed)],

@@ -51,7 +51,7 @@ class LazyField:
     from the environment — it is expected to already be fully built::
 
         dependency_builder: ClassVar[DependencyBuilder] = LazyField(
-            default=DefaultDependencyBuilder
+            default=OpenDependencyBuilder
         )
 
     A *set-but-empty* ``{NAME}_CLASS`` raises rather than falling back to the

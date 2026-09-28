@@ -30,8 +30,8 @@ from resourcey.v2.core.resource import Resource
 from resourcey.v2.core.service import Action, NotFoundError, ServiceError, Update
 from resourcey.v2.http.app import add_to_app, create_app
 from resourcey.v2.http.dependency_builder import (
-    DefaultDependencyBuilder,
     DependencyBuilder,
+    OpenDependencyBuilder,
     request_ctx,
 )
 from resourcey.v2.http.routes import register_error_handlers, register_routes
@@ -816,7 +816,7 @@ class RecordingBuilder(DependencyBuilder):
 
     def get_service_dependency(self, resource: Resource[Any, Any]) -> Any:
         self.seen.append(resource)
-        inner_dependency = DefaultDependencyBuilder().get_service_dependency(resource)
+        inner_dependency = OpenDependencyBuilder().get_service_dependency(resource)
 
         async def dependency(request: Request) -> Any:
             async for service in inner_dependency(request):
@@ -867,7 +867,7 @@ async def test_builder_dependency_may_declare_arbitrary_fastapi_parameters():
 
     class AuthComposingBuilder(DependencyBuilder):
         def get_service_dependency(self, resource: Resource[Any, Any]) -> Any:
-            inner = DefaultDependencyBuilder().get_service_dependency(resource)
+            inner = OpenDependencyBuilder().get_service_dependency(resource)
 
             async def dependency(request: Request, principal: str = Depends(auth)) -> Any:
                 assert principal == "principal"

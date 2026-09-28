@@ -2,7 +2,7 @@
 
 :class:`AuthorizedDependencyBuilder` is a
 :class:`~resourcey.v2.http.dependency_builder.DependencyBuilder` (a
-``DiscriminatedUnionMixin``, like :class:`~resourcey.v2.http.dependency_builder.DefaultDependencyBuilder`).
+``DiscriminatedUnionMixin``, like :class:`~resourcey.v2.http.dependency_builder.OpenDependencyBuilder`).
 Passing it to :func:`~resourcey.v2.http.app.create_app`'s /
 :func:`~resourcey.v2.http.app.add_to_app`'s ``dependency_builder=`` argument
 secures every resource at once: each resource's per-request service is wrapped
