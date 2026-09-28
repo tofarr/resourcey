@@ -42,6 +42,8 @@ specs:
 	quint test specs/cache_defaults.qnt --main=cache_defaults --match "^(readOnlyIsOptimistic|writeActionForcesValidator|writableWithUpdatedAtGetsLastModified|writableWithoutUpdatedAtGetsEtag|readOnlyDefaultHasPositiveWindow|readOnlyWindowIsPrivate|selectionIsTotal|invariantsHold)$$"
 	quint typecheck specs/rbac.qnt
 	quint test specs/rbac.qnt --main=rbac --match "^(allowAllMatchesEveryRow|denyAllMatchesNothing|readOnlyMatchesReadLike|creatorScopesToOwnedRows|groupMemberMatchesOwnGroups|aclMatchesItsIds|resolutionWalksGroupsToRolesToPermissions|resourceScopingFiltersOtherResources|scopedQueryIsComplete|unknownUserIsFailClosed|emptyPermissionSetIsFailClosed|multipleRolesUnionTheirGrants|denyDoesNotOverrideAGrant|aclsUnionToOneSet|setLeafMatchesTheJoin|thresholdBoundsMembershipChange|callerScopingIsDerivedFromPolicies|invariantsHold)$$"
+	quint typecheck specs/filestore.qnt
+	quint test specs/filestore.qnt --main=filestore --match "^(handshakeReachesReady|completeRequiresAnObject|completeVerifiesSize|completeIsIdempotentOnce|downloadRequiresReady|uploadRequiresARow|keysAreUnique|capabilityIsBound|deleteRemovesTheObject|invariantsHold)$$"
 
 clean:
 	rm -rf .mypy_cache .ruff_cache .pytest_cache .coverage htmlcov coverage.xml
