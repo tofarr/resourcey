@@ -18,15 +18,16 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, MutableMapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
 from fastapi import APIRouter, Depends, FastAPI
 from httpx import ASGITransport, AsyncClient
 from pydantic import BaseModel, SecretStr
-from sqlalchemy import select
+from sqlalchemy import Boolean, String, Uuid, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.v2.auth.auth_api_key import (
     API_KEY_CHALLENGE,
@@ -52,6 +53,7 @@ from resourcey.v2.core.dto import DTO
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.http.app import create_app
 from resourcey.v2.list.list_resource import ListResource
+from resourcey.v2.sql.sql_resource import SqlResource
 from resourcey.v2.util.secret_serialization import (
     dump_secret_str,
     load_secret_str,
@@ -456,6 +458,126 @@ async def test_owned_db_key_resolves_to_a_user_principal(db_app):
     assert principal.id == owner
     assert principal.kind is PrincipalKind.USER
     assert (await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})).status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The optional principal store (a key's principal validated against a user
+# resource)
+# ---------------------------------------------------------------------------
+
+
+class _UserBase(DeclarativeBase):
+    """A minimal principal table for the store-backed authenticator tests."""
+
+
+class _User(_UserBase):
+    """A stored principal: an id, an email, and an ``enabled`` flag."""
+
+    __tablename__ = "auth_users"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+async def _add_user(users: Any, user_id: UUID, *, enabled: bool = True) -> None:
+    """Insert a stored principal through the user resource's own service."""
+    dto = users.get_dto_type()
+    async with await users.get_service({}) as service:
+        await service.create(dto(id=user_id, email=f"{user_id}@example.com", enabled=enabled))
+
+
+@pytest_asyncio.fixture
+async def principal_store_app() -> AsyncIterator[tuple[AsyncClient, ApiKeyAuthenticator, Any, Any]]:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(ApiKeyBase.metadata.create_all)
+        await conn.run_sync(_UserBase.metadata.create_all)
+
+    keys = stored_api_key_resource(session_factory=maker)
+    users = SqlResource(_User, session_factory=maker)
+    widgets = ListResource([Widget(id=1, label="a")], path="widgets")
+    manifest = Manifest(resources=[stored_api_key_view(keys), widgets])
+    authenticator = ApiKeyAuthenticator(key_resource=keys, user_resource=users)
+    app = create_app(
+        manifest, dependency_builder=AuthorizedDependencyBuilder(authenticator=authenticator)
+    )
+
+    async with manifest:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client, authenticator, keys, users
+    await engine.dispose()
+
+
+async def test_key_with_an_unknown_principal_is_rejected(principal_store_app):
+    client, _authenticator, keys, _users = principal_store_app
+    raw = await _mint(keys, "ci")
+    await _set_row(keys, raw, user_id=uuid4())
+    response = await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})
+    assert response.status_code == 401
+
+
+async def test_disabled_principal_is_rejected(principal_store_app):
+    client, _authenticator, keys, users = principal_store_app
+    user_id = uuid4()
+    await _add_user(users, user_id, enabled=False)
+    raw = await _mint(keys, "ci")
+    await _set_row(keys, raw, user_id=user_id)
+    response = await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})
+    assert response.status_code == 401
+
+
+async def test_enabled_principal_authenticates(principal_store_app):
+    client, authenticator, keys, users = principal_store_app
+    user_id = uuid4()
+    await _add_user(users, user_id, enabled=True)
+    raw = await _mint(keys, "ci")
+    await _set_row(keys, raw, user_id=user_id)
+    response = await client.get("/widgets", headers={API_KEY_HEADER_NAME: raw})
+    assert response.status_code == 200
+    row = await authenticator.lookup_api_key(raw)
+    assert row is not None
+    principal = authenticator._principal_for(row)
+    assert principal.id == user_id
+    assert principal.kind is PrincipalKind.USER
+
+
+async def test_standalone_dependency_enforces_the_principal_store(principal_store_app):
+    """The reusable ``api_key_dependency`` applies the store check too.
+
+    A custom router secured by ``ApiKeyAuthenticator.api_key_dependency`` must not
+    accept a key whose principal is missing or disabled — the store is a property
+    of the authenticator, not of the builder path.
+    """
+    _client, authenticator, keys, users = principal_store_app
+    user_id = uuid4()
+    await _add_user(users, user_id, enabled=False)
+    raw = await _mint(keys, "ci")
+    await _set_row(keys, raw, user_id=user_id)
+
+    app = FastAPI()
+    router = APIRouter(dependencies=[Depends(authenticator.api_key_dependency)])
+
+    @router.get("/ping")
+    async def ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.include_router(router)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        disabled = await client.get("/ping", headers={API_KEY_HEADER_NAME: raw})
+        assert disabled.status_code == 401
+
+        # An enabled principal passes the same dependency.
+        live_id = uuid4()
+        await _add_user(users, live_id, enabled=True)
+        live_raw = await _mint(keys, "ci-live")
+        await _set_row(keys, live_raw, user_id=live_id)
+        assert (
+            await client.get("/ping", headers={API_KEY_HEADER_NAME: live_raw})
+        ).status_code == 200
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,8 @@ jobs:
         run: quint test specs/auth.qnt --main=auth --match "^(emptyStoreDeniesEverything|absentAndInvalidAreIndistinguishable|aValidKeyGrantsAccess|theCheckRunsBeforeTargetStorage|theKeyServiceOwnsItsOwnContext|invariantsHold)$"
       - name: Run secret-serialization spec tests
         run: quint test specs/secret_serialization.qnt --main=secret_serialization --match "^(defaultRedacts|exposeRevealsThePlaintext|encryptionTakesPrecedence|outputDependsOnlyOnTheContext|encryptionRoundTrips|invariantsHold)$"
+      - name: Run principal-store spec tests
+        run: quint test specs/principal_store.qnt --main=principal_store --match "^(unmatchedKeyIsInvalid|absentIsNotInvalidTest|enabledStoredPrincipalAuthenticates|disabledPrincipalIsRejected|missingPrincipalIsRejected|noStoreTrustsTheCredentialTest|invariantsHold)$"
       - name: Run filtering spec tests
         run: quint test specs/filtering.qnt --main=filtering --match "^(law1_normalisationPreserves|law2_nullSafeNegation|law3_nullSafeNegationGeneralises|law4_positivePushdownIsSound|law5_inFilterAgreesWithEqAndOr)$"
       - name: Run sorting spec tests

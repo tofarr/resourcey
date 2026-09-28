@@ -57,6 +57,7 @@ from resourcey.v2.auth.auth_principal import (
     PrincipalKind,
 )
 from resourcey.v2.auth.auth_role import roles_from_credential
+from resourcey.v2.core.service import NotFoundError
 
 API_KEY_HEADER_NAME = "X-API-Key"
 
@@ -93,10 +94,17 @@ class ApiKeyAuthenticator(Authenticator):
         principal_id: An optional fixed principal id for **config-list** keys
             (which have no owner). A DB-backed key row's owner (``user_id``)
             always wins when present.
+        user_resource: An optional **principal store** the key's principal is
+            validated against. When supplied, a key that resolves to a principal
+            which is not a live, enabled user is rejected (invalid), so a stored
+            principal's ``enabled`` flag is authoritative over the credential.
+            ``None`` (the default) trusts the credential's principal id, keeping
+            the credential-only posture of examples 01-03.
     """
 
     key_resource: Any = None
     principal_id: UUID | None = None
+    user_resource: Any = None
 
     async def authenticate(self, request: Any) -> AuthResult:
         """Resolve the request's API key (from either header) to an :class:`AuthResult`."""
@@ -110,7 +118,10 @@ class ApiKeyAuthenticator(Authenticator):
         row = await self.lookup_api_key(presented)
         if row is None:
             return AuthResult.invalid()
-        return AuthResult.authenticated(self._principal_for(row))
+        principal = self._principal_for(row)
+        if not await self._principal_is_active(principal):
+            return AuthResult.invalid()
+        return AuthResult.authenticated(principal)
 
     def dependency(self) -> Callable[..., Any]:
         """A FastAPI dependency declaring the two key schemes and returning the result.
@@ -153,12 +164,14 @@ class ApiKeyAuthenticator(Authenticator):
             presented = bearer.credentials
         row = await self.lookup_api_key(presented) if presented else None
         if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing API key.",
-                headers={"WWW-Authenticate": API_KEY_CHALLENGE},
-            )
-        return self._principal_for(row)
+            raise _reject()
+        principal = self._principal_for(row)
+        # Enforce the same principal-store check as ``authenticate`` here too, so
+        # a custom router secured by this standalone dependency cannot accept a
+        # key whose principal is missing or disabled.
+        if not await self._principal_is_active(principal):
+            raise _reject()
+        return principal
 
     async def lookup_api_key(self, presented: str) -> Any | None:
         """The stored key entry for ``presented``, or ``None`` (fail-closed).
@@ -208,6 +221,38 @@ class ApiKeyAuthenticator(Authenticator):
             _as_uuid(raw_principal_id) if raw_principal_id is not None else self.principal_id
         )
         return Principal(id=principal_id, kind=PrincipalKind.SERVICE, roles=roles)
+
+    async def _principal_is_active(self, principal: Principal) -> bool:
+        """Whether ``principal`` is a live user in the configured principal store.
+
+        With no ``user_resource`` every principal is accepted (credential-only
+        posture). With one, an **anonymous-id service** principal is left to the
+        key check alone (there is nothing to look up), while a principal with an
+        id must be found in the store and pass its ``enabled`` flag — so a
+        disabled user is rejected however their key was issued. A store object
+        that does not carry an ``enabled`` attribute is treated as enabled (the
+        store's own choice to be identity-only), while a store row that is
+        *missing* is a rejection. The lookup runs over a **fresh ctx**, like
+        :meth:`lookup_api_key`, so it never adopts the request's storage.
+        """
+        if self.user_resource is None or principal.id is None:
+            return True
+        service = await self.user_resource.get_service({})
+        async with service:
+            try:
+                user = await service.read(principal.id)
+            except NotFoundError:
+                return False
+        return bool(getattr(user, "enabled", True))
+
+
+def _reject() -> HTTPException:
+    """The 401 raised when a presented key is missing, invalid, or not a live principal."""
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing API key.",
+        headers={"WWW-Authenticate": API_KEY_CHALLENGE},
+    )
 
 
 def _as_uuid(value: Any) -> UUID | None:

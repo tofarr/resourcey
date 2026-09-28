@@ -2,8 +2,9 @@
 
 In v2 the ORM models *are* the schema of record, so autogeneration diffs against
 ``simple_roles.models.Base.metadata`` directly (no resource manifest, no
-``ResourceyBase``). There is no role / key table — the accepted API keys and
-their roles live in the environment.
+``ResourceyBase``). The accepted API keys and their roles still live in the
+environment; ``users`` is the stored-principal table the keys' ``PRINCIPAL_ID``
+values name.
 
 The database URL comes from the same ``APP_SQL_CONNECTIONS_0_URL`` the app reads,
 converted to its *synchronous* counterpart because Alembic drives a sync engine.

@@ -55,10 +55,25 @@ until the first release.
   fallback. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
   same message board, but with a per-app `Role` vocabulary carried on each API
   key (`APP_API_KEYS_<n>_ROLES_<m>`) and a single `RolePolicyResolver` mapping
-  role -> policy (global + per-resource): `ADMIN` full access, `MODERATOR`
-  read-only on `threads` / full on `messages`, `USER` read-only on `threads` but
-  `Owner`-scoped (`author_id`) on `messages` — the "read all of X, own rows
-  of Y" rule — and an un-roled key denied everything (fail-closed). `v2` does
+  role -> policy (global + per-resource). Reads are **public by default** — the
+  builder runs `Posture.OPTIONAL` (an absent credential is anonymous, a
+  *presented but invalid* one is still `401`) and every resource falls to a
+  resource-level `ReadOnly` default, so anonymous/un-roled callers read
+  `threads` / `messages`; roles gate the **writes**: `ADMIN` full access,
+  `MODERATOR` creates / updates / deletes `messages`, `USER` creates messages
+  and edits only its own (the union of `ReadOnly` + `Owner(author_id)`, so
+  read-all / write-own — the "read all of X, own rows of Y" rule). It also
+  **stores its principals**: a `User` ORM model (`users` table) served read-only
+  by a `SqlResource` wrapped in a `ResourceView` (`simple_roles/user.py`), with
+  the `ApiKeyAuthenticator`'s optional `user_resource=` validating each key's
+  `PRINCIPAL_ID` against a live, `enabled` row (a missing / disabled principal
+  ⇒ `401`), so a stored principal's flag is authoritative over the credential.
+  The `users` surface is **admin-only and not public** (deliberately absent from
+  the resource-level defaults, so no role and no anonymous caller reaches it;
+  only `ADMIN`'s global `AllowAll`). Two fixed principals are seeded by
+  the committed Alembic migration and by `simple_roles/seed.py` (the ids the
+  `.env` keys name). This is 04's identity-store rung; the store-backed groups /
+  roles / per-request resolution land in `05_full_rbac`. `v2` does
   no `.env` loading, so its run/debug commands pass
   `uvicorn --env-file .env` / `uv run --env-file .env`. `05_full_rbac` is the
   **`v2` store-backed RBAC app** (issue #133, Part 3 of the auth roadmap): the
@@ -204,8 +219,18 @@ lives beside the API-key code in **`src/resourcey/v2/auth/`**:
 `ApiKeyAuthenticator` (`auth_api_key.py`) is the API-key `Authenticator`: it
 looks the presented key's digest up on the inner (DB or config-list) key
 resource and returns a `Principal` — a DB row's owner (`user_id`) wins, else a
-`SERVICE` principal (optionally named by the config entry's `principal_id`).
-`lookup_api_key` returns `None` for a key that is inactive or past `expires_at`.
+`SERVICE` principal (optionally named by the config entry's `principal_id`). Its
+optional `user_resource=` makes that principal id a **stored** one the key is
+validated against: a key resolving to no live, `enabled` row is `invalid`, so a
+stored principal's flag is authoritative over the credential (`None` keeps the
+credential-only posture of examples 01-03). The store check lives in
+`_principal_is_active` and is applied on **both** the builder path
+(`authenticate`) and the standalone `api_key_dependency`, so a custom router
+secured by the reusable dependency cannot accept a key whose principal is
+missing or disabled; a store row lacking an `enabled` attribute is treated as
+enabled (an identity-only store), while a missing row is a rejection.
+`lookup_api_key` returns `None` for a
+key that is inactive or past `expires_at`.
 `CookieAuthenticator` (`auth_cookie.py`) mints/validates a JWE cookie
 (`EncryptionService.create_jwe_token` / `decrypt_jwe_token`) whose `sub` is the
 principal id; the cookie's `exp` is the **internal validation threshold** (when
@@ -253,7 +278,8 @@ framework never imports app code to interpret a credential.
   `resource_role_policies` map keyed by the resource's path, an explicit
   fail-closed `default` (empty unless the app opts in) with per-resource
   `resource_defaults` overrides. An unknown role therefore grants nothing. The
-  static mapping is this rung; the store-backed resolver is Part 3.
+  static mapping is this rung; the store-backed resolver is part of Part 3
+  (issue #133).
 * Roles are carried on both credential types with **no extra store lookup**: a
   DB-backed / config-list `ApiKey` row's `roles` column / `ConfigApiKey.roles`,
   populated onto `Principal.roles` by `ApiKeyAuthenticator` (a row's own
