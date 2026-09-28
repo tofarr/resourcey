@@ -201,9 +201,8 @@ Each resource gets the standard actions:
 
 ## Migrations
 
-v2 has **no** `resourcey migrate` wrapper (that CLI reads the v1
-`ResourceyBase` / `FrameworkConfig.manifest`, which do not exist in v2). Since
-SQLAlchemy is the schema of record, the example drives **Alembic directly**
+There is **no** `resourcey migrate` wrapper. Since SQLAlchemy is the schema of
+record, the example drives **Alembic directly**
 against `message_board.models.Base.metadata`.
 
 The committed revision under `migrations/versions/` was generated with:

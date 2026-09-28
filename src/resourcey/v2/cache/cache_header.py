@@ -1,4 +1,4 @@
-"""Cache validator value object (the ``v2`` migration of ``resourcey.cache.cache_header``).
+"""Cache validator value object.
 
 A :class:`CacheHeader` carries the three cache validators a response may
 advertise (``ETag`` / ``Last-Modified`` / freshness). It is HTTP-agnostic: it

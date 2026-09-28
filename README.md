@@ -40,10 +40,12 @@ Declaring a resource produces:
   storage-agnostic tree and are pushed into the SQL `WHERE` clause; an
   unconvertible filter fails loudly unless the resource opts into an in-memory
   fallback.
-* **Migrations** — Alembic autogeneration from the current models, so you
-  can derive schema changes from your resource declarations.
-* **Permissions** — the resource declares which actions a role may perform,
-  and the framework computes the effective permission set per user.
+* **Migrations** — Alembic autogeneration from the current models (driven
+  directly against the SQLAlchemy metadata), so you can derive schema changes
+  from your resource declarations.
+* **Authorization** — pluggable `Policy` rules reduce a principal to a
+  per-action filter: API-key / cookie authentication, per-app roles, and a
+  stored users / groups / roles RBAC store.
 
 ## Storage backends
 
@@ -280,65 +282,47 @@ script to populate the environment.
 | Formal specs | Quint |
 | Tests | pytest (≥90% coverage enforced) |
 
-## Permissions (users, groups, roles)
+## Authorization (users, groups, roles)
 
-`resourcey` models users, groups, and roles so that a per-user permission set
-can be computed for every resource action. The permission engine is reusable
-across applications and was abstracted out of
-[`ohev2`](https://github.com/tofarr/ohev2), where it solved the same problems
-in a domain-specific setting.
+`resourcey.v2.auth` secures a resource through two composable seams: an
+`Authenticator` (API-key and cookie authenticators) that produces a
+`Principal`, and a `PolicyResolver` that maps that principal to `Policy` rules.
+The built-ins are `AllowAll` / `DenyAll` / `ReadOnly` / `Owner`, with a
+per-app role vocabulary (`RolePolicyResolver`) and a store-backed RBAC resolver
+(`RbacPolicyResolver`) over `users` / `groups` / `roles` / `role_permissions` /
+`resource_acls` tables. An `AuthorizedService` enforces the reduced filter per
+action: a denied create is `403`, an out-of-scope read/update/delete is `404`,
+and a denied search/count yields an empty page / `0`.
 
 ## Configuration
 
-A typed environment-variable parser is bundled in `resourcey.util.env_parser`
+A typed environment-variable parser is bundled in `resourcey.v2.util.env_parser`
 (vendored from the
 [OpenHands Software Agent SDK](https://github.com/OpenHands/software-agent-sdk/blob/28e8ed273617992e9556410804f54937cc059878/openhands-agent-server/openhands/agent_server/env_parser.py),
 written by the same author). It supports complex nested types and polymorphism
 that `pydantic-settings` cannot express. There is **no runtime dependency** on
 the SDK.
 
-A `DiscriminatedUnionMixin` is also bundled in `resourcey.util.models` for
+A `DiscriminatedUnionMixin` is also bundled in `resourcey.v2.util.models` for
 polymorphic models keyed by a `kind` discriminator — likewise vendored from
 the SDK with no dependency.
 
 ## Migrations
 
 Database revisions are generated with [Alembic](https://alembic.sqlalchemy.org/)
-from the current resource models. The `resourcey migrate` CLI wraps Alembic so
-you don't need to run `alembic init` or hand-write an `alembic.ini`:
+from the current resource models. There is no `resourcey migrate` wrapper:
+SQLAlchemy is the schema of record, so Alembic is driven directly against
+`Base.metadata` (see the examples' `migrations/` directories):
 
 ```bash
-# Materialise env.py + versions/ in the migrations directory (idempotent)
-resourcey migrate init
-
-# Autogenerate a draft revision from your resource models
-resourcey migrate autogenerate -m "add widget table"
-
-# Apply / roll back
-resourcey migrate upgrade          # to head
-resourcey migrate downgrade -1     # one step back
-```
-
-The migrations directory is configured under the `migrations` key of
-`FrameworkConfig` (env prefix `RESOURCEY_MIGRATIONS_`). The resource set is the
-**app-level** `FrameworkConfig.manifest` field (env `RESOURCEY_MANIFEST`) —
-a `module:attr` path to the app's `ResourceManifest`, which owns the resource
-instances and materialises their tables. The same manifest drives the REST
-service layer and RBAC, so migrations never diverge from what the app serves:
-
-| Env var | Default | Purpose |
-| --- | --- | --- |
-| `RESOURCEY_MANIFEST` | `""` | Dotted/colon path (`module:attr`) to the app's `ResourceManifest` instance. `env.py` imports it and calls `materialize()` before autogenerating. |
-| `RESOURCEY_MIGRATIONS_MIGRATIONS_DIR` | `migrations` | Directory holding `env.py` and `versions/`. |
-
-```bash
-RESOURCEY_MANIFEST='myapp.app:manifest' resourcey migrate autogenerate -m "init"
+alembic revision --autogenerate -m "add widget table"
+alembic upgrade head                # apply
+alembic downgrade -1                # one step back
 ```
 
 **Generated revisions are drafts.** Alembic's autogeneration cannot detect
 table or column *renames* — a rename looks like a drop followed by a create,
-which loses data. Review every generated revision before applying it. Run
-`alembic` directly to escape the wrapper when you need full control.
+which loses data. Review every generated revision before applying it.
 
 ## Status
 

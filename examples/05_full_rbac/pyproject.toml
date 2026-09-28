@@ -12,7 +12,7 @@ dependencies = [
     "resourcey @ git+https://github.com/tofarr/resourcey.git@main",
     # SQLite async driver — the example defaults to a local SQLite file.
     "aiosqlite>=0.22",
-    # Alembic is used directly (v2 has no `resourcey migrate` wrapper).
+    # Alembic is driven directly against the ORM metadata.
     "alembic>=1.13",
 ]
 

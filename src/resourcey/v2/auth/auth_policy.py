@@ -6,8 +6,7 @@ that knows how to *reduce itself* to a
 :class:`~resourcey.v2.core.service.Action`. Storing the rule (rather than a
 serialized filter) keeps the decision logic co-located with the data and lets
 one stored rule adapt as the requested action changes — the model ported from
-v1's ``resourcey.auth.permission`` (issue #4), minus the user / group / role
-machinery.
+the original authorization code, minus the user / group / role machinery.
 
 The name is ``Policy``, not ``Permission``: a permission is the *computed
 right* a principal has, while the policy is the *rule* that computes it. The
