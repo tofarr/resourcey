@@ -30,7 +30,7 @@ until the first release.
 
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
-  `04_simple_roles`, `05_full_rbac` — standalone
+  `04_simple_roles`, `05_full_rbac`, `06_filestore` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **reference app** (issue
@@ -85,10 +85,18 @@ until the first release.
   union their policies: `viewer` ∪ `author` reads all of `messages` but edits
   only its own. A `seed` module populates the store; the whole RBAC set is also
   served over the ordinary REST surface, with an `admin` grant on each table.
+  `06_filestore` is the **file-store app** (issue #117): the pre-signed-URL
+  handshake over the framework's conventional `FileMetadata` resource — a
+  `manifest`-entered medium (`LocalFileStore` from `MEDIUM_CLASS`, defaulting to
+  a directory) plus `register_file_routes` mounting the mint / complete /
+  download routes *after* `create_app`, and the local medium's framework-signed
+  `/_files/{key}` `PUT` / `GET` transfer endpoints. It is what proves the
+  handshake end to end: create (`pending`, opaque key) → `upload-url` → byte
+  transfer → `complete` (`ready`, ETag) → `download`.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
-  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05).
+  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06).
 
 ## Core design principles
 
