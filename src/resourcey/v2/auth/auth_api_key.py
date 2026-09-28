@@ -164,12 +164,14 @@ class ApiKeyAuthenticator(Authenticator):
             presented = bearer.credentials
         row = await self.lookup_api_key(presented) if presented else None
         if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid or missing API key.",
-                headers={"WWW-Authenticate": API_KEY_CHALLENGE},
-            )
-        return self._principal_for(row)
+            raise _reject()
+        principal = self._principal_for(row)
+        # Enforce the same principal-store check as ``authenticate`` here too, so
+        # a custom router secured by this standalone dependency cannot accept a
+        # key whose principal is missing or disabled.
+        if not await self._principal_is_active(principal):
+            raise _reject()
+        return principal
 
     async def lookup_api_key(self, presented: str) -> Any | None:
         """The stored key entry for ``presented``, or ``None`` (fail-closed).
@@ -226,10 +228,12 @@ class ApiKeyAuthenticator(Authenticator):
         With no ``user_resource`` every principal is accepted (credential-only
         posture). With one, an **anonymous-id service** principal is left to the
         key check alone (there is nothing to look up), while a principal with an
-        id must be found in the store and pass its optional ``enabled`` flag — so
-        a disabled user is rejected however their key was issued. The lookup runs
-        over a **fresh ctx**, like :meth:`lookup_api_key`, so it never adopts the
-        request's storage.
+        id must be found in the store and pass its ``enabled`` flag — so a
+        disabled user is rejected however their key was issued. A store object
+        that does not carry an ``enabled`` attribute is treated as enabled (the
+        store's own choice to be identity-only), while a store row that is
+        *missing* is a rejection. The lookup runs over a **fresh ctx**, like
+        :meth:`lookup_api_key`, so it never adopts the request's storage.
         """
         if self.user_resource is None or principal.id is None:
             return True
@@ -239,8 +243,16 @@ class ApiKeyAuthenticator(Authenticator):
                 user = await service.read(principal.id)
             except NotFoundError:
                 return False
-        enabled = getattr(user, "enabled", True)
-        return bool(enabled)
+        return bool(getattr(user, "enabled", True))
+
+
+def _reject() -> HTTPException:
+    """The 401 raised when a presented key is missing, invalid, or not a live principal."""
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or missing API key.",
+        headers={"WWW-Authenticate": API_KEY_CHALLENGE},
+    )
 
 
 def _as_uuid(value: Any) -> UUID | None:

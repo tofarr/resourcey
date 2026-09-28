@@ -544,6 +544,42 @@ async def test_enabled_principal_authenticates(principal_store_app):
     assert principal.kind is PrincipalKind.USER
 
 
+async def test_standalone_dependency_enforces_the_principal_store(principal_store_app):
+    """The reusable ``api_key_dependency`` applies the store check too.
+
+    A custom router secured by ``ApiKeyAuthenticator.api_key_dependency`` must not
+    accept a key whose principal is missing or disabled — the store is a property
+    of the authenticator, not of the builder path.
+    """
+    _client, authenticator, keys, users = principal_store_app
+    user_id = uuid4()
+    await _add_user(users, user_id, enabled=False)
+    raw = await _mint(keys, "ci")
+    await _set_row(keys, raw, user_id=user_id)
+
+    app = FastAPI()
+    router = APIRouter(dependencies=[Depends(authenticator.api_key_dependency)])
+
+    @router.get("/ping")
+    async def ping() -> dict[str, bool]:
+        return {"ok": True}
+
+    app.include_router(router)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        disabled = await client.get("/ping", headers={API_KEY_HEADER_NAME: raw})
+        assert disabled.status_code == 401
+
+        # An enabled principal passes the same dependency.
+        live_id = uuid4()
+        await _add_user(users, live_id, enabled=True)
+        live_raw = await _mint(keys, "ci-live")
+        await _set_row(keys, live_raw, user_id=live_id)
+        assert (
+            await client.get("/ping", headers={API_KEY_HEADER_NAME: live_raw})
+        ).status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # The config-list source
 # ---------------------------------------------------------------------------

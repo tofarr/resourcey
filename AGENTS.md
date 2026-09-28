@@ -55,17 +55,22 @@ until the first release.
   fallback. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
   same message board, but with a per-app `Role` vocabulary carried on each API
   key (`APP_API_KEYS_<n>_ROLES_<m>`) and a single `RolePolicyResolver` mapping
-  role -> policy (global + per-resource): `ADMIN` full access, `MODERATOR`
-  read-only on `threads` / full on `messages`, `USER` read-only on `threads` but
-  `Owner`-scoped (`author_id`) on `messages` — the "read all of X, own rows
-  of Y" rule — and an un-roled key denied everything (fail-closed). It also
+  role -> policy (global + per-resource). Reads are **public by default** — the
+  builder runs `Posture.OPTIONAL` (an absent credential is anonymous, a
+  *presented but invalid* one is still `401`) and every resource falls to a
+  resource-level `ReadOnly` default, so anonymous/un-roled callers read
+  `threads` / `messages`; roles gate the **writes**: `ADMIN` full access,
+  `MODERATOR` creates / updates / deletes `messages`, `USER` creates messages
+  and edits only its own (the union of `ReadOnly` + `Owner(author_id)`, so
+  read-all / write-own — the "read all of X, own rows of Y" rule). It also
   **stores its principals**: a `User` ORM model (`users` table) served read-only
   by a `SqlResource` wrapped in a `ResourceView` (`simple_roles/user.py`), with
   the `ApiKeyAuthenticator`'s optional `user_resource=` validating each key's
   `PRINCIPAL_ID` against a live, `enabled` row (a missing / disabled principal
   ⇒ `401`), so a stored principal's flag is authoritative over the credential.
-  The `users` surface is **admin-only** (no role maps a `User` grant; only
-  `ADMIN`'s global `AllowAll` reaches it). Two fixed principals are seeded by
+  The `users` surface is **admin-only and not public** (deliberately absent from
+  the resource-level defaults, so no role and no anonymous caller reaches it;
+  only `ADMIN`'s global `AllowAll`). Two fixed principals are seeded by
   the committed Alembic migration and by `simple_roles/seed.py` (the ids the
   `.env` keys name). This is 04's identity-store rung; the store-backed groups /
   roles / per-request resolution land in `05_full_rbac`. `v2` does
@@ -218,7 +223,13 @@ resource and returns a `Principal` — a DB row's owner (`user_id`) wins, else a
 optional `user_resource=` makes that principal id a **stored** one the key is
 validated against: a key resolving to no live, `enabled` row is `invalid`, so a
 stored principal's flag is authoritative over the credential (`None` keeps the
-credential-only posture of examples 01-03). `lookup_api_key` returns `None` for a
+credential-only posture of examples 01-03). The store check lives in
+`_principal_is_active` and is applied on **both** the builder path
+(`authenticate`) and the standalone `api_key_dependency`, so a custom router
+secured by the reusable dependency cannot accept a key whose principal is
+missing or disabled; a store row lacking an `enabled` attribute is treated as
+enabled (an identity-only store), while a missing row is a rejection.
+`lookup_api_key` returns `None` for a
 key that is inactive or past `expires_at`.
 `CookieAuthenticator` (`auth_cookie.py`) mints/validates a JWE cookie
 (`EncryptionService.create_jwe_token` / `decrypt_jwe_token`) whose `sub` is the

@@ -8,9 +8,10 @@ read subset, so no write route is ever mounted — a ``User`` row is created by
 the seed script / migration, not through the public API.
 
 Authorization is the app's role rules, not this module: the resolver maps no
-role to a ``User`` grant, so only ``ADMIN`` (``AllowAll``) may read the
-collection. A ``USER`` / ``MODERATOR`` searching ``/users`` gets an empty page
-and a by-id read is a 404 — existence is not leaked — because the
+role to a ``User`` grant and deliberately omits it from the public read defaults,
+so only ``ADMIN`` (``AllowAll``) may read the collection. A ``USER`` /
+``MODERATOR`` / anonymous caller searching ``/users`` gets an empty page and a
+by-id read is a 404 — existence is not leaked — because the
 :class:`~resourcey.v2.auth.auth_authorized_service.AuthorizedService` empties a
 denied collection and hides a denied row.
 

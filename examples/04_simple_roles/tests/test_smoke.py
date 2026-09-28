@@ -21,7 +21,7 @@ from resourcey.v2.auth.auth_api_key import (
     API_KEY_HEADER_NAME,
     ApiKeyAuthenticator,
 )
-from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
+from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
 from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
 from resourcey.v2.auth.auth_role import AppRole, role_key
 from resourcey.v2.core.manifest import Manifest
@@ -102,15 +102,17 @@ def test_build_auth_wires_the_role_resolver() -> None:
     assert "ADMIN" in builder.policy_resolver.role_policies  # type: ignore[attr-defined]
     # The authenticator holds the principal store it validates keys against.
     assert builder.authenticator.user_resource is users
+    # Reads are public, so the builder lets an absent credential through.
+    assert builder.posture is Posture.OPTIONAL
 
 
-async def test_absent_and_invalid_keys_are_indistinguishable(client: AsyncClient) -> None:
-    missing = await client.get("/threads")
+async def test_anonymous_read_is_allowed_but_a_bad_key_is_rejected(client: AsyncClient) -> None:
+    # Reads are public, so an absent credential is anonymous (200) while a
+    # *presented but invalid* key is still a 401 — the two tiers now differ.
+    assert (await client.get("/threads")).status_code == 200
     wrong = await client.get("/threads", headers={API_KEY_HEADER_NAME: "nope"})
-    assert missing.status_code == wrong.status_code == 401
-    assert missing.headers["www-authenticate"] == API_KEY_CHALLENGE
+    assert wrong.status_code == 401
     assert wrong.headers["www-authenticate"] == API_KEY_CHALLENGE
-    assert missing.json() == wrong.json()
 
 
 async def test_user_resource_is_read_only_in_the_openapi_schema(client: AsyncClient) -> None:

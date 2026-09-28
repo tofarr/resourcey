@@ -5,11 +5,12 @@ of record and the framework infers the DTO (and the six REST models) from them.
 
 Three tables (the example's point):
 
-* ``Thread`` — a shared board: its rows have **no owner**. A ``USER`` role reads
-  all of them (``threads`` is read-only for that role).
-* ``Message`` — a per-author row: ``author_id`` names the owner, and the ``USER``
-  role may only read / update / delete **its own** messages (the ``Owner``
-  policy). A ``MODERATOR`` reads / updates every message.
+* ``Thread`` — a shared board: its rows have **no owner**. Everyone reads it;
+  only ``ADMIN`` writes it.
+* ``Message`` — a per-author row: ``author_id`` names the owner. Everyone reads
+  it, a ``USER`` may create, and may update / delete **its own** messages (the
+  ``Owner`` policy unioned with ``ReadOnly``). A ``MODERATOR`` may create /
+  update / delete every message.
 * ``User`` — a stored **principal**. Part 2 carried roles on the credential, so
   a role needed no lookup; but the principal a key acts as was still a bare
   credential field. ``User`` makes it a row, so a principal can be enumerated,
@@ -18,8 +19,9 @@ Three tables (the example's point):
   identity the key's ``PRINCIPAL_ID`` points at.
 
 The ``User`` resource is the **identity** store, not a privilege store: its
-surface is narrowed to read-only and the app's role rules make it admin-only, so
-one principal cannot enumerate another.
+surface is narrowed to read-only, it is deliberately absent from the
+resource-level read defaults, and no role maps a ``User`` grant, so it is
+admin-only — one principal cannot enumerate another.
 """
 
 from __future__ import annotations

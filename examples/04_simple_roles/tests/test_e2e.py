@@ -8,14 +8,15 @@ verified.
 The app is assembled through the real config path and httpx's ASGI transport, so
 requests drive the full request → auth → role → service → SQLAlchemy stack.
 The accepted keys carry roles, which is the point: no role lookup touches the
-database, and the resolver's rules decide what each role may do.
+database, and the resolver's rules decide what each role may write.
 
-Roles under test:
+Every resource is **readable by default** (anonymous included); roles gate the
+writes:
 
 * ``ADMIN``  — full access everywhere.
-* ``MODERATOR`` — read-only on ``threads``; full access on ``messages``.
-* ``USER``   — read-only on ``threads``; **own rows only** on ``messages``.
-* ``NOROLES`` — authenticates but every action is denied (fail-closed default).
+* ``MODERATOR`` — reads everywhere; creates / updates / deletes messages.
+* ``USER``   — reads everywhere; creates messages and edits **only its own**.
+* ``NOROLES`` — reads the public board, but has no write grant.
 
 Principals are **stored**: the ``admin`` and ``user`` keys name seeded ``users``
 rows (the migration inserts them), and the authenticator validates each key's
@@ -154,13 +155,23 @@ async def _make_message(
 
 
 # ---------------------------------------------------------------------------
-# Authentication posture (unchanged from example 03)
+# Authentication posture: reads are public, a bad credential is still rejected
 # ---------------------------------------------------------------------------
 
 
 class TestPosture:
-    async def test_missing_and_invalid_keys_are_rejected(self, client: AsyncClient) -> None:
-        assert (await client.get("/threads")).status_code == 401
+    async def test_anonymous_reads_are_allowed(self, client: AsyncClient) -> None:
+        # Reads are public reference data, so no credential is fine (anonymous).
+        assert (await client.get("/threads")).status_code == 200
+        assert (await client.get("/messages")).status_code == 200
+
+    async def test_anonymous_writes_are_rejected(self, client: AsyncClient) -> None:
+        # Writes need a role grant, so an anonymous caller is denied (403).
+        resp = await client.post("/threads", json={"title": "N"})
+        assert resp.status_code == 403
+
+    async def test_a_bad_credential_is_rejected_even_on_a_read(self, client: AsyncClient) -> None:
+        # An absent credential is anonymous, but a *presented* bad one is a 401.
         assert (await client.get("/threads", headers=_h("nope"))).status_code == 401
 
 
@@ -178,7 +189,7 @@ class TestRoleCarriage:
 
 
 # ---------------------------------------------------------------------------
-# The headline rule: a USER reads all of threads but only its own messages
+# The headline rule: a USER reads everything but edits only its own messages
 # ---------------------------------------------------------------------------
 
 
@@ -194,27 +205,29 @@ class TestUserOwnRowsOnly:
         resp = await client.post("/threads", json={"title": "Nope"}, headers=_h(USER_KEY))
         assert resp.status_code == 403
 
-    async def test_reads_only_its_own_messages(self, client: AsyncClient) -> None:
+    async def test_reads_all_messages(self, client: AsyncClient) -> None:
+        # Reads are public on this board: a USER (and an anonymous caller) sees
+        # every message, not only its own.
         thread = await _make_thread(client, ADMIN_KEY)
         await _make_message(client, USER_KEY, thread["id"], "mine")
-        # The admin's message is owned by no one, but a USER still cannot see it.
         await _make_message(client, ADMIN_KEY, thread["id"], "theirs")
 
         resp = await client.get("/messages", headers=_h(USER_KEY))
         assert resp.status_code == 200
-        texts = [m["text"] for m in resp.json()["items"]]
-        assert texts == ["mine"]
+        texts = {m["text"] for m in resp.json()["items"]}
+        assert texts == {"mine", "theirs"}
+        assert (await client.get("/messages")).status_code == 200
 
     async def test_message_owner_is_stamped_server_side(self, client: AsyncClient) -> None:
         thread = await _make_thread(client, ADMIN_KEY)
         created = await _make_message(client, USER_KEY, thread["id"], "mine")
         assert created["author_id"] == str(ALICE)
 
-    async def test_cannot_read_another_owners_message_by_id(self, client: AsyncClient) -> None:
+    async def test_can_read_another_owners_message_by_id(self, client: AsyncClient) -> None:
         thread = await _make_thread(client, ADMIN_KEY)
         theirs = await _make_message(client, ADMIN_KEY, thread["id"], "theirs")
         resp = await client.get(f"/messages/{theirs['id']}", headers=_h(USER_KEY))
-        assert resp.status_code == 404  # existence is not leaked
+        assert resp.status_code == 200
 
     async def test_cannot_update_another_owners_message(self, client: AsyncClient) -> None:
         thread = await _make_thread(client, ADMIN_KEY)
@@ -279,6 +292,13 @@ class TestModerator:
         resp = await client.post("/threads", json={"title": "N"}, headers=_h(MODERATOR_KEY))
         assert resp.status_code == 403
 
+    async def test_can_create_a_message(self, client: AsyncClient) -> None:
+        thread = await _make_thread(client, ADMIN_KEY)
+        created = await _make_message(client, MODERATOR_KEY, thread["id"], "mod msg")
+        # The moderator key carries no ``PRINCIPAL_ID``, so it authenticates as a
+        # service principal and the created row has no stamped owner.
+        assert created["author_id"] is None
+
     async def test_can_edit_any_message(self, client: AsyncClient) -> None:
         thread = await _make_thread(client, ADMIN_KEY)
         mine = await _make_message(client, USER_KEY, thread["id"], "user msg")
@@ -290,19 +310,28 @@ class TestModerator:
 
 
 # ---------------------------------------------------------------------------
-# An un-roled key authenticates but is denied everything (fail-closed)
+# An un-roled key can read the public board but has no write grant
 # ---------------------------------------------------------------------------
 
 
 class TestFailClosed:
-    async def test_unroled_key_cannot_read(self, client: AsyncClient) -> None:
-        # A denied collection yields an empty page, not a 403 (union semantics).
+    async def test_unroled_key_can_read(self, client: AsyncClient) -> None:
+        # Reads fall to the public default, so an un-roled (but valid) key reads
+        # the shared board.
+        await _make_thread(client, ADMIN_KEY)
         resp = await client.get("/threads", headers=_h(NOROLES_KEY))
         assert resp.status_code == 200
-        assert resp.json()["items"] == []
+        assert {t["title"] for t in resp.json()["items"]}
 
     async def test_unroled_key_cannot_create(self, client: AsyncClient) -> None:
         resp = await client.post("/threads", json={"title": "N"}, headers=_h(NOROLES_KEY))
+        assert resp.status_code == 403
+
+    async def test_unroled_key_cannot_create_a_message(self, client: AsyncClient) -> None:
+        thread = await _make_thread(client, ADMIN_KEY)
+        resp = await client.post(
+            "/messages", json={"thread_id": thread["id"], "text": "x"}, headers=_h(NOROLES_KEY)
+        )
         assert resp.status_code == 403
 
 
@@ -346,12 +375,22 @@ class TestStoredPrincipal:
         assert all("enabled" in u for u in resp.json()["items"])
 
     async def test_non_admin_cannot_enumerate_principals(self, client: AsyncClient) -> None:
-        # A denied collection is an empty page, not a 403 — and a USER cannot see
-        # another principal's row.
-        resp = await client.get("/users", headers=_h(USER_KEY))
+        # No non-admin role reaches ``users`` — a denied collection is an empty
+        # page (not 403), and a by-id read is a 404, so a principal cannot be
+        # enumerated or probed. ``MODERATOR`` is checked explicitly: it is
+        # otherwise read-only, so a global read grant would have leaked the
+        # stored principals to it.
+        for key in (USER_KEY, MODERATOR_KEY, NOROLES_KEY):
+            resp = await client.get("/users", headers=_h(key))
+            assert resp.status_code == 200
+            assert resp.json()["items"] == []
+            assert (await client.get(f"/users/{ADMIN_ID}", headers=_h(key))).status_code == 404
+
+    async def test_anonymous_cannot_enumerate_principals(self, client: AsyncClient) -> None:
+        # ``users`` is not public: an anonymous caller reads nothing from it.
+        resp = await client.get("/users")
         assert resp.status_code == 200
         assert resp.json()["items"] == []
-        assert (await client.get(f"/users/{ADMIN_ID}", headers=_h(USER_KEY))).status_code == 404
 
     async def test_user_resource_is_read_only(self, client: AsyncClient) -> None:
         # The view narrows the resource to the read subset, so no write route is
