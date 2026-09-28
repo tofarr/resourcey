@@ -56,7 +56,18 @@ until the first release.
   role -> policy (global + per-resource): `ADMIN` full access, `MODERATOR`
   read-only on `threads` / full on `messages`, `USER` read-only on `threads` but
   `Owner`-scoped (`author_id`) on `messages` — the "read all of X, own rows
-  of Y" rule — and an un-roled key denied everything (fail-closed). `v2` does
+  of Y" rule — and an un-roled key denied everything (fail-closed). It also
+  **stores its principals**: a `User` ORM model (`users` table) served read-only
+  by a `SqlResource` wrapped in a `ResourceView` (`simple_roles/user.py`), with
+  the `ApiKeyAuthenticator`'s optional `user_resource=` validating each key's
+  `PRINCIPAL_ID` against a live, `enabled` row (a missing / disabled principal
+  ⇒ `401`), so a stored principal's flag is authoritative over the credential.
+  The `users` surface is **admin-only** (no role maps a `User` grant; only
+  `ADMIN`'s global `AllowAll` reaches it). Two fixed principals are seeded by
+  the committed Alembic migration and by `simple_roles/seed.py` (the ids the
+  `.env` keys name). This is the identity-store half of Part 3 (full RBAC,
+  issue #133); stored groups / roles / per-request resolution remain later
+  rungs. `v2` does
   no `.env` loading, so its run/debug commands pass
   `uvicorn --env-file .env` / `uv run --env-file .env`.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
@@ -191,8 +202,12 @@ lives beside the API-key code in **`src/resourcey/v2/auth/`**:
 `ApiKeyAuthenticator` (`auth_api_key.py`) is the API-key `Authenticator`: it
 looks the presented key's digest up on the inner (DB or config-list) key
 resource and returns a `Principal` — a DB row's owner (`user_id`) wins, else a
-`SERVICE` principal (optionally named by the config entry's `principal_id`).
-`lookup_api_key` returns `None` for a key that is inactive or past `expires_at`.
+`SERVICE` principal (optionally named by the config entry's `principal_id`). Its
+optional `user_resource=` makes that principal id a **stored** one the key is
+validated against: a key resolving to no live, `enabled` row is `invalid`, so a
+stored principal's flag is authoritative over the credential (`None` keeps the
+credential-only posture of examples 01-03). `lookup_api_key` returns `None` for a
+key that is inactive or past `expires_at`.
 `CookieAuthenticator` (`auth_cookie.py`) mints/validates a JWE cookie
 (`EncryptionService.create_jwe_token` / `decrypt_jwe_token`) whose `sub` is the
 principal id; the cookie's `exp` is the **internal validation threshold** (when
@@ -240,7 +255,8 @@ framework never imports app code to interpret a credential.
   `resource_role_policies` map keyed by the resource's path, an explicit
   fail-closed `default` (empty unless the app opts in) with per-resource
   `resource_defaults` overrides. An unknown role therefore grants nothing. The
-  static mapping is this rung; the store-backed resolver is Part 3.
+  static mapping is this rung; the store-backed resolver is part of Part 3
+  (issue #133).
 * Roles are carried on both credential types with **no extra store lookup**: a
   DB-backed / config-list `ApiKey` row's `roles` column / `ConfigApiKey.roles`,
   populated onto `Principal.roles` by `ApiKeyAuthenticator` (a row's own

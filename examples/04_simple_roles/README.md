@@ -31,6 +31,34 @@ Roles are **per-app**: the `Role` `StrEnum` declares the set this app recognizes
 (`Role.ADMIN` makes routing free of magic strings), while the credential carries
 the plain string.
 
+## Stored principals (the `users` resource)
+
+Part 2 carried roles on the credential, so a role needed no lookup. The
+**principal** a key acts as, however, is now a stored row: the `users` table,
+served read-only at `/users`.
+
+A key's `PRINCIPAL_ID` names a `users` row, and the authenticator validates it:
+a key whose principal is missing or `enabled=False` is rejected (`401`), so a
+stored principal's `enabled` flag is authoritative over the credential (disable a
+user to revoke every key that acts as it). Two principals are seeded — by the
+committed migration, and by [`simple_roles/seed.py`](simple_roles/seed.py) for a
+database built directly from the ORM metadata:
+
+| Username | Id (`PRINCIPAL_ID`) |
+| --- | --- |
+| `admin` | `00000000-0000-0000-0000-000000000001` |
+| `user` | `11111111-1111-1111-1111-111111111111` |
+
+The `users` resource is **admin-only**: no role maps to a `User` grant other than
+`ADMIN`'s global `AllowAll`, so a `USER` / `MODERATOR` searching `/users` gets an
+empty page and a by-id read is a `404` (existence is not leaked). It is also
+read-only — the view narrows it to the read subset, so no write route is ever
+mounted.
+
+Stored **groups / roles / permissions** (so membership is resolved per request)
+are a later rung ([#133](https://github.com/tofarr/resourcey/issues/133)); here
+`User` is the identity store only.
+
 ## Roles on the credential (no DB lookup)
 
 Each accepted key has `roles` in the environment, so a presented key's roles are
@@ -39,15 +67,18 @@ resolved without touching a database:
 ```dotenv
 APP_API_KEYS_0_ID=admin
 APP_API_KEYS_0_KEY=admin-key
+APP_API_KEYS_0_PRINCIPAL_ID=00000000-0000-0000-0000-000000000001  # the stored `admin` user
 APP_API_KEYS_0_ROLES_0=ADMIN
 
 APP_API_KEYS_1_ID=user
 APP_API_KEYS_1_KEY=user-key
-APP_API_KEYS_1_PRINCIPAL_ID=<a-uuid>   # the principal id `Owner` scopes on
+APP_API_KEYS_1_PRINCIPAL_ID=11111111-1111-1111-1111-111111111111  # the stored `user` principal `Owner` scopes on
 APP_API_KEYS_1_ROLES_0=USER
 ```
 
-A key with no `roles` authenticates but is denied everything (fail-closed).
+A key with no `roles` authenticates but is denied everything (fail-closed). A key
+whose `PRINCIPAL_ID` names no live `users` row is rejected outright — the
+credential's roles are irrelevant if the principal is not a stored, enabled user.
 
 ## Caller-private caching
 
@@ -70,13 +101,17 @@ curl -H 'X-API-Key: user-key' localhost:8084/threads
 
 # ...but only its own messages
 curl -H 'X-API-Key: user-key' localhost:8084/messages
+
+# only the admin sees the stored principals; a user gets an empty page
+curl -H 'X-API-Key: admin-key' localhost:8084/users
+curl -H 'X-API-Key: user-key'  localhost:8084/users   # {"items": []}
 ```
 
 ## Run it
 
 ```bash
 uv sync --extra test
-uv run --env-file .env alembic upgrade head
+uv run --env-file .env alembic upgrade head   # creates the schema and seeds the principals
 uv run --env-file .env uvicorn simple_roles.app:app --port 8084
 ```
 
@@ -90,5 +125,5 @@ uv run pytest
 ```
 
 The suite runs against an isolated SQLite database (schema applied by the
-committed Alembic migration) through the full request → auth → role → service →
-SQLAlchemy stack.
+committed Alembic migration, principals seeded by it) through the full request →
+auth → role → principal-store → service → SQLAlchemy stack.

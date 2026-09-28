@@ -57,6 +57,7 @@ from resourcey.v2.auth.auth_principal import (
     PrincipalKind,
 )
 from resourcey.v2.auth.auth_role import roles_from_credential
+from resourcey.v2.core.service import NotFoundError
 
 API_KEY_HEADER_NAME = "X-API-Key"
 
@@ -93,10 +94,17 @@ class ApiKeyAuthenticator(Authenticator):
         principal_id: An optional fixed principal id for **config-list** keys
             (which have no owner). A DB-backed key row's owner (``user_id``)
             always wins when present.
+        user_resource: An optional **principal store** the key's principal is
+            validated against. When supplied, a key that resolves to a principal
+            which is not a live, enabled user is rejected (invalid), so a stored
+            principal's ``enabled`` flag is authoritative over the credential.
+            ``None`` (the default) trusts the credential's principal id, keeping
+            the credential-only posture of examples 01-03.
     """
 
     key_resource: Any = None
     principal_id: UUID | None = None
+    user_resource: Any = None
 
     async def authenticate(self, request: Any) -> AuthResult:
         """Resolve the request's API key (from either header) to an :class:`AuthResult`."""
@@ -110,7 +118,10 @@ class ApiKeyAuthenticator(Authenticator):
         row = await self.lookup_api_key(presented)
         if row is None:
             return AuthResult.invalid()
-        return AuthResult.authenticated(self._principal_for(row))
+        principal = self._principal_for(row)
+        if not await self._principal_is_active(principal):
+            return AuthResult.invalid()
+        return AuthResult.authenticated(principal)
 
     def dependency(self) -> Callable[..., Any]:
         """A FastAPI dependency declaring the two key schemes and returning the result.
@@ -208,6 +219,28 @@ class ApiKeyAuthenticator(Authenticator):
             _as_uuid(raw_principal_id) if raw_principal_id is not None else self.principal_id
         )
         return Principal(id=principal_id, kind=PrincipalKind.SERVICE, roles=roles)
+
+    async def _principal_is_active(self, principal: Principal) -> bool:
+        """Whether ``principal`` is a live user in the configured principal store.
+
+        With no ``user_resource`` every principal is accepted (credential-only
+        posture). With one, an **anonymous-id service** principal is left to the
+        key check alone (there is nothing to look up), while a principal with an
+        id must be found in the store and pass its optional ``enabled`` flag — so
+        a disabled user is rejected however their key was issued. The lookup runs
+        over a **fresh ctx**, like :meth:`lookup_api_key`, so it never adopts the
+        request's storage.
+        """
+        if self.user_resource is None or principal.id is None:
+            return True
+        service = await self.user_resource.get_service({})
+        async with service:
+            try:
+                user = await service.read(principal.id)
+            except NotFoundError:
+                return False
+        enabled = getattr(user, "enabled", True)
+        return bool(enabled)
 
 
 def _as_uuid(value: Any) -> UUID | None:

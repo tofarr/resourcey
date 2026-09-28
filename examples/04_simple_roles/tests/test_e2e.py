@@ -16,6 +16,10 @@ Roles under test:
 * ``MODERATOR`` — read-only on ``threads``; full access on ``messages``.
 * ``USER``   — read-only on ``threads``; **own rows only** on ``messages``.
 * ``NOROLES`` — authenticates but every action is denied (fail-closed default).
+
+Principals are **stored**: the ``admin`` and ``user`` keys name seeded ``users``
+rows (the migration inserts them), and the authenticator validates each key's
+principal against that table. A key naming a missing / disabled row is rejected.
 """
 
 from __future__ import annotations
@@ -29,32 +33,42 @@ from alembic import command
 from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
+from sqlalchemy import update
 
 from resourcey.v2.auth.auth_api_key import API_KEY_HEADER_NAME
 from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
 from resourcey.v2.sql.session_manager import SqlSessionManager
 from resourcey.v2.sql.sql_config import SqlConfig
 from simple_roles.app import build_app
+from simple_roles.models import User
+from simple_roles.seed import ADMIN_ID, USER_ID
 
-ALICE = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+# The seeded principals the ``.env`` keys name (see ``simple_roles/seed.py``).
+ALICE = USER_ID
 BOB = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
 ADMIN_KEY = "admin-key"
 MODERATOR_KEY = "moderator-key"
 USER_KEY = "user-key"
 NOROLES_KEY = "noroles-key"
+GHOST_KEY = "ghost-key"
 
 
 def _keys() -> ApiKeysConfig:
     """The accepted keys as the environment supplies them (with their roles)."""
     return ApiKeysConfig(
         api_keys=[
-            ApiKeyConfig(id="admin", key=SecretStr(ADMIN_KEY), roles=["ADMIN"]),
+            ApiKeyConfig(
+                id="admin", key=SecretStr(ADMIN_KEY), principal_id=str(ADMIN_ID), roles=["ADMIN"]
+            ),
             ApiKeyConfig(id="moderator", key=SecretStr(MODERATOR_KEY), roles=["MODERATOR"]),
             ApiKeyConfig(
                 id="user", key=SecretStr(USER_KEY), principal_id=str(ALICE), roles=["USER"]
             ),
             ApiKeyConfig(id="noroles", key=SecretStr(NOROLES_KEY)),
+            # Names a principal no ``users`` row provides: the authenticator must
+            # reject it, whatever its roles would otherwise allow.
+            ApiKeyConfig(id="ghost", key=SecretStr(GHOST_KEY), principal_id=str(BOB), roles=["USER"]),
         ]
     )
 
@@ -76,8 +90,14 @@ def _apply_migration(async_url: str) -> None:
 
 
 @pytest_asyncio.fixture
-async def client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]:
-    """A fully wired, role-checked v2 REST client backed by a migrated SQLite file."""
+async def wired(
+    tmp_path: Path, monkeypatch
+) -> AsyncIterator[tuple[AsyncClient, SqlSessionManager]]:
+    """A fully wired, role-checked v2 REST client backed by a migrated SQLite file.
+
+    Yields the client and the app's session manager, so a test can mutate the
+    stored principals (e.g. disable one) on the same database the app reads.
+    """
     db_path = tmp_path / "e2e.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")
@@ -92,9 +112,25 @@ async def client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]:
     try:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            yield c
+            yield c, manager
     finally:
         await manifest.__aexit__(None, None, None)
+
+
+@pytest_asyncio.fixture
+async def client(wired: tuple[AsyncClient, SqlSessionManager]) -> AsyncClient:
+    """Just the REST client (the common case)."""
+    return wired[0]
+
+
+async def _set_user_enabled(
+    manager: SqlSessionManager, user_id: UUID, *, enabled: bool
+) -> None:
+    """Toggle a stored principal's ``enabled`` flag on the app's database."""
+    maker = await manager.get_session_maker()
+    async with maker() as session:
+        await session.execute(update(User).where(User.id == user_id).values(enabled=enabled))
+        await session.commit()
 
 
 def _h(key: str) -> dict[str, str]:
@@ -281,3 +317,48 @@ class TestKeyResource:
         assert resp.status_code == 200
         item = resp.json()["items"][0]
         assert "key" not in item
+
+
+# ---------------------------------------------------------------------------
+# Stored principals: a key's principal must be a live ``users`` row
+# ---------------------------------------------------------------------------
+
+
+class TestStoredPrincipal:
+    async def test_key_naming_a_missing_principal_is_rejected(self, client: AsyncClient) -> None:
+        # The ``ghost`` key is USER-roled and would be allowed on threads, but its
+        # principal has no ``users`` row, so authentication fails closed.
+        assert (await client.get("/threads", headers=_h(GHOST_KEY))).status_code == 401
+
+    async def test_disabling_a_principal_revokes_its_keys(
+        self, wired: tuple[AsyncClient, SqlSessionManager]
+    ) -> None:
+        client, manager = wired
+        assert (await client.get("/threads", headers=_h(USER_KEY))).status_code == 200
+        await _set_user_enabled(manager, ALICE, enabled=False)
+        assert (await client.get("/threads", headers=_h(USER_KEY))).status_code == 401
+
+    async def test_admin_reads_the_stored_principals(self, client: AsyncClient) -> None:
+        resp = await client.get("/users", headers=_h(ADMIN_KEY))
+        assert resp.status_code == 200
+        usernames = {u["username"] for u in resp.json()["items"]}
+        assert {"admin", "user"} <= usernames
+        assert all("enabled" in u for u in resp.json()["items"])
+
+    async def test_non_admin_cannot_enumerate_principals(self, client: AsyncClient) -> None:
+        # A denied collection is an empty page, not a 403 — and a USER cannot see
+        # another principal's row.
+        resp = await client.get("/users", headers=_h(USER_KEY))
+        assert resp.status_code == 200
+        assert resp.json()["items"] == []
+        assert (await client.get(f"/users/{ADMIN_ID}", headers=_h(USER_KEY))).status_code == 404
+
+    async def test_user_resource_is_read_only(self, client: AsyncClient) -> None:
+        # The view narrows the resource to the read subset, so no write route is
+        # mounted (405, not 403 / 500).
+        resp = await client.post(
+            "/users",
+            json={"id": str(BOB), "email": "b@example.com", "username": "bob", "enabled": True},
+            headers=_h(ADMIN_KEY),
+        )
+        assert resp.status_code == 405
