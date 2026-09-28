@@ -86,6 +86,8 @@ jobs:
             name: simple-roles (role-based API keys)
           - example: examples/05_full_rbac
             name: full-rbac (stored users/groups/roles)
+          - example: examples/06_filestore
+            name: filestore (pre-signed upload/download)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4

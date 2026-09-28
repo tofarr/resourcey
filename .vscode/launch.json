@@ -75,6 +75,18 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "preLaunchTask": "examples: migrate 05_full_rbac"
+        },
+        {
+            "name": "Debug 06 — File Store (local medium, SQLite)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["file_store_example.app:app", "--env-file", ".env", "--port", "8086"],
+            "cwd": "${workspaceFolder}/examples/06_filestore",
+            "python": "${workspaceFolder}/examples/06_filestore/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 06_filestore"
         }
     ],
     "compounds": [
@@ -85,7 +97,8 @@
                 "Debug 02 — Message Board (MongoDB, embedded)",
                 "Debug 03 — API Key Auth (SQLite)",
                 "Debug 04 — Simple Roles (SQLite)",
-                "Debug 05 — Full RBAC (SQLite)"
+                "Debug 05 — Full RBAC (SQLite)",
+                "Debug 06 — File Store (local medium, SQLite)"
             ],
             "stopAll": true
         }
