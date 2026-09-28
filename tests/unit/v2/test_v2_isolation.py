@@ -44,6 +44,7 @@ _LAYER_RANK = {
     "sql": 2,
     "view": 2,
     "auth": 2,
+    "filestore": 2,
 }
 
 
@@ -270,6 +271,32 @@ def test_the_list_files_exist_without_an_init():
     assert not (list_dir / "__init__.py").exists()
 
 
+def test_the_filestore_files_exist_without_an_init():
+    filestore = V2_DIR / "filestore"
+    names = {p.name for p in sorted(filestore.glob("*.py"))}
+    assert names == {
+        "file_config.py",
+        "file_metadata.py",
+        "file_routes.py",
+        "file_store.py",
+        "local_file_store.py",
+        "s3_file_store.py",
+        "signed_url.py",
+        "sql_file_store.py",
+    }
+    assert not (filestore / "__init__.py").exists()
+
+
+def test_v2_filestore_never_imports_boto3_at_module_scope():
+    """The S3 medium imports its optional driver lazily, behind the ``s3`` extra."""
+    offenders = [
+        str(p.relative_to(V2_DIR))
+        for p in sorted((V2_DIR / "filestore").rglob("*.py"))
+        if _module_scope_import(p, "boto3")
+    ]
+    assert offenders == []
+
+
 def test_the_view_files_exist_without_an_init():
     view = V2_DIR / "view"
     names = {p.name for p in sorted(view.glob("*.py"))}
@@ -290,6 +317,9 @@ def test_the_auth_files_exist_without_an_init():
         "auth_cookie.py",
         "auth_policy.py",
         "auth_principal.py",
+        "auth_rbac.py",
+        "auth_rbac_resolver.py",
+        "auth_rbac_store.py",
         "auth_role.py",
     }
     assert not (auth / "__init__.py").exists()
@@ -373,6 +403,34 @@ def _imports_module(path: pathlib.Path, module: str) -> bool:
     """
     tree = ast.parse(path.read_text(), filename=str(path))
     for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module or ""]
+        else:
+            continue
+        if any(name == module or name.startswith(module + ".") for name in names):
+            return True
+    return False
+
+
+def _module_scope_import(path: pathlib.Path, module: str) -> bool:
+    """Whether ``path`` imports ``module`` at *module scope* (not inside a function).
+
+    A lazy import (the optional-extra pattern) sits inside a function, so this
+    distinguishes "the package is importable without the driver" from "the
+    driver is imported eagerly".
+    """
+    tree = ast.parse(path.read_text(), filename=str(path))
+    functions = {
+        child
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for child in ast.walk(node)
+    }
+    for node in ast.walk(tree):
+        if node in functions:
+            continue
         if isinstance(node, ast.Import):
             names = [a.name for a in node.names]
         elif isinstance(node, ast.ImportFrom):

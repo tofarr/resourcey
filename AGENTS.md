@@ -30,7 +30,7 @@ until the first release.
 
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
-  `04_simple_roles` — standalone
+  `04_simple_roles`, `05_full_rbac` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **`v2` reference app** (issue
@@ -49,8 +49,10 @@ until the first release.
   config-list key resource (`ApiKeysConfig` → `config_api_key_resource` /
   `config_api_key_view`) built from `APP_API_KEYS_*` — no auth table, no
   `DEPENDENCY_BUILDER_CLASS`
-  (the builder is constructed explicitly in `app.py`), and a `build_app` posture
-  guard. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
+  (the builder is constructed explicitly in `app.py`). The no-auth transport
+  default is named `OpenDependencyBuilder`, so `build_app` always passing the
+  API-key builder reads as the deliberate choice it is rather than a hidden
+  fallback. `04_simple_roles` is the **`v2` authorization app** (issue #132): the
   same message board, but with a per-app `Role` vocabulary carried on each API
   key (`APP_API_KEYS_<n>_ROLES_<m>`) and a single `RolePolicyResolver` mapping
   role -> policy (global + per-resource): `ADMIN` full access, `MODERATOR`
@@ -65,15 +67,25 @@ until the first release.
   The `users` surface is **admin-only** (no role maps a `User` grant; only
   `ADMIN`'s global `AllowAll` reaches it). Two fixed principals are seeded by
   the committed Alembic migration and by `simple_roles/seed.py` (the ids the
-  `.env` keys name). This is the identity-store half of Part 3 (full RBAC,
-  issue #133); stored groups / roles / per-request resolution remain later
-  rungs. `v2` does
+  `.env` keys name). This is 04's identity-store rung; the store-backed groups /
+  roles / per-request resolution land in `05_full_rbac`. `v2` does
   no `.env` loading, so its run/debug commands pass
-  `uvicorn --env-file .env` / `uv run --env-file .env`.
+  `uvicorn --env-file .env` / `uv run --env-file .env`. `05_full_rbac` is the
+  **`v2` store-backed RBAC app** (issue #133, Part 3 of the auth roadmap): the
+  same board, but the credential carries only a `principal_id` and the roles /
+  groups / permissions live in real `users` / `groups` / `group_users` /
+  `roles` / `group_roles` / `role_permissions` / `resource_acls` tables, resolved
+  **per request** by `RbacPolicyResolver` (group → role → permission, scoped to
+  the target resource) — `admin` full access, `viewer` read-only, `author`
+  read-only on `threads` but `Owner`-scoped (`author_id`) on `messages`, and a
+  `DenyAll` never overriding another role's grant (union model). Multiple roles
+  union their policies: `viewer` ∪ `author` reads all of `messages` but edits
+  only its own. A `seed` module populates the store; the whole RBAC set is also
+  served over the ordinary REST surface, with an `admin` grant on each table.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
-  8081 (01), 8082 (02), 8083 (03), 8084 (04).
+  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05).
 
 ## Core design principles
 
@@ -280,6 +292,62 @@ specs` and CI): the `Owner` scoping (own rows for read / by-id writes, unscoped
 create, denied anonymous), unknown-role / un-roled fail-closed defaults,
 per-resource scoping (a role reading all of X but only its own rows of Y), the
 union of several roles, and that a deny-only role never overrides a grant.
+
+### `v2/auth` full RBAC — the stored rung (issue #133)
+
+Part 3 replaces Part 2's app-level, credential-carried roles with a **store**.
+Three modules, all importing only `v2`:
+
+* `auth_rbac.py` — the ORM models + the exposed resource set, **model-first**
+  like every `v2` SQL resource. `User` (`id`/`email`/`username`/`enabled`),
+  `Group`, `GroupUser` (membership), `Role` (the stored counterpart of Part 2's
+  role strings), `GroupRole` (role assignment to a group), `RolePermission` (the
+  core RBAC unit: a `resource` name + a JSON-serialized `Policy`), and
+  `ResourceAcl` (the materialized per-object grant, keyed by
+  `(principal_id, resource_name)`). They live on a local `RbacBase` metadata.
+  `policy_to_json` / `utc_now` are the small helpers. `RBAC_MODELS` and
+  `rbac_resources(...)` expose the whole set as ordinary `SqlResource`s (so it
+  can be seeded / administered over REST); an app that wants to hide a table
+  registers a narrowing `ResourceView` instead.
+* `auth_rbac_store.py` — **`RbacStore`** (the read seam: `policies_for`,
+  `groups_for`, and the materialized-ACL `acl_ids` / `acl_id_subquery`) and its
+  SQL implementation **`SqlRbacStore`**. Resolution **collapses at the store**:
+  the query joins membership → role → permission filtered to the target
+  `resource`, with `SELECT DISTINCT` so roles sharing a policy collapse. The
+  session source is an `async_sessionmaker` **or** a zero-arg callable returning
+  one (sync or async), so a store can be built before the app lifecycle (a
+  `SqlSessionManager` only hands out makers once entered). `ACL_MAX_IDS = 100`
+  caps the enumeration path (v1's bound carried forward); beyond it the join /
+  subquery flavour is the answer. `policy_from_rows` skips a corrupt row rather
+  than crashing or over-denying.
+* `auth_rbac_resolver.py` — **`RbacPolicyResolver`**, Part 1's `PolicyResolver`
+  seam against the store: for each request it takes the authenticated
+  `Principal`, asks the store for the principal's groups and the resource-scoped
+  policies, binds membership onto any `GroupMember` policy, and returns them;
+  `AuthorizedService` OR-combines (union model — no deny-wins override; an
+  empty set is fail-closed; an anonymous principal resolves to `[]`).
+  `materialized_acl(...)` is the portable bridge that enumerates the (capped)
+  ids into an `Acl` policy. **Freshness is explicit**: `cache_ttl` (default
+  `None`) resolves every request, so an API key sees a membership change
+  immediately; a positive value bounds staleness to (at most) the credential's
+  own validation / refresh threshold. `invalidate(...)` is the write-through
+  hook.
+
+The vocabulary is Part 2's — `Owner`, `GroupMember`, `Acl`, plus the built-ins —
+so Parts 2 and 3 share one `Policy` set. `GroupMember` is the principal-level
+gate: membership is pre-bound by the resolver (`bind_member_groups`) and its
+`to_search_filter` selects `on_match` / `on_mismatch` (`on_create` for create);
+an unbound / empty target is fail-closed. `Acl` reduces to
+`AttrFilter(id_field, InFilter(values=...))` — the set leaf from #136, one `IN`
+predicate rather than a `K`-term `OR`.
+
+`specs/rbac.qnt` pins the store resolution + union laws (in `make specs` and
+CI): the policy reductions (`AllowAll` / `DenyAll` / `ReadOnly` / creator /
+group-member / ACL), the group → role → permission walk, per-resource scoping,
+`SELECT DISTINCT` collapse, fail-closed on unknown user / empty permission set,
+multiple roles unioning, deny never overriding a grant, same-attribute ACLs
+collapsing to one set, the set leaf agreeing with the join, the threshold
+bounding a membership change, and the caller-scoping derivation.
 
 ### Storage backends and the shared paging base
 
@@ -577,8 +645,10 @@ on `Manifest` (which stays a plain container) and with no lazy imports:
   ordinary FastAPI dependency whose author may declare any parameter FastAPI
   can wire (the `Request`, other `Depends(...)`, i.e. an auth dependency) — the
   same composition the `v1` builder used, so the seam covers authentication as
-  well as authorization. `DefaultDependencyBuilder` is the default: it builds
-  the resource's own service over the request-scoped `ctx` and yields it. The
+  well as authorization. `OpenDependencyBuilder` is the default: it applies
+  **no** authentication or authorization, building the resource's own service
+  over the request-scoped `ctx` and yielding it — so its name flags an
+  intentionally public app rather than masking a forgotten builder. The
   public `request_ctx(request)` helper owns the call-scoped mapping (the
   request-state key is `resourcey_ctx`), shared by every resource in one
   request. The builder lives here, not on the `Manifest`, because it is
@@ -951,18 +1021,103 @@ lifecycle (e.g. `MongoResource.ensure_indexes()`) still runs; register the
 **view**, not the inner (registering both double-enters the inner and mounts
 duplicate routes). The layer ranks gain `view` at the backend rank.
 
+### `v2/filestore` — pre-signed-URL files (issue #117)
+
+`src/resourcey/v2/filestore/` adds **file bytes** as a first-class resource
+without putting the bytes on a request path. The *metadata* (name, size, MIME
+type, checksum, the medium's ETag, status, opaque storage key) is an ordinary
+model-first `SqlResource`, so it gets the standard surface plus cache headers;
+the *bytes* live in a pluggable medium behind `FileStore`. The client transfers
+directly against a short-lived capability URL and the API only mints it — so
+authorization stays in the API while the storage medium (which cannot see the
+API's auth) moves the bytes.
+
+* `file_store.py` — `FileStore` (a `DiscriminatedUnionMixin`, `kind` = class
+  name) is the medium seam: `put` / `get` / `head` / `delete` (async, the
+  server-side fallback) plus `presign_put` / `presign_get` (sync: a native SigV4
+  computation for S3, a local JWE mint for SQL / local, neither blocking the
+  event loop). `StoredObject` is a `head` result (`key`, `size`, `content_type`,
+  `etag`, `updated_at`); `PresignedUrl` is the identical-shape handshake result
+  (`url`, `method`, `expires_at`, `headers`). A store is its own async context
+  manager, entered through the manifest's `managers=` slot exactly like a
+  `SqlSessionManager` / `MongoClientManager`, so its client lifecycle is tied to
+  the app.
+* `file_metadata.py` — the metadata model + `file_resource(store, ...)`. Two
+  guarantees are built in: **`updated_at`** is an ordinary column with
+  `default` / `onupdate`, so the DTO conventions make it framework-owned and it
+  appears in every response shape; **MIME type** (`content_type`) is a
+  first-class column. The cache policy is overridden to a strong **ETag** over
+  the projected bytes (the default last-modified would otherwise win, since the
+  read model carries `updated_at`). `key` and `status` are server-owned (absent
+  from every create / update request and, for `key`, every response); `etag` is
+  server-owned. `FileMetadataService` assigns the opaque key + `pending` status
+  on create, enforces the optional `max_size` cap (defaulted from
+  `FileStoreConfig.max_size`), and on delete removes the row *and* the object so
+  no orphan remains.
+* `local_file_store.py` — the default medium (single instance, dev, tests):
+  bytes under `root`, MIME type in a `.meta` sidecar (the filesystem records
+  none), ETag an MD5 of the bytes. Keys are opaque server-assigned hex, never
+  client paths: `..`, an absolute path, `~`, and an empty key are rejected and
+  the resolved path is re-checked to live under `root`.
+* `sql_file_store.py` — bytes in a dedicated `file_blobs` table (no second
+  system). The blob table is **storage, not a resource**: never registered and
+  never DTO-derived, so bytes cannot leak through a read model. The app owns the
+  schema (`create_blob_tables` for `create_all`, or Alembic against
+  `FileBlobBase`). The session source mirrors `SqlResource` (explicit
+  `session_factory=` wins; else resolve from `session_manager=` by
+  `connection_name`, defaulting to the process-wide manager).
+* `s3_file_store.py` — the production medium: native SigV4 pre-signed URLs
+  (`presign_*` is local, no network round trip) and client put/get/head/delete.
+  `boto3` is imported **lazily**, only when a real client is built (an explicit
+  `client=` is the escape hatch), so `v2/filestore` imports without the extra;
+  the optional dependency is `s3` (`resourcey[s3]`), and a single-`PUT` cap
+  applies (`S3_MAX_PUT_BYTES`; multipart is out of scope).
+* `signed_url.py` — the framework-signed capability for the SQL / local
+  mediums: `mint_signed_url` produces a JWE over `v2/encryption` carrying
+  `{"k": key, "op": "put"|"get"}` plus `iat` / `exp`, and `verify_signed_url`
+  rejects (400) a malformed / tampered token, an expired one (the codec does
+  **not** enforce `exp`, so the caller must), one presented for the wrong
+  operation, and one missing its key. The token is a **bearer capability**: it
+  is short-lived and bound to exactly one `(key, op)` pair, and the route
+  rejects a token for key A used on key B. `SignedFileStore` owns the mint /
+  verify helpers over an injected `EncryptionService` so a concrete medium only
+  implements the medium operations.
+* `file_config.py` — `FileStoreConfig` (a `BaseConfig` block): the medium is
+  selected with no code change through a `LazyField` (`MEDIUM_CLASS` names a
+  `FileStore` subclass; unset ⇒ `LocalFileStore`), and the selected medium's own
+  fields parse under the `MEDIUM_` prefix. TTLs / cap are
+  `APP_UPLOAD_URL_TTL_SECONDS` / `APP_DOWNLOAD_URL_TTL_SECONDS` / `APP_MAX_SIZE`
+  (the `*_seconds` spelling keeps them env-parseable; `*_ttl` properties expose
+  `timedelta`).
+* `file_routes.py` — `register_file_routes(app, store, resource=files, ...)`,
+  called after `create_app`. It adds **no** standard `Action` member — a presign
+  handshake is genuinely not one of the eight — and mounts the capability
+  transfer endpoints (`PUT` / `GET` `/_files/{key}`, hidden from the schema) plus
+  the metadata handshake: `POST {resource}/{id}/upload-url` mints a `put`,
+  `POST {resource}/{id}/complete` heads + verifies + flips to `ready` (and
+  records the ETag), `GET {resource}/{id}/download` mints a `get` for a `ready`
+  file. Minting is authorized through the resource's normal
+  `DependencyBuilder` seam, so a caller must be permitted to act on the file
+  before receiving a URL.
+
+`specs/filestore.qnt` pins the handshake: `create → upload → complete → ready`,
+the completion guards (object present, size matches, not already ready),
+`download` requires `ready`, `delete` removes the object, capability binding,
+distinct keys, and the `ready`-implies-uploaded / ETag-matches-medium /
+`pending`-has-no-ETag invariants. It is part of `make specs` and CI.
+
 ### `v2/` isolation
 
-`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/auth`,
-`v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and `v2/http` are
-**parallel** to the existing packages — nothing
+`v2/core`, `v2/sql`, `v2/mongo`, `v2/list`, `v2/view`, `v2/filestore`,
+`v2/auth`, `v2/encryption`, `v2/util`, `v2/config`, `v2/cache`, and `v2/http`
+are **parallel** to the existing packages — nothing
 existing is removed by them and they are not a refactor. The old `v1`
 packages/modules (and the old `resourcey.encryption`) stay in place until a
 follow-up removal. A test asserts that no module under `v2/` makes a **runtime**
 import of any `resourcey` code *outside* `v2/` (a static AST walk covering every
 v2 layer in one rule), `if TYPE_CHECKING:` imports still allowed. A second test
 pins the **layer ranks**
-`util < core < {sql, mongo, list, view, http, config, cache, encryption, auth}`:
+`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}`:
 no module imports a strictly-higher project layer at runtime. `v2/sql`, `v2/mongo`,
 and `v2/list` implement whatever small helpers they need locally rather than
 reaching for `resourcey.util`.
@@ -980,7 +1135,7 @@ They are copies, not moves — v1 `resourcey/util/` is untouched until it is
 removed. `v2/util` imports **no project package** at all (not even `v2/core`),
 so the layer ranks are a clean
 
-    util < core < {sql, mongo, list, http, config, cache, encryption, auth}
+    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}
 
 and `v2/core` may import `v2/util` — the dependency runs one way.
 

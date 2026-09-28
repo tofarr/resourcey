@@ -50,6 +50,7 @@ from resourcey.v2.util.search_filter import (
     EqFilter,
     GeFilter,
     GtFilter,
+    InFilter,
     LeFilter,
     LtFilter,
     NoMatchFilter,
@@ -131,6 +132,12 @@ def _le_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
 
 def _contains_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
     return {field: {"$regex": _escaped(value), "$options": "i"}}
+
+
+def _in_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+    # An empty set matches nothing (fail-closed); ``$in: []`` already matches no
+    # document, which is exactly the deny we want.
+    return {field: {"$in": [_encode(item) for item in value]}}
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +256,21 @@ register_operator(GeFilter, _ge_positive, _negated_of(_ge_positive))
 register_operator(LtFilter, _lt_positive, _negated_of(_lt_positive))
 register_operator(LeFilter, _le_positive, _negated_of(_le_positive))
 register_operator(ContainsFilter, _contains_positive, _negated_of(_contains_positive))
+register_operator(InFilter, _in_positive, _negated_of(_in_positive))
 
 
 def _assert_registries_are_complete() -> None:
     """Fail at import time if a standard node has no handler."""
     standard_logical = {AllFilter, NoMatchFilter, AndFilter, OrFilter, NotFilter}
-    standard_operators = {EqFilter, GtFilter, GeFilter, LtFilter, LeFilter, ContainsFilter}
+    standard_operators = {
+        EqFilter,
+        GtFilter,
+        GeFilter,
+        LtFilter,
+        LeFilter,
+        ContainsFilter,
+        InFilter,
+    }
     missing_logical = standard_logical - set(_LOGICAL_REGISTRY)
     missing_operators = standard_operators - set(_OPERATOR_REGISTRY)
     if missing_logical or missing_operators:

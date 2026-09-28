@@ -8,9 +8,13 @@ route-registration time, and used to build that resource's FastAPI dependency �
 so one setting can apply an authorization posture (e.g. wrap every service in a
 secured service) to the whole API without naming a resource.
 
-* :class:`DefaultDependencyBuilder` — the default. It produces a dependency
-  that opens the resource's own service over the request-scoped ``ctx`` and
-  yields it, i.e. today's behaviour with no wrapper.
+* :class:`OpenDependencyBuilder` — the default, and named for what it does: it
+  applies **no** authentication or authorization, producing a dependency that
+  opens the resource's own service over the request-scoped ``ctx`` and yields
+  it. The name is a warning label, not an incidental one: a route secured by
+  this builder is reachable by anyone, so it should appear deliberately in an
+  app's assembly (e.g. ``create_app(manifest, dependency_builder=OpenDependencyBuilder())``)
+  rather than be reached by forgetting to pass a securing builder.
 * An app-supplied builder — e.g. one that wraps every resource's service and
   composes an auth dependency. Because
   :meth:`DependencyBuilder.get_service_dependency` returns an ordinary
@@ -92,8 +96,13 @@ class DependencyBuilder(DiscriminatedUnionMixin, ABC):
         return None
 
 
-class DefaultDependencyBuilder(DependencyBuilder):
-    """The default builder: the resource's own service over the request-scoped ctx."""
+class OpenDependencyBuilder(DependencyBuilder):
+    """The no-auth default: the resource's own service over the request-scoped ctx.
+
+    Named ``Open`` because it secures nothing — a deployment must supply an
+    authenticating builder instead; this one exists so an intentionally public
+    app says so out loud.
+    """
 
     def get_service_dependency(self, resource: Resource[Any, Any]) -> Callable[..., object]:
         async def dependency(request: Request) -> AsyncIterator[Service[Any, Any]]:

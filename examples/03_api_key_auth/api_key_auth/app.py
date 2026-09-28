@@ -35,11 +35,12 @@ The authenticator holds the **inner** key resource (it needs ``find_by_key``)
 while the manifest registers the **view** over it (which hides the key digest
 from every response and from the query surface).
 
-Two safeguards stop the example from *appearing* to run while silently serving
-unauthenticated traffic. :func:`build_app` is the only assembly path and always
-wires the API-key builder; and :func:`_verify_posture` refuses to return an app
-whose builder is not the API-key one, so a future edit cannot quietly swap in
-the no-auth default.
+:func:`build_app` is the only assembly path and always wires the API-key builder
+via ``create_app(..., dependency_builder=builder)``, so every app it returns is
+authenticated. The framework's no-auth default is named
+:class:`~resourcey.v2.http.dependency_builder.OpenDependencyBuilder` precisely so
+that dropping that argument reads as an explicit choice to serve an open API
+rather than a quiet fallback.
 """
 
 from __future__ import annotations
@@ -54,7 +55,6 @@ from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.v2.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
 from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_config import ApiKeysConfig
-from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.core.resource import Resource
 from resourcey.v2.http.app import create_app
@@ -66,25 +66,6 @@ from resourcey.v2.sql.sql_resource import SqlResource
 default_session_manager = SqlSessionManager(SqlConfig.get_instance())
 
 
-def _verify_posture(builder: Any) -> None:
-    """Fail loudly unless the API-key posture is actually in effect.
-
-    ``create_app`` falls back to the no-auth ``DefaultDependencyBuilder`` when
-    no builder is supplied, so a misconfiguration would otherwise serve an open
-    API that merely looks secured. Raise an actionable error at import time
-    instead of leaving that to be discovered by a client.
-    """
-    if not isinstance(builder, AuthorizedDependencyBuilder) or not isinstance(
-        builder.authenticator, ApiKeyAuthenticator
-    ):
-        raise ResourceyConfigError(
-            "Example 03 requires the API-key posture: pass an "
-            "AuthorizedDependencyBuilder authenticating with an "
-            "ApiKeyAuthenticator to create_app "
-            f"(resolved {type(builder).__name__} instead)."
-        )
-
-
 def build_auth(
     keys: ApiKeysConfig | None = None,
 ) -> tuple[AuthorizedDependencyBuilder, Resource[Any, Any]]:
@@ -92,16 +73,14 @@ def build_auth(
 
     Returns the builder (which holds the **inner** key resource and reaches
     ``find_by_key`` on it) and the read-hiding view to register in the manifest.
-    The posture is verified here, so every caller gets an authenticated app or
-    an error rather than a silently open one. ``keys`` defaults to
-    ``ApiKeysConfig.get_instance()`` (the ``APP_API_KEYS_*`` environment).
+    ``keys`` defaults to ``ApiKeysConfig.get_instance()`` (the ``APP_API_KEYS_*``
+    environment).
     """
     api_keys = keys if keys is not None else ApiKeysConfig.get_instance()
     key_inner: Resource[Any, Any] = config_api_key_resource(api_keys)
     builder = AuthorizedDependencyBuilder(
         authenticator=ApiKeyAuthenticator(key_resource=key_inner)
     )
-    _verify_posture(builder)
     return builder, config_api_key_view(key_inner)
 
 

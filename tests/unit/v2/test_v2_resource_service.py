@@ -41,7 +41,7 @@ from resourcey.v2.core.service import (
     Update,
     assert_real_actions,
 )
-from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
+from resourcey.v2.http.dependency_builder import OpenDependencyBuilder
 from resourcey.v2.http.routes import _service_dependency
 from resourcey.v2.sql.db_config import DbConfig
 from resourcey.v2.sql.session_manager import (
@@ -521,7 +521,7 @@ async def test_unknown_connection_name_raises_at_first_use():
 
 async def test_service_dependency_yields_entered_service(resources):
     _maker, threads, _messages = resources
-    dependency = _service_dependency(threads, DefaultDependencyBuilder())
+    dependency = _service_dependency(threads, OpenDependencyBuilder())
 
     class _State:
         pass

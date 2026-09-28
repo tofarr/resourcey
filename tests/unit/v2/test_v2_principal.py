@@ -311,9 +311,9 @@ async def test_builder_principal_dependency_guards_and_appears_in_openapi():
 
 
 def test_default_builder_has_no_principal_dependency():
-    from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
+    from resourcey.v2.http.dependency_builder import OpenDependencyBuilder
 
-    assert DefaultDependencyBuilder().get_principal_dependency() is None
+    assert OpenDependencyBuilder().get_principal_dependency() is None
 
 
 async def test_real_app_mounts_the_security_scheme_on_every_route():

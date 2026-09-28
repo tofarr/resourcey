@@ -47,7 +47,7 @@ from typing import Annotated, Any, Literal, TypeVar, cast
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError, create_model
 from sqlalchemy.exc import IntegrityError
 
 from resourcey.v2.cache.cache_header import CacheHeader
@@ -66,7 +66,7 @@ from resourcey.v2.core.service import (
     Update,
     normalize_actions,
 )
-from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder, DependencyBuilder
+from resourcey.v2.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
 from resourcey.v2.util.missing import MISSING
 from resourcey.v2.util.naming import humanize, pluralize
 from resourcey.v2.util.search_filter import SEPARATOR, SearchFilter, build_filter
@@ -95,7 +95,7 @@ def register_routes(
 
     ``dependency_builder`` decides how the per-request service dependency is
     built (issue #86); it defaults to
-    :class:`~resourcey.v2.http.dependency_builder.DefaultDependencyBuilder`. It
+    :class:`~resourcey.v2.http.dependency_builder.OpenDependencyBuilder`. It
     is resolved on ``exposed``, so a projection's wrapped service is the
     projection's.
 
@@ -116,7 +116,7 @@ def register_routes(
         # Hidden resource: no routes. The (empty) router's tag is irrelevant.
         return APIRouter(tags=list(tags) if tags else [type(resource).__name__])
 
-    builder = dependency_builder if dependency_builder is not None else DefaultDependencyBuilder()
+    builder = dependency_builder if dependency_builder is not None else OpenDependencyBuilder()
     resource_name = _resource_display_name(exposed)
     router = APIRouter(
         tags=list(tags) if tags else [_default_tag(exposed)],
@@ -267,9 +267,9 @@ def _filter_dependency(
     parameters: list[inspect.Parameter] = []
     for attribute, (annotation, ops) in surface.items():
         for op in sorted(ops):
-            # ``contains`` is a substring test, so its value is always a string;
-            # the ordering / equality operators keep the field's own type.
-            value_annotation = str if op == "contains" else annotation
+            # ``contains`` / ``in`` take a string on the wire: ``contains`` is a
+            # substring test, and ``in`` is a comma-separated value list.
+            value_annotation = str if op in ("contains", "in") else annotation
             parameters.append(
                 inspect.Parameter(
                     f"{attribute}{SEPARATOR}{op}",
@@ -316,11 +316,42 @@ def _resolve_filters(
     clauses = []
     for name, value in values.items():
         attribute, sep, op = name.rpartition(SEPARATOR)
-        if sep and attribute:
-            clauses.append((attribute, op, value))
+        if not (sep and attribute):
+            continue
+        annotation = surface.get(attribute, (None, frozenset()))[0]
+        clauses.append((attribute, op, _coerce_filter_value(op, value, annotation)))
     if not clauses:
         return None
-    return build_filter(clauses)
+    try:
+        return build_filter(clauses)
+    except ValidationError as exc:
+        # A leaf's own validation (e.g. an ``in`` set over the cap) is bad input,
+        # not a server fault.
+        raise InvalidInputError(f"Invalid filter value: {exc}") from exc
+
+
+def _coerce_filter_value(op: str, value: Any, annotation: Any) -> Any:
+    """Coerce a wire filter value to the field's type.
+
+    ``in`` arrives as a comma-separated string (the transport types it as
+    ``str``); each item must be coerced to the column's type (UUID, int, ...)
+    before the ``IN`` predicate binds it, so a typed set filter accepts the same
+    string form a single-value filter already does. Every other operator is
+    already coerced by FastAPI via its typed query parameter.
+
+    A malformed item is an ``InvalidInputError`` (``400``), matching the ``422``
+    FastAPI gives a bad single-value param, rather than escaping as a ``500``.
+    """
+    if op != "in" or not isinstance(value, str):
+        return value
+    items = [part for part in (p.strip() for p in value.split(",")) if part]
+    if annotation is None:
+        return items
+    adapter = TypeAdapter(annotation)
+    try:
+        return [adapter.validate_python(item) for item in items]
+    except ValidationError as exc:
+        raise InvalidInputError(f"Invalid value for {op!r} filter: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

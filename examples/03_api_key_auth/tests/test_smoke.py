@@ -16,7 +16,6 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -34,10 +33,8 @@ from resourcey.v2.auth.auth_api_key import (
 )
 from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.core.errors import ResourceyConfigError
 from resourcey.v2.core.manifest import Manifest
 from resourcey.v2.http.app import create_app
-from resourcey.v2.http.dependency_builder import DefaultDependencyBuilder
 from resourcey.v2.sql.sql_resource import SqlResource
 
 # The key the tests present; the same value ``.env`` sets.
@@ -177,15 +174,3 @@ def test_build_auth_wires_the_api_key_builder() -> None:
     builder, _view = build_auth(_keys(_API_KEY))
     assert isinstance(builder, AuthorizedDependencyBuilder)
     assert isinstance(builder.authenticator, ApiKeyAuthenticator)
-
-
-def test_posture_guard_rejects_a_non_api_key_builder() -> None:
-    """The guard refuses the no-auth default, so the app cannot be silently open.
-
-    ``create_app`` falls back to ``DefaultDependencyBuilder`` when no builder is
-    supplied; this is what stops a future edit from passing one.
-    """
-    from api_key_auth.app import _verify_posture
-
-    with pytest.raises(ResourceyConfigError, match="API-key posture"):
-        _verify_posture(DefaultDependencyBuilder())
