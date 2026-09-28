@@ -1,11 +1,11 @@
 """The ``Message`` resource — the owner-scoped side of the board.
 
 The ORM model (in :mod:`simple_roles.models`) is the schema of record, so
-:class:`~resourcey.v2.sql.sql_resource.SqlResource` infers the DTO and the REST
+:class:`~resourcey.sql.sql_resource.SqlResource` infers the DTO and the REST
 models from it.
 
 ``author_id`` is not a client field: its column carries a
-:class:`~resourcey.v2.core.dto.DtoField` (in the column's ``info``, the
+:class:`~resourcey.core.dto.DtoField` (in the column's ``info``, the
 documented escape hatch) with ``in_create_request=False`` /
 ``in_update_request=False``. A caller therefore cannot choose or rewrite a row's
 owner; :class:`MessageService` stamps it on create from the authenticated
@@ -18,10 +18,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from resourcey.v2.auth.auth_principal import PRINCIPAL_CTX_KEY
-from resourcey.v2.sql.sql_resource import SqlResource
-from resourcey.v2.sql.sql_service import SqlService
-from resourcey.v2.util.missing import MISSING
+from resourcey.auth.auth_principal import PRINCIPAL_CTX_KEY
+from resourcey.sql.sql_resource import SqlResource
+from resourcey.sql.sql_service import SqlService
+from resourcey.util.missing import MISSING
 
 
 class MessageService(SqlService[Any, Any]):

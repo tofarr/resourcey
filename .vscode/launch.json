@@ -2,7 +2,7 @@
     // Debug configurations for the example apps under examples/.
     //
     // Each example is a standalone uv project with its own virtualenv
-    // (examples/<name>/.venv) and a committed .env. The v2 examples (01, 02, 03)
+    // (examples/<name>/.venv) and a committed .env. The examples (01, 02, 03)
     // do no .env loading, so their configs pass "--env-file .env" explicitly.
     // Each config sets "cwd" to the example directory — that is what makes the
     // example's database apply.
@@ -17,7 +17,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Debug 01 — Message Board (SQLite, v2)",
+            "name": "Debug 01 — Message Board (SQLite)",
             "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
@@ -41,7 +41,7 @@
             "preLaunchTask": "examples: sync 02_mongodb"
         },
         {
-            "name": "Debug 03 — API Key Auth (SQLite, v2)",
+            "name": "Debug 03 — API Key Auth (SQLite)",
             "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
@@ -53,7 +53,7 @@
             "preLaunchTask": "examples: migrate 03_api_key_auth"
         },
         {
-            "name": "Debug 04 — Simple Roles (SQLite, v2)",
+            "name": "Debug 04 — Simple Roles (SQLite)",
             "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
@@ -65,7 +65,7 @@
             "preLaunchTask": "examples: migrate 04_simple_roles"
         },
         {
-            "name": "Debug 05 — Full RBAC (SQLite, v2)",
+            "name": "Debug 05 — Full RBAC (SQLite)",
             "type": "debugpy",
             "request": "launch",
             "module": "uvicorn",
@@ -81,7 +81,7 @@
         {
             "name": "Debug all examples",
             "configurations": [
-                "Debug 01 — Message Board (SQLite, v2)",
+                "Debug 01 — Message Board (SQLite)",
                 "Debug 02 — Message Board (MongoDB, embedded)",
                 "Debug 03 — API Key Auth (SQLite)",
                 "Debug 04 — Simple Roles (SQLite)",

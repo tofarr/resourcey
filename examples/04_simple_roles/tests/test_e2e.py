@@ -36,10 +36,10 @@ from httpx import ASGITransport, AsyncClient
 from pydantic import SecretStr
 from sqlalchemy import update
 
-from resourcey.v2.auth.auth_api_key import API_KEY_HEADER_NAME
-from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
+from resourcey.auth.auth_api_key import API_KEY_HEADER_NAME
+from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
 from simple_roles.app import build_app
 from simple_roles.models import User
 from simple_roles.seed import ADMIN_ID, USER_ID
@@ -94,7 +94,7 @@ def _apply_migration(async_url: str) -> None:
 async def wired(
     tmp_path: Path, monkeypatch
 ) -> AsyncIterator[tuple[AsyncClient, SqlSessionManager]]:
-    """A fully wired, role-checked v2 REST client backed by a migrated SQLite file.
+    """A fully wired, role-checked REST client backed by a migrated SQLite file.
 
     Yields the client and the app's session manager, so a test can mutate the
     stored principals (e.g. disable one) on the same database the app reads.

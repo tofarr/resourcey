@@ -1,9 +1,9 @@
 """The ``User`` resource — the stored principal, served read-only.
 
 The ORM model (in :mod:`simple_roles.models`) is the schema of record, so
-:class:`~resourcey.v2.sql.sql_resource.SqlResource` infers the DTO and REST
+:class:`~resourcey.sql.sql_resource.SqlResource` infers the DTO and REST
 models from it. The resource is wrapped in a
-:class:`~resourcey.v2.view.resource_view.ResourceView` that narrows it to the
+:class:`~resourcey.view.resource_view.ResourceView` that narrows it to the
 read subset, so no write route is ever mounted — a ``User`` row is created by
 the seed script / migration, not through the public API.
 
@@ -12,7 +12,7 @@ role to a ``User`` grant and deliberately omits it from the public read defaults
 so only ``ADMIN`` (``AllowAll``) may read the collection. A ``USER`` /
 ``MODERATOR`` / anonymous caller searching ``/users`` gets an empty page and a
 by-id read is a 404 — existence is not leaked — because the
-:class:`~resourcey.v2.auth.auth_authorized_service.AuthorizedService` empties a
+:class:`~resourcey.auth.auth_authorized_service.AuthorizedService` empties a
 denied collection and hides a denied row.
 
 The authenticator holds the **inner** resource (to validate a key's principal
@@ -23,11 +23,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from resourcey.v2.core.resource import Resource
-from resourcey.v2.core.service import Action
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_resource import SqlResource
-from resourcey.v2.view.resource_view import ResourceView
+from resourcey.core.resource import Resource
+from resourcey.core.service import Action
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_resource import SqlResource
+from resourcey.view.resource_view import ResourceView
 from simple_roles.models import User
 
 # The read subset: a read-only resource advertises exactly these, so the

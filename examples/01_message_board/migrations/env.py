@@ -1,7 +1,7 @@
-"""Alembic environment for the v2 message-board example.
+"""Alembic environment for the message-board example.
 
 Unlike the v1 examples, this ``env.py`` does not import a resource manifest: in
-v2 the ORM models *are* the schema of record, so autogeneration diffs against
+here the ORM models *are* the schema of record, so autogeneration diffs against
 ``message_board.models.Base.metadata`` directly. Importing the models module is
 enough to register every table on that metadata.
 
@@ -9,7 +9,7 @@ The database URL comes from the same ``APP_SQL_CONNECTIONS_0_URL`` the app reads
 (so the migration and the running app cannot disagree), converted to its
 *synchronous* counterpart because Alembic drives a sync engine.
 
-Alembic needs the environment loaded (v2 does no .env loading): run it with
+Alembic needs the environment loaded (the framework does no .env loading): run it with
 ``uv run --env-file .env alembic ...`` or export ``APP_SQL_CONNECTIONS_0_URL``.
 """
 
@@ -37,7 +37,7 @@ def _database_url() -> str:
     if not url:
         raise RuntimeError(
             "Set APP_SQL_CONNECTIONS_0_URL (or sqlalchemy.url in alembic.ini) "
-            "before running Alembic; v2 does no .env loading. Try "
+            "before running Alembic; the framework does no .env loading. Try "
             "`uv run --env-file .env alembic ...`."
         )
     return _sync_database_url(url)

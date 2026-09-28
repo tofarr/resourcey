@@ -1,8 +1,8 @@
 """The ``Thread`` DTO + resource — the parent side of the message board (MongoDB).
 
-``v2``'s Mongo workflow is **DTO-first** (Mongo has no schema of record): the
-developer declares a :class:`~resourcey.v2.core.dto.DTO` and
-:class:`~resourcey.v2.mongo.mongo_resource.MongoResource` serves it. The DTO
+The framework's Mongo workflow is **DTO-first** (Mongo has no schema of record): the
+developer declares a :class:`~resourcey.core.dto.DTO` and
+:class:`~resourcey.mongo.mongo_resource.MongoResource` serves it. The DTO
 declaration drives the six REST models, the identifier, and the query surface
 (the read model *is* the filter / sort surface).
 
@@ -10,7 +10,7 @@ Unlike the SQL example (01), the identifier is a client-supplied ``UUID`` —
 MongoDB has no auto-increment — and there is no migration step: the schema is
 created implicitly on first write.
 
-The ``v2/core`` DTO conventions supply what the ``v1`` example hand-wrote: the
+The DTO conventions supply what the earlier example hand-wrote: the
 bare ``id: UUID`` gets a ``uuid4`` create default, ``created_at`` is set once on
 create, and ``updated_at`` is refreshed on every update — none of them appear in
 a request shape.
@@ -24,8 +24,8 @@ from uuid import UUID
 
 from pydantic import Field
 
-from resourcey.v2.core.dto import DTO
-from resourcey.v2.mongo.mongo_resource import MongoResource
+from resourcey.core.dto import DTO
+from resourcey.mongo.mongo_resource import MongoResource
 
 
 class ThreadDTO(DTO):

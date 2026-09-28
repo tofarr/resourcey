@@ -1,6 +1,6 @@
 ---
 name: config
-description: Typed environment-variable parsing via resourcey.v2.util.env_parser, BaseConfig's per-class instance cache, and polymorphic models via DiscriminatedUnionMixin. Load when working on configuration or polymorphic models.
+description: Typed environment-variable parsing via resourcey.util.env_parser, BaseConfig's per-class instance cache, and polymorphic models via DiscriminatedUnionMixin. Load when working on configuration or polymorphic models.
 version: "1.0.0"
 ---
 
@@ -8,25 +8,25 @@ version: "1.0.0"
 
 ## Layout (issue #82)
 
-Configuration lives in `v2`:
+Configuration lives in the `util` and `config` layers:
 
-* `resourcey.v2.util.env_parser` — the env parser.
-* `resourcey.v2.util.models` — `DiscriminatedUnionMixin`.
-* `resourcey.v2.util.import_paths` — dotted-path resolution.
-* `resourcey.v2.config.config_base` — `BaseConfig`, `get_config_prefix`,
+* `resourcey.util.env_parser` — the env parser.
+* `resourcey.util.models` — `DiscriminatedUnionMixin`.
+* `resourcey.util.import_paths` — dotted-path resolution.
+* `resourcey.config.config_base` — `BaseConfig`, `get_config_prefix`,
   `set_config_prefix`, `_reset_config_prefix`.
-* `resourcey.v2.config.lazy_field` — `LazyField`.
-* `resourcey.v2.core.errors` — `ResourceyError`, `ResourceyConfigError`.
+* `resourcey.config.lazy_field` — `LazyField`.
+* `resourcey.core.errors` — `ResourceyError`, `ResourceyConfigError`.
 
-`v2/util` imports the `Missing` sentinel from `v2/util/missing`; there is
-exactly one sentinel in `v2`. Nothing under `v2/` may import `resourcey` code
-outside `v2/` at runtime.
+`util` imports the `Missing` sentinel from `util/missing`; there is exactly one
+sentinel in the framework. `util` is the bottom layer and imports no other
+project package.
 
-There is no `FrameworkConfig` / `MigrationConfig` / `DependencyBuilder` in `v2`
-yet, and no `config_runtime` / `RESOURCEY_CONFIG_CLASS` — those come in a later
-PR. The framework config *blocks* that do exist live with what they configure:
-`resourcey.v2.sql.sql_config.SqlConfig` and
-`resourcey.v2.encryption.encryption_config.EncryptionKeysConfig`.
+There is no `FrameworkConfig` / `MigrationConfig` / `DependencyBuilder` yet, and
+no `config_runtime` / `RESOURCEY_CONFIG_CLASS` — those come in a later PR. The
+framework config *blocks* that do exist live with what they configure:
+`resourcey.sql.sql_config.SqlConfig` and
+`resourcey.encryption.encryption_config.EncryptionKeysConfig`.
 
 ## Composing an app config
 
@@ -58,7 +58,7 @@ config = MyAppConfig.get_instance()
 ```
 
 * `get_instance()` reads `os.environ` only, via
-  `from_env(cls, prefix=cls.get_prefix())`. `v2` does **no** `.env` loading
+  `from_env(cls, prefix=cls.get_prefix())`. The framework does **no** `.env` loading
   (there is no `config_loader` module) — use `uvicorn --env-file` or a wrapper
   script to populate the environment.
 * The cache is **per class** and typed to the owning class:
@@ -83,11 +83,11 @@ config = MyAppConfig.get_instance()
 * `generate_env_template()` emits a commented, valued `.env` template.
 
 Configuration is read from the environment. There is no `set_config` /
-`get_config_as` / `RESOURCEY_CONFIG_CLASS` in v2.
+`get_config_as` / `RESOURCEY_CONFIG_CLASS`.
 
 ## SQL connections (issue #74)
 
-`resourcey.v2.sql.sql_config.SqlConfig` holds `sql_connections: list[DbConfig]`,
+`resourcey.sql.sql_config.SqlConfig` holds `sql_connections: list[DbConfig]`,
 parsed as `APP_SQL_CONNECTIONS_<n>_NAME` / `_URL` / `_PASSWORD`. `DbConfig`
 requires `name` (unique, non-empty) and carries an optional `SecretStr`
 `password` spliced into `url` by `database_url`. `SqlSessionManager(config)`
@@ -98,7 +98,7 @@ uses it (or an explicit `session_factory=` escape hatch).
 
 ## Encryption keys (issue #111)
 
-`resourcey.v2.encryption.encryption_config.EncryptionKeysConfig` (a
+`resourcey.encryption.encryption_config.EncryptionKeysConfig` (a
 `BaseConfig`) parses `APP_ENCRYPTION_KEY_ID` / `_VALUE` and
 `APP_DECRYPTION_KEYS_<n>_ID` / `_VALUE`. The `encryption_key` field has a
 default factory, so an absent key degrades to a loud dev default
@@ -115,13 +115,13 @@ without wiring one in; `encryption_service=` overrides.
 
 ## env_parser
 
-`resourcey.v2.util.env_parser` converts environment variables
+`resourcey.util.env_parser` converts environment variables
 into typed pydantic models. It supports complex nested types and polymorphism
 that `pydantic-settings` cannot express. Vendored from the OpenHands Software
 Agent SDK — **no runtime dependency on the SDK**.
 
 ```python
-from resourcey.v2.util.env_parser import from_env, to_env
+from resourcey.util.env_parser import from_env, to_env
 
 db_config = from_env(DatabaseConfig, prefix="DB")
 template = to_env(DatabaseConfig(host="localhost", port=5432), prefix="DB")
@@ -135,7 +135,7 @@ template = to_env(DatabaseConfig(host="localhost", port=5432), prefix="DB")
 
 ## DiscriminatedUnionMixin
 
-`resourcey.v2.util.models.DiscriminatedUnionMixin` adds a
+`resourcey.util.models.DiscriminatedUnionMixin` adds a
 `kind` discriminator to a pydantic model. Subclasses are serialized with
 `kind = ClassName`; on deserialization the correct subclass is chosen. Abstract
 bases (those extending `abc.ABC`) are never instantiated directly. Vendored

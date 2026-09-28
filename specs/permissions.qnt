@@ -1,4 +1,4 @@
-// permissions.qnt — formal spec for v2 authorization policies (issue #127).
+// permissions.qnt — formal spec for authorization policies (issue #127).
 //
 // A Policy reduces to a Filter: which rows a principal may touch for an action.
 // This first rung carries one principal-independent policy per resource, so the
@@ -30,7 +30,7 @@
 //     keeps its shared-cache optimisation.
 
 module permissions {
-  // The standard resource actions, mirroring v2/core/service.Action.
+  // The standard resource actions, mirroring core/service.Action.
   type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
 
   // A filter over rows: All (match everything) or None (match nothing). Mirrors

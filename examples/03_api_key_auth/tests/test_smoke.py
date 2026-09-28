@@ -1,4 +1,4 @@
-"""Smoke tests for the v2 API-key-auth example app.
+"""Smoke tests for the API-key-auth example app.
 
 The whole example is one posture: environment-configured API keys secure every
 resource. These tests pin the outcomes a client can get — correct key (allowed),
@@ -26,16 +26,16 @@ from sqlalchemy.pool import StaticPool
 from api_key_auth.app import build_auth
 from api_key_auth.message import MessageResource
 from api_key_auth.models import Base, Message, Thread
-from resourcey.v2.auth.auth_api_key import (
+from resourcey.auth.auth_api_key import (
     API_KEY_CHALLENGE,
     API_KEY_HEADER_NAME,
     ApiKeyAuthenticator,
 )
-from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
-from resourcey.v2.auth.auth_config import ApiKeyConfig, ApiKeysConfig
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.http.app import create_app
-from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
+from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.core.manifest import Manifest
+from resourcey.http.app import create_app
+from resourcey.sql.sql_resource import SqlResource
 
 # The key the tests present; the same value ``.env`` sets.
 _API_KEY = "example-api-key"

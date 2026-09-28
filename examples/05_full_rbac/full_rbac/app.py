@@ -3,7 +3,7 @@
 Builds on the simple-roles example (04) and replaces its **app-level, credential-
 carried** role vocabulary with a **store**: real ``users`` / ``groups`` /
 ``group_users`` / ``roles`` / ``group_roles`` / ``role_permissions`` tables, and a
-:class:`~resourcey.v2.auth.auth_rbac_resolver.RbacPolicyResolver` that resolves a
+:class:`~resourcey.auth.auth_rbac_resolver.RbacPolicyResolver` that resolves a
 request's principal through **group → role → permission** *per request*.
 
 The credential (an API key) carries only the principal's ``user_id``; the roles,
@@ -19,7 +19,7 @@ The board has the same asymmetry as example 04:
   their grants: read all of ``messages`` but update / delete only its own rows.
 
 ``RolePermission`` rows are the core RBAC unit — a ``resource`` name plus a
-serialized :class:`~resourcey.v2.auth.auth_policy.Policy`. Multiple matching
+serialized :class:`~resourcey.auth.auth_policy.Policy`. Multiple matching
 policies are OR-combined (the union model — a ``DenyAll`` never overrides a
 grant; an empty set is fail-closed).
 
@@ -27,7 +27,7 @@ Run with::
 
     uvicorn full_rbac.app:app --env-file .env
 
-Note the ``--env-file``: ``v2`` does no ``.env`` loading of its own.
+Note the ``--env-file``: the framework does no ``.env`` loading of its own.
 """
 
 from __future__ import annotations
@@ -39,20 +39,20 @@ from fastapi import FastAPI
 
 from full_rbac.message import MessageResource
 from full_rbac.models import Message, Thread
-from resourcey.v2.auth.auth_api_key import ApiKeyAuthenticator
-from resourcey.v2.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
-from resourcey.v2.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
-from resourcey.v2.auth.auth_config import ApiKeysConfig
-from resourcey.v2.auth.auth_policy import AllowAll, Owner, ReadOnly
-from resourcey.v2.auth.auth_rbac import rbac_resource_paths, rbac_resources
-from resourcey.v2.auth.auth_rbac_resolver import RbacPolicyResolver
-from resourcey.v2.auth.auth_rbac_store import SqlRbacStore
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.core.resource import Resource
-from resourcey.v2.http.app import create_app
-from resourcey.v2.sql.session_manager import SqlSessionManager
-from resourcey.v2.sql.sql_config import SqlConfig
-from resourcey.v2.sql.sql_resource import SqlResource
+from resourcey.auth.auth_api_key import ApiKeyAuthenticator
+from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
+from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
+from resourcey.auth.auth_config import ApiKeysConfig
+from resourcey.auth.auth_policy import AllowAll, Owner, ReadOnly
+from resourcey.auth.auth_rbac import rbac_resource_paths, rbac_resources
+from resourcey.auth.auth_rbac_resolver import RbacPolicyResolver
+from resourcey.auth.auth_rbac_store import SqlRbacStore
+from resourcey.core.manifest import Manifest
+from resourcey.core.resource import Resource
+from resourcey.http.app import create_app
+from resourcey.sql.session_manager import SqlSessionManager
+from resourcey.sql.sql_config import SqlConfig
+from resourcey.sql.sql_resource import SqlResource
 
 # The stored role names. Stored as plain strings (the ``roles`` table's ``name``
 # column), unlike example 04's per-app ``StrEnum`` — a store is server-authoritative,
@@ -94,11 +94,11 @@ def build_auth(
 
     The builder authenticates with an API key (whose ``principal_id`` is the
     stored user id) and resolves policies through
-    :class:`~resourcey.v2.auth.auth_rbac_resolver.RbacPolicyResolver`, backed by
+    :class:`~resourcey.auth.auth_rbac_resolver.RbacPolicyResolver`, backed by
     the same database the board uses. ``session_source`` is either an
     ``async_sessionmaker`` or a zero-arg callable returning one (sync or async) —
     the lazy form lets a caller pass a
-    :class:`~resourcey.v2.sql.session_manager.SqlSessionManager` that only hands
+    :class:`~resourcey.sql.session_manager.SqlSessionManager` that only hands
     out makers once entered.
 
     ``cache_ttl_seconds`` is the explicit freshness knob: ``None`` (the default)

@@ -1,16 +1,16 @@
 # Example 1 — The Message Board
 
-The first end-to-end example application built on `resourcey`, ported to the
-**v2** API. Two resources — `Thread` and `Message` — with a one-to-many relation,
+The first end-to-end example application built on `resourcey`'s current API.
+Two resources — `Thread` and `Message` — with a one-to-many relation,
 wired into a runnable FastAPI app with auto-generated REST endpoints, an Alembic
 migration, and a SQLite database by default.
 
 This is the canonical "does this framework actually work for a real app?" smoke
 test, and the reference a new user reads first.
 
-## v2 in one paragraph
+## Model-first in one paragraph
 
-`v2` is **model-first**: you declare the SQLAlchemy ORM model you already work
+The framework is **model-first**: you declare the SQLAlchemy ORM model you already work
 with, and the framework infers the DTO and the six REST models from it. There is
 no DTO-to-model generation and no declarative base to manage — SQLAlchemy is the
 schema of record, so migrations and foreign keys stay SQLAlchemy's / Alembic's
@@ -69,7 +69,7 @@ uv sync
 # 2. Apply the database migration (creates message_board.db)
 uv run --env-file .env alembic upgrade head
 
-# 3. Start the server. v2 does no .env loading, so pass the file explicitly.
+# 3. Start the server. The framework does no .env loading, so pass the file explicitly.
 uv run uvicorn message_board.app:app --env-file .env --reload --port 8081
 # → Uvicorn running on http://127.0.0.1:8081
 ```
@@ -103,7 +103,7 @@ uv run pytest
 
 ### Configuration
 
-The example uses the v2 config blocks with a committed `.env`. v2 reads the
+The example uses the config blocks with a committed `.env`. The framework reads the
 process-wide `APP` prefix and does **no** `.env` loading, so every command that
 needs config passes `--env-file .env` (or exports the vars).
 

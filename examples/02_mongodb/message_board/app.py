@@ -1,12 +1,12 @@
 """Message-board MongoDB example app entry point.
 
-The ``v2`` app is assembled from three pieces, mirroring the SQL example (01):
+The app is assembled from three pieces, mirroring the SQL example (01):
 
-* a :class:`~resourcey.v2.mongo.mongo_client.MongoClientManager` (the clients,
+* a :class:`~resourcey.mongo.mongo_client.MongoClientManager` (the clients,
   built from ``APP_MONGO_CONNECTIONS_*``);
-* a :class:`~resourcey.v2.core.manifest.Manifest` (the resource set and its
+* a :class:`~resourcey.core.manifest.Manifest` (the resource set and its
   lifecycle);
-* the :func:`~resourcey.v2.http.app.create_app` free function (which builds a
+* the :func:`~resourcey.http.app.create_app` free function (which builds a
   runnable FastAPI app wired to the manifest's lifespan, routes, error handlers,
   and CORS).
 
@@ -14,7 +14,7 @@ Run with::
 
     uvicorn message_board.app:app --env-file .env --port 8082
 
-Note the ``--env-file``: ``v2`` does no ``.env`` loading of its own, so the
+Note the ``--env-file``: the framework does no ``.env`` loading of its own, so the
 process environment must be populated by the caller (uvicorn, or a shell).
 
 The same manager instance is threaded into every resource **and** listed in the
@@ -29,11 +29,11 @@ from __future__ import annotations
 
 from message_board.message import MessageDTO, MessageResource
 from message_board.thread import ThreadDTO, ThreadResource
-from resourcey.v2.core.manifest import Manifest
-from resourcey.v2.http.app import create_app
-from resourcey.v2.http.dependency_builder import DependencyBuilder
-from resourcey.v2.mongo.mongo_client import MongoClientManager
-from resourcey.v2.mongo.mongo_config import MongoConfig
+from resourcey.core.manifest import Manifest
+from resourcey.http.app import create_app
+from resourcey.http.dependency_builder import DependencyBuilder
+from resourcey.mongo.mongo_client import MongoClientManager
+from resourcey.mongo.mongo_config import MongoConfig
 
 # One manager for the whole app; it is entered by the manifest's lifecycle.
 default_client_manager = MongoClientManager(MongoConfig.get_instance())

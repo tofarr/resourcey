@@ -20,7 +20,7 @@ reads are public reference data on this board. Roles gate the **writes**:
 
 The headline rule is the `USER` row: *read all of `messages`, but only update /
 delete its own rows*. It is expressed by the union of two policies — `ReadOnly`
-(reads every row) and [`Owner`](../../src/resourcey/v2/auth/auth_policy.py)
+(reads every row) and [`Owner`](../../src/resourcey/auth/auth_policy.py)
 (`Owner(owner_field="author_id")`, scopes the by-id writes). The union model
 OR-combines them, and `OR(All, own) == All` for reads, so the two compose to
 **read-all / write-own**.
@@ -32,7 +32,7 @@ resource-level `ReadOnly` default.
 
 All of the rules live in `ROLE_POLICIES` in
 [`simple_roles/app.py`](simple_roles/app.py) — a
-[`RolePolicyResolver`](../../src/resourcey/v2/auth/auth_role.py) with a global
+[`RolePolicyResolver`](../../src/resourcey/auth/auth_role.py) with a global
 map, a per-resource map, and per-resource defaults. Nothing else in the app
 encodes a permission.
 
@@ -132,7 +132,7 @@ uv run --env-file .env alembic upgrade head   # creates the schema and seeds the
 uv run --env-file .env uvicorn simple_roles.app:app --port 8084
 ```
 
-`v2` does no `.env` loading of its own, so the `--env-file` flag (uvicorn's, or
+the framework does no `.env` loading of its own, so the `--env-file` flag (uvicorn's, or
 `uv run --env-file`) is what populates the process environment.
 
 ## Tests

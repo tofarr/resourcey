@@ -3,7 +3,7 @@
 A message belongs to a single thread via ``thread_id`` (a UUID). Unlike the SQL
 example (which uses a real foreign-key column), the Mongo variant stores
 ``thread_id`` as a plain scalar field — MongoDB has no server-side FK
-constraints, so the relation is enforced at the application level. ``v2``'s
+constraints, so the relation is enforced at the application level. The framework's
 projection is plain-columns-only (relationship / nested projection is a known
 limitation), which is exactly what this example needs.
 
@@ -18,8 +18,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from resourcey.v2.core.dto import DTO
-from resourcey.v2.mongo.mongo_resource import MongoResource
+from resourcey.core.dto import DTO
+from resourcey.mongo.mongo_resource import MongoResource
 
 
 class MessageDTO(DTO):

@@ -1,4 +1,4 @@
-"""Smoke test for the v2 MongoDB message-board example app.
+"""Smoke test for the MongoDB message-board example app.
 
 Exercises the full HTTP path (create thread → create message → filter) against
 the embedded ``mongomock`` client via httpx's ASGI transport. Storage is injected
@@ -15,13 +15,13 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from message_board.app import build_app
-from resourcey.v2.mongo.mongo_client import MongoClientManager
-from resourcey.v2.mongo.mongo_config import MongoConfig, MongoConnectionConfig
+from resourcey.mongo.mongo_client import MongoClientManager
+from resourcey.mongo.mongo_config import MongoConfig, MongoConnectionConfig
 
 
 @pytest_asyncio.fixture
 async def client() -> AsyncIterator[AsyncClient]:
-    """A v2 app over an isolated embedded Mongo database."""
+    """An app over an isolated embedded Mongo database."""
     database = f"smoke_{uuid.uuid4().hex}"
     manager = MongoClientManager(
         MongoConfig(

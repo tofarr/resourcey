@@ -1,6 +1,6 @@
 """Alembic environment for the full-RBAC example.
 
-In v2 the ORM models *are* the schema of record, so autogeneration diffs against
+Here the ORM models *are* the schema of record, so autogeneration diffs against
 ``full_rbac.models.Base.metadata`` directly (no resource manifest, no
 ``ResourceyBase``). ``Base.metadata`` folds in the framework's RBAC tables (see
 ``full_rbac/models.py``), so one migration covers the board *and* the RBAC store.
@@ -8,7 +8,7 @@ In v2 the ORM models *are* the schema of record, so autogeneration diffs against
 The database URL comes from the same ``APP_SQL_CONNECTIONS_0_URL`` the app reads,
 converted to its *synchronous* counterpart because Alembic drives a sync engine.
 
-Alembic needs the environment loaded (v2 does no .env loading): run it with
+Alembic needs the environment loaded (the framework does no .env loading): run it with
 ``uv run --env-file .env alembic ...`` or export ``APP_SQL_CONNECTIONS_0_URL``.
 """
 
@@ -35,7 +35,7 @@ def _database_url() -> str:
     if not url:
         raise RuntimeError(
             "Set APP_SQL_CONNECTIONS_0_URL (or sqlalchemy.url in alembic.ini) "
-            "before running Alembic; v2 does no .env loading. Try "
+            "before running Alembic; the framework does no .env loading. Try "
             "`uv run --env-file .env alembic ...`."
         )
     return _sync_database_url(url)
