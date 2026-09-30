@@ -48,11 +48,15 @@ from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, statu
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError, create_model
-from sqlalchemy.exc import IntegrityError
 
 from resourcey.cache.cache_header import CacheHeader
 from resourcey.core.dto import RestModels, request_to_dto
-from resourcey.core.errors import ConflictError, InvalidInputError, UnsupportedFilterError
+from resourcey.core.errors import (
+    ConflictError,
+    InvalidInputError,
+    UnsupportedFilterError,
+    iter_driver_conflicts,
+)
 from resourcey.core.resource import Resource
 from resourcey.core.service import (
     DEFAULT_LIMIT,
@@ -1154,12 +1158,16 @@ def register_error_handlers(app: FastAPI) -> None:
     * ``ForbiddenError`` -> 403 ``forbidden``
     * ``InvalidInputError`` -> 400 ``invalid_input``
     * ``UnsupportedFilterError`` -> 501 ``unsupported_filter``
-    * ``ConflictError`` / ``IntegrityError`` -> 409 ``conflict``
+    * ``ConflictError`` and any registered driver-conflict type -> 409 ``conflict``
     * ``ServiceError`` -> 500 ``internal_error``
     * Pydantic validation failures keep FastAPI's 422 (its default handler).
 
-    The wider ``ResourceyError`` hierarchy (issue #83) extends this same
-    function.
+    A driver's own exception (e.g. SQLAlchemy's ``IntegrityError``) is mapped
+    through the registry in :mod:`resourcey.core.errors`: the backend that owns
+    the driver registers it, so this transport maps the ``409`` **without
+    importing the driver** — otherwise every app would pull SQLAlchemy in via
+    ``http``. The wider ``ResourceyError`` hierarchy (issue #83) extends this
+    same function.
     """
 
     @app.exception_handler(NotFoundError)
@@ -1182,9 +1190,19 @@ def register_error_handlers(app: FastAPI) -> None:
     async def _conflict_error(_: Request, exc: ConflictError) -> JSONResponse:
         return _error_response("conflict", str(exc), status.HTTP_409_CONFLICT)
 
-    @app.exception_handler(IntegrityError)
-    async def _conflict(_: Request, exc: IntegrityError) -> JSONResponse:
-        return _error_response("conflict", str(exc.orig), status.HTTP_409_CONFLICT)
+    # A backend's own driver exception (SQLAlchemy's ``IntegrityError``, …) is
+    # mapped through the core registry, so ``http`` names no driver type.
+    for _exc_type, _message in iter_driver_conflicts():
+
+        def _make_driver_handler(
+            message: Any,
+        ) -> Any:
+            async def _driver_conflict(_: Request, exc: Exception) -> JSONResponse:
+                return _error_response("conflict", message(exc), status.HTTP_409_CONFLICT)
+
+            return _driver_conflict
+
+        app.add_exception_handler(_exc_type, _make_driver_handler(_message))
 
     @app.exception_handler(ServiceError)
     async def _internal(_: Request, exc: ServiceError) -> JSONResponse:

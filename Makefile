@@ -48,6 +48,8 @@ specs:
 	quint test specs/filestore.qnt --main=filestore --match "^(handshakeReachesReady|completeRequiresAnObject|completeVerifiesSize|completeIsIdempotentOnce|downloadRequiresReady|uploadRequiresARow|keysAreUnique|capabilityIsBound|deleteRemovesTheObject|invariantsHold)$$"
 	quint typecheck specs/background_tasks.qnt
 	quint test specs/background_tasks.qnt --main=background_tasks --match "^(matchesIsFieldConjunction|domDowOrRule|matchIsUnrestrictedWhenNeitherDayFieldIsSet|scheduleNoneNeverTicks|onlyEnabledTasksTick|selectionIsPerTask|aRaisingTaskDoesNotStopTheLoop|invariantsHold)$$"
+	quint typecheck specs/realtime.qnt
+	quint test specs/realtime.qnt --main=realtime --match "^(writeEmitsMatchingEvent|readEmitsNothing|undeclaredActionEmitsNothing|aRolledBackWriteEmitsNothing|hiddenFieldNeverAppears|outOfScopeIsNeverDelivered|noPolicySubscriberReceivesNothing|fanOutReachesEveryAdmittedSubscriber|subscribersAreIndependent|invariantsHold)$$"
 
 clean:
 	rm -rf .mypy_cache .ruff_cache .pytest_cache .coverage htmlcov coverage.xml

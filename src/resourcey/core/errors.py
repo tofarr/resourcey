@@ -15,9 +15,50 @@ base), ``ResourceyConfigError``, and the request-shape errors
 error hierarchy (``ServiceError``, ``NotFoundError``, …) is tracked separately
 and stays with the code that raises it (see ``core/service.py``).
 
+It also holds the small **driver-conflict registry** (issue #17 prerequisite):
+a backend that owns an optional driver registers its driver's integrity /
+duplicate-key exception type here, so the transport maps it to the ``409``
+envelope *without importing the driver*. An eager driver import on the
+``http`` path would make the driver a hard dependency of every app — the very
+thing that stops "optional extras" from meaning anything.
+
 This module is part of the ``core`` bottom layer: it imports no other
 ``resourcey`` module.
 """
+
+from __future__ import annotations
+
+from collections.abc import Callable
+
+# A driver exception's message builder: given the driver exception, return the
+# text for the ``conflict`` envelope. Typed against ``Exception`` so ``core``
+# never names a driver type (and so the registered type satisfies FastAPI's
+# ``add_exception_handler``, which accepts only ``Exception`` subclasses).
+DriverConflictHandler = Callable[[Exception], str]
+
+_driver_conflict_handlers: list[tuple[type[Exception], DriverConflictHandler]] = []
+
+
+def register_driver_conflict(exc_type: type[Exception], handler: DriverConflictHandler) -> None:
+    """Register a driver exception type the transport maps to ``409 conflict``.
+
+    A backend that owns an optional driver (e.g. ``sql`` and SQLAlchemy's
+    ``IntegrityError``) registers here — from the module that owns the driver, at
+    import time — so ``resourcey.http`` maps the failure to the storage-neutral
+    envelope without importing the driver itself. ``handler`` receives the
+    exception and returns the envelope's message (typically the driver's own
+    ``orig`` text).
+    """
+    _driver_conflict_handlers.append((exc_type, handler))
+
+
+def iter_driver_conflicts() -> tuple[tuple[type[Exception], DriverConflictHandler], ...]:
+    """The registered ``(exception type, message builder)`` pairs, in registration order.
+
+    Read by the transport's error-handler registration; a snapshot (a tuple) so
+    iterating it while a backend registers is safe.
+    """
+    return tuple(_driver_conflict_handlers)
 
 
 class ResourceyError(Exception):

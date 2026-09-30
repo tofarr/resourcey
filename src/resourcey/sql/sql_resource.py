@@ -24,11 +24,12 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pydantic import BaseModel
 from sqlalchemy import Column
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.cache.cache_defaults import DefaultCacheStrategyMixin
 from resourcey.core.dto import DTO, RestModels
-from resourcey.core.errors import InvalidInputError
+from resourcey.core.errors import InvalidInputError, register_driver_conflict
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action, Service, ServiceError
 from resourcey.encryption.encryption_service import get_encryption_service
@@ -49,6 +50,11 @@ if TYPE_CHECKING:
 
 T = TypeVar("T", bound=BaseModel)
 K = TypeVar("K")
+
+# The SQL backend owns SQLAlchemy, so it registers the driver's integrity error
+# with the transport's conflict registry (issue #17 prerequisite). Importing
+# ``sql`` is what pulls SQLAlchemy in; ``http`` maps the 409 without naming it.
+register_driver_conflict(IntegrityError, lambda exc: str(getattr(exc, "orig", exc)))
 
 
 class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
