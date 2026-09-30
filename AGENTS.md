@@ -1117,12 +1117,64 @@ the completion guards (object present, size matches, not already ready),
 distinct keys, and the `ready`-implies-uploaded / ETag-matches-medium /
 `pending`-has-no-ETag invariants. It is part of `make specs` and CI.
 
+### `tasks` — background tasks (issue #15)
+
+`src/resourcey/tasks/` adds a **background-task** seam without touching `core`.
+A :class:`BackgroundTask` is a named, async callable (`async def __call__`)
+whose schedule / enabled flag come from a **polymorphic config value object**
+injected through its constructor; the base task and the config are both
+`DiscriminatedUnionMixin`s keyed by `kind` (the class name), so a deployment
+selects a concrete config by name without importing every subclass.
+
+* `task.py` — `BackgroundTaskConfig` (`name` / `schedule` / `enabled`, active by
+  default) and the abstract `BackgroundTask`. The central block
+  `BackgroundTasksConfig` (`BaseConfig`, `APP_BACKGROUND_TASKS_*`) carries
+  `background_tasks_timezone`, `background_tasks_scheduler_enabled`, and the
+  list-of-nested per-task entries (`APP_BACKGROUND_TASKS_<n>_KIND` /
+  `_NAME` / `_SCHEDULE` / `_ENABLED` plus kind fields). `for_task(name, kind)`
+  returns the matching entry — which must already be the expected `kind`, so a
+  mis-paired entry fails loudly — or a defaults-only `kind(name=name)`, so a
+  task works unconfigured. `get_task(name)` rejects a duplicate name;
+  `assert_unique_names` is the loud-at-startup check the scheduler runs.
+* `cron.py` — the **internal** 5-field parser (no new dependency): `*`, `*/n`,
+  fixed, ranges, steps over ranges, comma lists, month / weekday names, and the
+  `@`-shorthands (`@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly`).
+  `CronSchedule.next_fire(after)` rolls forward a whole unit at a time
+  (month / day / hour / minute) to the first matching minute; `matches(moment)`
+  is the field conjunction, with the **DOM/DOW-both-restricted OR** rule. A
+  seconds field, `@reboot`, and quartz extensions (`?` / `L` / `W`) are out of
+  scope; a malformed expression raises `CronError`.
+* `scheduler.py` — `BackgroundTaskScheduler` is an ordinary `Manifest`
+  **manager**, entered through the existing `managers=` slot, so `core` is
+  unchanged. Its constructor rejects duplicate names and parses every schedule
+  (a typo fails at startup, not silently never firing). `__aenter__` starts one
+  asyncio loop (unless `background_tasks_scheduler_enabled` is false);
+  `__aexit__` cancels the loop and any in-flight runs. The loop sleeps to the
+  earliest next fire and calls `tick(now)` — a public, deterministic seam that
+  starts each active scheduled task via `_start`, **concurrently** and tracked.
+  A raising task is caught / logged and the loop continues; there are no
+  retries and no mutual exclusion (a task that must not overlap enforces that
+  itself). `run_once(name?)` runs one task by name — even a disabled one — or
+  every enabled task, once, without starting the loop;
+  `scheduler_from_manifest(manifest)` finds the scheduler among the managers.
+* `cli.py` — `python -m resourcey tasks list|run <module:manifest> [name]`
+  (restoring the `python -m resourcey` dispatcher removed in #143 / #147, now
+  `src/resourcey/__main__.py`). `list` prints each task's schedule / enabled
+  flag; `run` enters the manifest's managers **except** the scheduler, so a
+  storage-backed task finds a live engine while the periodic loop stays dormant
+  — the external-cron / `kubectl` path.
+
+`specs/background_tasks.qnt` pins the match conjunction, the DOM/DOW OR rule,
+that a `schedule=None` task never ticks but still runs by name, that only
+enabled tasks tick, and that selection is independent per task (so a failure
+never changes another's selection). It is part of `make specs` and CI.
+
 ### Framework isolation
 
-`core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `encryption`,
-`util`, `config`, `cache`, and `http` are the framework, and the earlier
-packages/modules have been removed. A test pins the **layer ranks**
-`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}`:
+`core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `tasks`,
+`encryption`, `util`, `config`, `cache`, and `http` are the framework, and the
+earlier packages/modules have been removed. A test pins the **layer ranks**
+`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks}`:
 no module imports a strictly-higher project layer at runtime (a static AST walk
 covering every layer in one rule), `if TYPE_CHECKING:` imports still allowed.
 `sql`, `mongo`, and `list` implement whatever small helpers they need locally
@@ -1140,7 +1192,7 @@ keyset cursor codec, extracted from `sql` by issue #116) and the shared
 `util` imports **no project package** at all (not even `core`),
 so the layer ranks are a clean
 
-    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth}
+    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks}
 
 and `core` may import `util` — the dependency runs one way.
 

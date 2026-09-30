@@ -230,7 +230,7 @@ transport layer, where the per-request service dependency is built through a
 configurable `DependencyBuilder` (its default opens the resource's own service
 over the request-scoped `ctx`). `util` is the bottom layer: an isolation test
 pins the layer ranks `util < core < {sql, mongo, list, view, filestore, http,
-config, cache, encryption, auth}`, so no module imports a higher layer at
+config, cache, encryption, auth, tasks}`, so no module imports a higher layer at
 runtime.
 
 ### Configuration — env-driven edges

@@ -44,6 +44,7 @@ _LAYER_RANK = {
     "view": 2,
     "auth": 2,
     "filestore": 2,
+    "tasks": 2,
 }
 
 
@@ -278,6 +279,13 @@ def test_the_view_files_exist_without_an_init():
     names = {p.name for p in sorted(view.glob("*.py"))}
     assert names == {"resource_view.py", "view_service.py"}
     assert not (view / "__init__.py").exists()
+
+
+def test_the_tasks_files_exist_without_an_init():
+    tasks = FRAMEWORK_DIR / "tasks"
+    names = {p.name for p in sorted(tasks.glob("*.py"))}
+    assert names == {"cli.py", "cron.py", "scheduler.py", "task.py"}
+    assert not (tasks / "__init__.py").exists()
 
 
 def test_the_auth_files_exist_without_an_init():
