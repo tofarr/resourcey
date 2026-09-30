@@ -86,6 +86,21 @@
             "options": { "cwd": "${workspaceFolder}/examples/06_filestore" },
             "dependsOn": "examples: sync 06_filestore",
             "problemMatcher": []
+        },
+        {
+            "label": "examples: sync 07_oauth",
+            "type": "shell",
+            "command": "uv sync",
+            "options": { "cwd": "${workspaceFolder}/examples/07_oauth" },
+            "problemMatcher": []
+        },
+        {
+            "label": "examples: migrate 07_oauth",
+            "type": "shell",
+            "command": "uv run --env-file .env alembic upgrade head",
+            "options": { "cwd": "${workspaceFolder}/examples/07_oauth" },
+            "dependsOn": "examples: sync 07_oauth",
+            "problemMatcher": []
         }
     ]
 }

@@ -1,0 +1,52 @@
+[project]
+name = "oauth-example"
+version = "0.1.0"
+description = "Example 07 — OAuth / OIDC federation with a BFF session (SQLite by default)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # resourcey from GitHub main. A standalone copy of this example installs
+    # this git dependency directly; inside the resourcey repository the
+    # [tool.uv.sources] override below redirects it to the parent checkout
+    # (your branch or PR) instead.
+    "resourcey @ git+https://github.com/tofarr/resourcey.git@main",
+    # SQLite async driver — the example defaults to a local SQLite file.
+    "aiosqlite>=0.22",
+    # Alembic is driven directly against the ORM metadata.
+    "alembic>=1.13",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["oauth_example"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv.sources]
+# Resolve resourcey from the parent checkout when running inside the resourcey
+# repository. A standalone copy does not find that path; run
+# `uv sync --no-sources` there to fall back to the git dependency above.
+resourcey = { path = "../..", editable = true }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["resourcey", "oauth_example"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

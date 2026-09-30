@@ -285,14 +285,30 @@ wrapper script to populate the environment.
 ## Authorization (users, groups, roles)
 
 `resourcey.auth` secures a resource through two composable seams: an
-`Authenticator` (API-key and cookie authenticators) that produces a
-`Principal`, and a `PolicyResolver` that maps that principal to `Policy` rules.
+`Authenticator` (API-key, cookie, and OAuth / OIDC authenticators) that produces
+a `Principal`, and a `PolicyResolver` that maps that principal to `Policy` rules.
 The built-ins are `AllowAll` / `DenyAll` / `ReadOnly` / `Owner`, with a
 per-app role vocabulary (`RolePolicyResolver`) and a store-backed RBAC resolver
 (`RbacPolicyResolver`) over `users` / `groups` / `roles` / `role_permissions` /
 `resource_acls` tables. An `AuthorizedService` enforces the reduced filter per
 action: a denied create is `403`, an out-of-scope read/update/delete is `404`,
 and a denied search/count yields an empty page / `0`.
+
+### OAuth / OIDC (external identity providers)
+
+The OAuth method (issue #151) federates to an external IdP. `OAuthAuthenticator`
+verifies an `Authorization: Bearer` token — issuer-keyed client lookup, JWKS
+signature check, and `alg` pinned to the client row's allowlist (no algorithm
+confusion) — maps `(iss, sub)` through an `ExternalIdentity` table to a local
+user, and validates that user against the local store (a missing / disabled user
+is rejected: the local store stays authoritative over the IdP). Provider
+configuration and tokens are **resources**, so they live in the environment
+(`APP_OAUTH_CLIENTS_<n>_*`) or the database; the refresh token lives only,
+encrypted at rest, in an `oauth_tokens` table, and refresh is serialized across
+processes with a lease / compare-and-swap column. `configure_oauth(...)` wires
+the whole subsystem in one call and `register_oauth_routes` mounts the
+interactive login / callback / refresh flow (BFF session, PKCE). See
+[`examples/07_oauth`](examples/07_oauth).
 
 ## Configuration
 

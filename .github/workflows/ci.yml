@@ -68,6 +68,8 @@ jobs:
         run: quint test specs/filestore.qnt --main=filestore --match "^(handshakeReachesReady|completeRequiresAnObject|completeVerifiesSize|completeIsIdempotentOnce|downloadRequiresReady|uploadRequiresARow|keysAreUnique|capabilityIsBound|deleteRemovesTheObject|invariantsHold)$"
       - name: Run background-task spec tests
         run: quint test specs/background_tasks.qnt --main=background_tasks --match "^(matchesIsFieldConjunction|domDowOrRule|matchIsUnrestrictedWhenNeitherDayFieldIsSet|scheduleNoneNeverTicks|onlyEnabledTasksTick|selectionIsPerTask|aRaisingTaskDoesNotStopTheLoop|invariantsHold)$"
+      - name: Run oauth spec tests
+        run: quint test specs/oauth.qnt --main=oauth --match "^(failClosedOnNoClientTest|aValidTokenAuthenticates|issuerAndAudienceAreChecked|expiryIsChecked|algorithmIsPinnedNoConfusion|identityIsFailClosed|localUserStoreIsAuthoritativeTest|absentIsNotInvalidTest|refreshSerializesAcrossCallers|invariantsHold)$"
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
@@ -90,6 +92,8 @@ jobs:
             name: full-rbac (stored users/groups/roles)
           - example: examples/06_filestore
             name: filestore (pre-signed upload/download)
+          - example: examples/07_oauth
+            name: oauth (OIDC federation + BFF session)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4

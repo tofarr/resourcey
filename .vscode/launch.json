@@ -87,6 +87,18 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "preLaunchTask": "examples: migrate 06_filestore"
+        },
+        {
+            "name": "Debug 07 — OAuth (SQLite)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["oauth_example.app:app", "--env-file", ".env", "--port", "8087"],
+            "cwd": "${workspaceFolder}/examples/07_oauth",
+            "python": "${workspaceFolder}/examples/07_oauth/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 07_oauth"
         }
     ],
     "compounds": [
@@ -98,7 +110,8 @@
                 "Debug 03 — API Key Auth (SQLite)",
                 "Debug 04 — Simple Roles (SQLite)",
                 "Debug 05 — Full RBAC (SQLite)",
-                "Debug 06 — File Store (local medium, SQLite)"
+                "Debug 06 — File Store (local medium, SQLite)",
+                "Debug 07 — OAuth (SQLite)"
             ],
             "stopAll": true
         }
