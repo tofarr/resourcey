@@ -68,6 +68,8 @@ jobs:
         run: quint test specs/filestore.qnt --main=filestore --match "^(handshakeReachesReady|completeRequiresAnObject|completeVerifiesSize|completeIsIdempotentOnce|downloadRequiresReady|uploadRequiresARow|keysAreUnique|capabilityIsBound|deleteRemovesTheObject|invariantsHold)$"
       - name: Run background-task spec tests
         run: quint test specs/background_tasks.qnt --main=background_tasks --match "^(matchesIsFieldConjunction|domDowOrRule|matchIsUnrestrictedWhenNeitherDayFieldIsSet|scheduleNoneNeverTicks|onlyEnabledTasksTick|selectionIsPerTask|aRaisingTaskDoesNotStopTheLoop|invariantsHold)$"
+      - name: Run realtime spec tests
+        run: quint test specs/realtime.qnt --main=realtime --match "^(writeEmitsMatchingEvent|readEmitsNothing|undeclaredActionEmitsNothing|aRolledBackWriteEmitsNothing|hiddenFieldNeverAppears|outOfScopeIsNeverDelivered|noPolicySubscriberReceivesNothing|fanOutReachesEveryAdmittedSubscriber|subscribersAreIndependent|invariantsHold)$"
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100

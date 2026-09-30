@@ -45,6 +45,7 @@ _LAYER_RANK = {
     "auth": 2,
     "filestore": 2,
     "tasks": 2,
+    "realtime": 2,
 }
 
 
@@ -309,8 +310,48 @@ def test_the_auth_files_exist_without_an_init():
     assert not (auth / "__init__.py").exists()
 
 
+def test_the_realtime_files_exist_without_an_init():
+    realtime = FRAMEWORK_DIR / "realtime"
+    names = {p.name for p in sorted(realtime.glob("*.py"))}
+    assert names == {
+        "realtime_channel.py",
+        "realtime_config.py",
+        "realtime_event.py",
+        "realtime_notifying_service.py",
+        "realtime_redis_channel.py",
+        "realtime_routes.py",
+    }
+    assert not (realtime / "__init__.py").exists()
+
+
+def test_realtime_never_imports_redis_at_module_scope():
+    """``RedisChannel`` imports its optional driver lazily, behind the ``redis`` extra."""
+    offenders = [
+        str(p.relative_to(FRAMEWORK_DIR))
+        for p in sorted((FRAMEWORK_DIR / "realtime").rglob("*.py"))
+        if _module_scope_import(p, "redis")
+    ]
+    assert offenders == []
+
+
+def test_http_never_imports_realtime_or_a_driver_at_runtime():
+    """``http`` must not import ``realtime`` (the app supplies the socket) or a driver.
+
+    The realtime socket is mounted by the app *after* ``create_app``, mirroring
+    ``register_file_routes``; and no optional driver (SQLAlchemy, redis, …) may
+    be imported on the ``http`` path, or "optional extras" would be a fiction.
+    """
+    http_dir = FRAMEWORK_DIR / "http"
+    for module in ("resourcey.realtime", "sqlalchemy", "redis"):
+        offenders = [
+            str(p.relative_to(FRAMEWORK_DIR))
+            for p in sorted(http_dir.rglob("*.py"))
+            if _module_scope_import(p, module)
+        ]
+        assert offenders == [], f"http imports {module} at module scope: {offenders}"
+
+
 def test_view_never_imports_a_backend():
-    """``view`` is storage-agnostic: it wraps any backend but imports none."""
     backends = ("resourcey.sql", "resourcey.mongo", "resourcey.list")
     offenders = [
         str(p.relative_to(FRAMEWORK_DIR))

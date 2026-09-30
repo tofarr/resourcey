@@ -29,6 +29,14 @@ out a resource (e.g. anonymous reads of one endpoint) is a one-line override
 without re-implementing the wiring: :meth:`with_posture` returns a copy with only
 the posture changed.
 
+The builder also assembles the optional **realtime** emitter (issue #17): when a
+``channel`` is supplied, each resource's service is wrapped in a
+:class:`~resourcey.realtime.realtime_notifying_service.NotifyingService`
+*before* the authorization wrapper, so the stack is
+``AuthorizedService(NotifyingService(inner))`` — authorize first, then notify —
+and only a permitted, committed write emits an event. With no ``channel`` (the
+default) no realtime surface exists and no realtime code runs.
+
 The builder caches its ``AuthResult`` on the request-scoped ctx and stores it so
 :func:`~resourcey.auth.auth_principal.current_principal` reads the same result
 downstream. After authentication the resource's own service is opened over the
@@ -61,6 +69,8 @@ from resourcey.auth.auth_principal import (
 from resourcey.core.resource import Resource
 from resourcey.core.service import Service
 from resourcey.http.dependency_builder import DependencyBuilder, request_ctx
+from resourcey.realtime.realtime_channel import Channel
+from resourcey.realtime.realtime_notifying_service import NotifyingService
 
 
 class Posture(StrEnum):
@@ -90,6 +100,14 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
     authenticator: Authenticator = ApiKeyAuthenticator()
     policy_resolver: PolicyResolver = AllowAllResolver()
     posture: Posture = Posture.REQUIRED
+    channel: Channel | None = None
+    """An optional realtime channel (issue #17).
+
+    When set, each resource's service is wrapped in a
+    :class:`~resourcey.realtime.realtime_notifying_service.NotifyingService`
+    before authorization, so a permitted, committed write publishes an event.
+    ``None`` (the default) adds no realtime surface.
+    """
 
     def with_posture(self, posture: Posture) -> AuthorizedDependencyBuilder:
         """A copy of this builder with only ``posture`` changed.
@@ -130,8 +148,10 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
             authenticate = required_principal(self.authenticator)
 
         policy_resolver = self.policy_resolver
+        channel = self.channel
         id_field = resource.get_id_field()
-        resource_name = type(resource).__name__
+        resource_name = resource.get_resource_path()
+        read_model = resource.get_rest_models().read_response
 
         async def dependency(
             request: Request,
@@ -146,6 +166,17 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
             # leaves unscoped.
             ctx[PRINCIPAL_CTX_KEY] = principal
             inner = await resource.get_service(ctx)
+            # Realtime (issue #17) sits *inside* authorization, so only a
+            # permitted write reaches the emitter and only a committed write
+            # publishes: AuthorizedService(NotifyingService(inner)).
+            if channel is not None:
+                inner = NotifyingService(
+                    inner,
+                    channel=channel,
+                    resource_name=resource_name,
+                    read_model=read_model,
+                    id_field=id_field,
+                )
             service: Service[Any, Any] = AuthorizedService(
                 inner,
                 policies=policies,

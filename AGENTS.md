@@ -190,7 +190,11 @@ lives beside the API-key code in **`src/resourcey/auth/`**:
   returns the strict/lenient principal dependency the transport adds to every
   route as a `dependencies=[...]` entry, so the authenticator's OpenAPI security
   scheme is declared without changing the route signature. The resolved policy
-  set replaces #127's one-policy-per-app assumption.
+  set replaces #127's one-policy-per-app assumption. An optional `channel=`
+  (issue #17) additionally wraps each service in a `NotifyingService` *before*
+  authorization — `AuthorizedService(NotifyingService(inner))` — so only a
+  permitted, committed write emits a realtime event; `None` (the default) adds
+  no realtime surface.
 
 ### `auth` authentication — the principal pipeline (issue #131)
 
@@ -700,8 +704,10 @@ return DTO instances, so the response is **projected** onto the REST model
 (issue #92) — see the `cache` section below. The service dependency is built
 through the configured `DependencyBuilder` behind the one private helper
 (`_service_dependency`). The error envelope maps only what
-the framework has now — `NotFoundError`→404, `IntegrityError`→409,
-`ServiceError`→500,
+the framework has now — `NotFoundError`→404, `ServiceError`→500,
+`ConflictError`→409 (and any **driver-conflict** type a backend registered in
+`core/errors.py`, so a driver's own exception maps to the same `409` without
+`http` importing the driver — issue #17 prerequisite),
 pydantic→422 (kept by FastAPI) — and #83 extends the same function. The
 service's `serialization_context()` (issue #118) is threaded into
 `_project` / `_dump` / `_header_for`, so the wire body (and the ETag that
@@ -1169,16 +1175,111 @@ that a `schedule=None` task never ticks but still runs by name, that only
 enabled tasks tick, and that selection is independent per task (so a failure
 never changes another's selection). It is part of `make specs` and CI.
 
+### `realtime` — the optional push channel (issue #17)
+
+`src/resourcey/realtime/` adds a **server-push** capability without touching
+`core`: a resource emits a typed event when it changes, an optional WebSocket
+transport delivers those events to subscribed clients, and a pluggable
+:class:`Channel` carries them (in-process by default, over **Redis pub/sub** in
+a cluster). It is deliberately *not* a storage backend and *not* a standard
+`Action` — it is a transport-level capability that hangs off existing seams
+(the `Service` the write happens in, the `DependencyBuilder` that already
+carries auth, the "extra routes after `create_app`" precedent from `filestore`).
+An app that adds nothing gets **no** realtime surface and **no** new runtime
+dependency.
+
+* `realtime_event.py` — **`ResourceEvent`** (frozen Pydantic) is the change
+  vocabulary: `resource` (the REST path, also the subscription key), `kind`
+  (`EventKind.CREATED` / `UPDATED` / `DELETED`), `id` (the wire form),
+  `timestamp` (UTC), and `item` — the **read-model projection**
+  (`get_rest_models().read_response`), never the internal DTO / storage row, so
+  a field hidden by a `ResourceView` cannot leak through the stream any more
+  than through a REST body. The vocabulary is **write-only**: `event_kind_for_action`
+  maps `create` / `update` / `delete` to their kinds and every read-like action
+  (and `batch_edit`, which fans out per edit) to `None` — a read event would fire
+  on the hottest path and let an unauthenticated reader drive fan-out; the
+  reconnect reconcile is a normal REST `search`.
+* `realtime_channel.py` — **`Channel`** (a `DiscriminatedUnionMixin`, so a
+  deployment selects it by `kind` = class name) is the publish seam:
+  `async publish(event)` and `subscribe() -> AsyncIterator[ResourceEvent]`, and
+  it is its own async context manager so its client lifetime ties to the app
+  through the manifest's `managers=` slot. **`InMemoryChannel`** is the
+  single-process default and the proof the seam is storage-agnostic (mirroring
+  how `list` is "the list *is* the storage"): each `subscribe` returns a fresh
+  **bounded** `asyncio.Queue` (drop-**oldest** on overflow, so one slow
+  subscriber cannot grow an unbounded server-side buffer — the dropped event is
+  what a client reconciles anyway).
+* `realtime_redis_channel.py` — **`RedisChannel`** bridges *processes* over
+  `redis.asyncio` pub/sub: each instance publishes to one Redis channel and
+  re-delivers to *its own* local subscribers, re-applying *their* policies
+  locally (a policy is never serialized to Redis — a process must not trust
+  another's filtering). `redis` is imported **lazily** (only when a real client
+  is built; an explicit `client=` is the escape hatch), exactly as `filestore`
+  imports `boto3` lazily, so `realtime` imports without the extra and a missing
+  driver fails with an actionable `ImportError` naming `resourcey[redis]`. The
+  client is owned by `__aenter__` / `__aexit__` when the channel built it; an
+  injected one is left open. Delivery is **at-most-once, unordered, no replay** —
+  pub/sub drops an event for a down / disconnected instance, and there is no
+  offset to resume from.
+* `realtime_notifying_service.py` — **`NotifyingService`** wraps a resource's
+  own `Service` (like `AuthorizedService` / `ViewService`) and publishes **after**
+  a successful `create` / `update` / `delete` / `batch_edit` — never before, so a
+  rolled-back write emits nothing. It composes with the existing wrappers, so the
+  stack is `AuthorizedService(NotifyingService(inner))` (authorize first, then
+  notify): a caller not permitted to write never reaches the emitter. A
+  `batch_edit` fans out one event per *applied* edit (a `None` create / update
+  position emits nothing; a `delete` emits `deleted` with no item). It delegates
+  the storage lifetime to the inner service (honouring "whoever opens the storage
+  owns its commit and close", and not double-closing an inner it was handed
+  already entered) and delegates `serialization_context()` / `response_is_private()`.
+* `realtime_config.py` — **`RealtimeConfig`** (a `BaseConfig` block) selects the
+  channel with no code change through a `LazyField` (`CHANNEL_CLASS` names a
+  `Channel` subclass; unset ⇒ `InMemoryChannel`), the selected channel's own
+  fields parse under the `CHANNEL_` prefix (e.g. `CHANNEL_URL`), and
+  `heartbeat_seconds` tunes the socket keepalive.
+* `realtime_routes.py` — `add_realtime(app, manifest, *, channel=...,
+  dependency_builder=..., config=..., path="/ws")`, called **after**
+  `create_app` (mirroring `register_file_routes`). It mounts one WebSocket route
+  (adding no `Action` member) and refuses to mount when the builder is not wired
+  to the *same* channel (a loud `ResourceyConfigError`, not silent
+  no-delivery). The socket is an **authorization boundary**: the handshake is
+  authenticated with the *same* `Authenticator` seam as REST (absent ⇒ anonymous
+  only under an optional posture; presented-but-invalid ⇒ close `1008`); a
+  `subscribe` message names a resource + optional `<field>__<op>` filter, is
+  validated against the resource's **exposed actions** (a client cannot subscribe
+  to a resource it cannot read over REST) and parsed by the same filter surface
+  as REST; the subscriber's `PolicyResolver` policies are resolved once at
+  subscribe time and every candidate event is filtered against them **per
+  subscriber** before send — an out-of-scope row is never delivered and a
+  no-policy subscriber receives nothing (fail-closed). A `deleted` event carries
+  no row, so it is delivered only to an *unscoped* subscriber (a row-scoped one
+  reconciles via REST). The protocol is in-band JSON messages (`subscribe` /
+  `unsubscribe` / `ping`; `ack` / `error` / `event` / `ping`), so the filter tree
+  stays off the URL and the protocol can grow. `RealtimeRejectionError` is the
+  refusal type.
+
+`specs/realtime.qnt` pins the rules (in `make specs` and CI): the write-only
+vocabulary, that a read-like / undeclared action emits nothing (a read-only
+resource emits nothing), that a rolled-back write emits nothing, that the
+payload is the read-model projection (a hidden field never appears), per-subscriber
+policy filtering (out-of-scope never delivered, no-policy fail-closed, `deleted`
+fail-closed for a row-scoped subscriber), and fan-out to every admitted subscriber
+independently.
+
 ### Framework isolation
 
 `core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `tasks`,
-`encryption`, `util`, `config`, `cache`, and `http` are the framework, and the
-earlier packages/modules have been removed. A test pins the **layer ranks**
-`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks}`:
+`realtime`, `encryption`, `util`, `config`, `cache`, and `http` are the
+framework, and the earlier packages/modules have been removed. A test pins the
+**layer ranks**
+`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, realtime}`:
 no module imports a strictly-higher project layer at runtime (a static AST walk
 covering every layer in one rule), `if TYPE_CHECKING:` imports still allowed.
 `sql`, `mongo`, and `list` implement whatever small helpers they need locally
-rather than reaching for `util`.
+rather than reaching for `util`. `http` must not import `realtime` at runtime
+(the app supplies the socket via `add_realtime`, mirroring the `http` ↔ `auth`
+rule), and `realtime` imports no optional driver at module scope (`redis` is
+lazy).
 
 ### `util` and `config` — the config rung
 
@@ -1192,7 +1293,7 @@ keyset cursor codec, extracted from `sql` by issue #116) and the shared
 `util` imports **no project package** at all (not even `core`),
 so the layer ranks are a clean
 
-    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks}
+    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, realtime}
 
 and `core` may import `util` — the dependency runs one way.
 
@@ -1285,7 +1386,14 @@ covers build/parse failures only; `ServiceError` / `NotFoundError` stay in
 `core/service.py`. `InvalidInputError` / `UnsupportedFilterError` /
 `ConflictError` also live there — the storage-neutral errors a backend raises and
 the transport maps (`ConflictError` is what a backend's duplicate-key failure
-becomes, so the 409 mapping needs no driver import).
+becomes, so the 409 mapping needs no driver import). `core/errors.py` also holds
+the small **driver-conflict registry** (issue #17 prerequisite):
+`register_driver_conflict(exc_type, handler)` lets a backend that owns an
+optional driver register its driver's integrity / duplicate-key exception type
+at import time, and `iter_driver_conflicts()` is what `http/routes.py` reads to
+install the `409` handler — so the transport names no driver type and
+SQLAlchemy is not a hard dependency of every app (`sql/sql_resource.py` registers
+SQLAlchemy's `IntegrityError`).
 
 The isolation test covers **all** of `resourcey/`'s layers: it asserts the layer
 ranks, the core file set is exactly `{dto, errors, manifest, resource,
