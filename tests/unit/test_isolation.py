@@ -295,6 +295,7 @@ def test_the_triggers_files_exist_without_an_init():
     assert names == {
         "trigger.py",
         "trigger_config.py",
+        "trigger_runner.py",
         "triggered_dependency_builder.py",
         "triggered_resource.py",
         "triggered_service.py",

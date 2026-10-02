@@ -34,6 +34,7 @@ from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action, CacheStrategy, Service, ServiceError
 from resourcey.triggers.trigger import Trigger
+from resourcey.triggers.trigger_runner import TriggerRunner
 from resourcey.triggers.triggered_service import TriggeredService
 from resourcey.util.search_filter import SearchFilter
 from resourcey.util.sort_order import SortOrder
@@ -59,7 +60,7 @@ def _validate_on_edit(triggers: Sequence[Any]) -> None:
                 f"on_edit accepts only Trigger instances; got {type(trigger).__name__!r} "
                 "(a bare callable would lose the config fields Trigger exists to carry)."
             )
-    seen: list[Trigger] = []
+    seen: list[Trigger[Any, Any]] = []
     for trigger in triggers:
         if any(trigger == existing for existing in seen):
             raise ResourceyConfigError(f"Duplicate trigger in on_edit: {trigger!r}")
@@ -85,13 +86,18 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
         self,
         resource: Resource[T, K],
         *,
-        on_edit: Sequence[Trigger] = (),
+        on_edit: Sequence[Trigger[T, K]] = (),
         background: bool = True,
     ) -> None:
         _validate_on_edit(on_edit)
         self._inner = resource
         self._triggers = list(on_edit)
         self._background = background
+        # Shared across every per-request TriggeredService this resource
+        # hands out via get_service(); only closed by this resource's own
+        # __aexit__ (app shutdown), never by a per-request service's exit --
+        # see trigger_runner.py for why that distinction matters.
+        self._runner = TriggerRunner()
         self._entered = False
 
     # ------------------------------------------------------------------
@@ -151,9 +157,17 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
     # ------------------------------------------------------------------
 
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
-        """The inner service, wrapped so every configured trigger fires on success."""
+        """The inner service, wrapped so every configured trigger fires on success.
+
+        Every call shares this resource's one :class:`TriggerRunner`, so a
+        ``background=True`` run started by one request's service keeps
+        running after that (per-request) service exits — it is only
+        cancelled when this resource itself exits.
+        """
         inner = await self._inner.get_service(ctx)
-        return TriggeredService(inner, self._triggers, background=self._background)
+        return TriggeredService(
+            inner, self._triggers, background=self._background, runner=self._runner
+        )
 
     # ------------------------------------------------------------------
     # Registration / lifecycle (delegated to the inner resource)
@@ -173,5 +187,13 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        """Drain this resource's shared ``TriggerRunner``, then exit the inner.
+
+        This is the *app-scoped* exit a background trigger run is actually
+        cancelled at (once, here, when the resource itself shuts down) — not
+        at any single per-request ``TriggeredService``'s exit. See
+        ``trigger_runner.py``.
+        """
+        await self._runner.aclose()
         await self._inner.__aexit__(*exc)
         self._entered = False

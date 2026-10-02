@@ -384,6 +384,19 @@ def merge(a, b):
 
 
 def get_env_parser(target_type: type, parsers: dict[type, EnvParser]) -> EnvParser:
+    # A pydantic generic model parametrized with concrete type args (e.g. a
+    # ``Trigger[Any, Any]`` field annotation) is a *real, dynamically created*
+    # subclass of its generic origin -- not a typing generic alias, so
+    # ``get_origin()`` returns ``None`` for it and it would otherwise reach
+    # the ``DiscriminatedUnionMixin`` / ``BaseModel`` branches below
+    # unreduced. Walking *that* synthetic class's subclasses is always empty
+    # (every concrete kind derives from the unparameterized origin instead),
+    # so reduce to the origin first -- the same thing the ``origin and
+    # issubclass(origin, BaseModel)`` branch does for a typing generic alias.
+    generic_metadata = getattr(target_type, "__pydantic_generic_metadata__", None)
+    if generic_metadata and generic_metadata.get("origin") is not None:
+        target_type = generic_metadata["origin"]
+
     # Check if we have already defined a parser
     if target_type in parsers:
         return parsers[target_type]

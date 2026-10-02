@@ -9,12 +9,26 @@ change, and each kind is env-parseable by dotted path
 (``APP_TRIGGERS_<n>_TRIGGER_KIND=myapp.webhooks.NotifyWebhook``, the existing
 env-parser support for a ``kind``-discriminated field)::
 
-    class NotifyWebhook(Trigger):
+    class NotifyWebhook(Trigger[T, K]):
         url: str
 
         async def callback(self, edits, results) -> None:
             async with httpx.AsyncClient() as client:
                 await client.post(self.url, json=...)
+
+:class:`Trigger` is generic over the DTO type ``T`` and the identifier type
+``K``, the same two parameters
+:class:`~resourcey.core.service.Service` carries. A concrete trigger kind
+stays **open** over both (``class NotifyWebhook(Trigger[T, K])``, never
+``Trigger[SomeDto, int]``) — the same "leaf stays generic" shape
+:class:`~resourcey.util.search_filter.AllFilter` uses — because one configured
+trigger instance may be attached to resources serving different DTOs
+(:meth:`~resourcey.triggers.trigger_config.TriggerConfig.resource_triggers`
+groups by resource path, not by type), so it cannot bind ``T`` / ``K`` to one
+backend's types. :class:`~resourcey.triggers.triggered_service.TriggeredService`
+/ :class:`~resourcey.triggers.triggered_resource.TriggeredResource` are
+parameterized by the resource they wrap, so ``edits`` / ``results`` are typed
+precisely at the call site even though the trigger itself stays open.
 
 :meth:`callback` is invoked **once per edit operation** (never per item): a
 single ``create()`` normalizes to ``[Create(item=payload)]`` /
@@ -37,21 +51,32 @@ layers (``core`` / ``util``).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Generic, TypeVar
 
 from resourcey.core.service import Create, Delete, Update
 from resourcey.util.models import DiscriminatedUnionMixin
 
+T = TypeVar("T")
+K = TypeVar("K")
+
 # One operation's edits (normalized to a list, never per-item) and the inner
-# service's positionally aligned results. Typed loosely (``Any`` for the DTO /
-# id types): a trigger is configured once and may be attached to resources
-# serving different DTOs, so it cannot be bound to one backend's ``T`` / ``K``.
-TriggerEdits = list[Create[Any] | Update[Any] | Delete[Any]]
-TriggerResults = list[Any | None]
+# service's positionally aligned results, generic over the DTO type ``T`` and
+# the identifier type ``K`` so a concrete resource's trigger call site is typed
+# precisely (``TriggerEdits[ThreadDto, int]``); a trigger kind that stays open
+# over both (see the module docstring) uses them unparameterized.
+TriggerEdits = list[Create[T] | Update[T] | Delete[K]]
+TriggerResults = list[T | None]
 
 
-class Trigger(DiscriminatedUnionMixin, ABC):
+class Trigger(DiscriminatedUnionMixin, ABC, Generic[T, K]):
     """A configured callback fired after a successful edit operation.
+
+    Generic over the DTO type ``T`` and the identifier type ``K`` — the same
+    two parameters :class:`~resourcey.core.service.Service` carries — so
+    :meth:`callback`'s ``edits`` / ``results`` are typed precisely wherever a
+    resource's concrete types are known, while a concrete trigger kind stays
+    open over both (see the module docstring) since one configured instance
+    may serve resources with different DTOs.
 
     Subclasses declare whatever pydantic fields their delivery channel needs
     (a webhook's ``url``, a pub/sub publisher's ``channel``, …) and implement
@@ -61,7 +86,7 @@ class Trigger(DiscriminatedUnionMixin, ABC):
     """
 
     @abstractmethod
-    async def callback(self, edits: TriggerEdits, results: TriggerResults) -> None:
+    async def callback(self, edits: TriggerEdits[T, K], results: TriggerResults[T]) -> None:
         """Run after a successful edit operation.
 
         Called **only on success** (an inner exception fires no trigger) and

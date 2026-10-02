@@ -20,6 +20,27 @@ resource that already supplies its own ``on_edit`` (a
 :class:`~resourcey.triggers.triggered_resource.TriggeredResource` instance) is
 never wrapped a second time: the constructor list wins.
 
+Background runs and app-scoped draining
+----------------------------------------
+``get_service_dependency(resource)`` is called **once per resource, at
+registration** (``register_routes`` asserts this), so the per-resource
+``dependency`` closure it returns is reused by every request that resource
+receives. A :class:`~resourcey.triggers.trigger_runner.TriggerRunner` is
+created there -- once, per resource -- and captured by that closure, so every
+request's :class:`~resourcey.triggers.triggered_service.TriggeredService`
+shares the *same* runner: a ``background=True`` run outlives the single
+request's service exit (see ``trigger_runner.py`` for why that scope matters)
+and is only cancelled when this builder itself is closed.
+
+This builder is therefore also an async context manager: add the **same
+instance** to ``Manifest(managers=[builder])`` (alongside passing it as
+``dependency_builder=`` to ``create_app`` / ``add_to_app``) to drain every
+resource's runner on app shutdown, the same graceful-shutdown guarantee
+``TriggeredResource`` gives for free. Omitting it from ``managers=`` is not
+unsafe -- requests still fire triggers exactly as configured -- it just means
+pending background runs are not explicitly settled before the process exits
+rather than being cancelled early.
+
 This module is part of ``resourcey.triggers``; it imports ``http`` (the
 ``DependencyBuilder`` seam) the same way ``auth``'s builder does — both sit at
 the same layer rank, so neither imports the other.
@@ -28,18 +49,36 @@ the same layer rank, so neither imports the other.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import Depends
-from pydantic import Field
+from pydantic import Field, PrivateAttr, SkipValidation, field_validator
 
 from resourcey.core.resource import Resource
 from resourcey.core.service import Service
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
 from resourcey.triggers.trigger import Trigger
 from resourcey.triggers.trigger_config import TriggerConfig
+from resourcey.triggers.trigger_runner import TriggerRunner
 from resourcey.triggers.triggered_resource import TriggeredResource
 from resourcey.triggers.triggered_service import TriggeredService
+
+# See ``trigger_config.TriggerField`` -- the same ``SkipValidation`` +
+# ``mode="before"`` resolution a nested, parameterised ``Trigger[Any, Any]``
+# annotation needs so an already-built instance is accepted as-is.
+ResourceTriggersField = Annotated["dict[str, list[Trigger[Any, Any]]]", SkipValidation]
+
+
+def _resolve_resource_triggers(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {
+        path: [
+            Trigger.model_validate(entry) if isinstance(entry, dict) else entry
+            for entry in triggers
+        ]
+        for path, triggers in value.items()
+    }
 
 
 class TriggeredDependencyBuilder(DependencyBuilder):
@@ -60,8 +99,15 @@ class TriggeredDependencyBuilder(DependencyBuilder):
     """
 
     inner: DependencyBuilder = OpenDependencyBuilder()
-    resource_triggers: dict[str, list[Trigger]] = Field(default_factory=dict)
+    resource_triggers: ResourceTriggersField = Field(default_factory=dict)
     background: bool = True
+
+    _runners: list[TriggerRunner] = PrivateAttr(default_factory=list)
+
+    @field_validator("resource_triggers", mode="before")
+    @classmethod
+    def _resolve_resource_triggers(cls, value: Any) -> Any:
+        return _resolve_resource_triggers(value)
 
     @classmethod
     def from_config(
@@ -104,14 +150,32 @@ class TriggeredDependencyBuilder(DependencyBuilder):
             return inner_dependency
 
         background = self.background
+        # Created once, here (get_service_dependency runs once per resource,
+        # at registration) and shared by every request's TriggeredService via
+        # the closure below -- see the module docstring.
+        runner = TriggerRunner()
+        self._runners.append(runner)
 
         async def dependency(
             inner_service: Service[Any, Any] = Depends(inner_dependency),  # noqa: B008
         ) -> AsyncIterator[Service[Any, Any]]:
             service: Service[Any, Any] = TriggeredService(
-                inner_service, triggers, background=background
+                inner_service, triggers, background=background, runner=runner
             )
             async with service:
                 yield service
 
         return dependency
+
+    # ------------------------------------------------------------------
+    # Lifecycle -- an async context manager so an app can register this
+    # builder with ``Manifest(managers=[...])`` and drain every resource's
+    # runner on shutdown (see the module docstring).
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> TriggeredDependencyBuilder:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        for runner in self._runners:
+            await runner.aclose()

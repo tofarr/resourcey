@@ -18,24 +18,28 @@ Execution policy
   ``asyncio.create_task(...)`` and returns without awaiting, so webhook
   latency never blocks the edit's response. ``background=False`` awaits
   inline for reliability-critical paths.
-* **In-flight tracking**: background runs are tracked
-  (:class:`~resourcey.tasks.scheduler.BackgroundTaskScheduler`'s
-  ``_in_flight`` pattern); on :meth:`__aexit__` they are cancelled and
-  awaited, with ``CancelledError`` suppressed.
+* **In-flight tracking at the right scope**: this service is built fresh
+  **per request** (see :mod:`~resourcey.triggers.trigger_runner` for why
+  tracking in-flight runs *here* would cancel them before they ever get a
+  turn to execute). Firing is delegated to a
+  :class:`~resourcey.triggers.trigger_runner.TriggerRunner` — shared and
+  app-scoped when one is injected (by
+  :class:`~resourcey.triggers.triggered_resource.TriggeredResource` /
+  :class:`~resourcey.triggers.triggered_dependency_builder.TriggeredDependencyBuilder`),
+  owned and closed by this service itself only when none is (the standalone,
+  direct-construction case, where "whoever opens it owns its close" still
+  applies).
 * **Best effort, at-most-once**: no redelivery / ordering / exactly-once —
   a trigger needing durability (a webhook's own retry, a pub/sub publish)
   implements that itself; the framework fires best-effort.
 
 This module is part of ``resourcey.triggers``; it imports only lower framework
-layers (``core`` / ``util``).
+layers (``core`` / ``util``), plus its sibling :mod:`trigger_runner`.
 """
 
 from __future__ import annotations
 
-import asyncio
-import logging
 from collections.abc import Sequence
-from contextlib import suppress
 from typing import Any, Generic, TypeVar
 
 from resourcey.core.service import (
@@ -45,11 +49,10 @@ from resourcey.core.service import (
     Service,
     Update,
 )
-from resourcey.triggers.trigger import Trigger, TriggerEdits, TriggerResults
+from resourcey.triggers.trigger import Trigger
+from resourcey.triggers.trigger_runner import TriggerRunner
 from resourcey.util.search_filter import SearchFilter
 from resourcey.util.sort_order import SortOrder
-
-logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 K = TypeVar("K")
@@ -60,23 +63,41 @@ class TriggeredService(Service[T, K], Generic[T, K]):
 
     It is its own async context manager, delegating the storage lifetime to
     the inner service (the "whoever opens the storage owns its commit and
-    close" rule is unchanged) while additionally tracking and tearing down any
-    in-flight background trigger runs on exit.
+    close" rule is unchanged). Firing — including in-flight background-run
+    tracking and teardown — is delegated to a
+    :class:`~resourcey.triggers.trigger_runner.TriggerRunner`, shared and
+    app-scoped when one is injected, owned by this service itself otherwise
+    (see the module docstring).
     """
 
     def __init__(
         self,
         inner: Service[T, K],
-        triggers: Sequence[Trigger],
+        triggers: Sequence[Trigger[T, K]],
         *,
         background: bool = True,
+        runner: TriggerRunner | None = None,
     ) -> None:
         super().__init__()
         self._inner = inner
         self._triggers = list(triggers)
         self._background = background
-        self._in_flight: set[asyncio.Task[None]] = set()
         self._owns_inner = False
+        # No injected runner -> standalone, direct-construction usage: this
+        # service owns the runner it creates and closes it on its own exit
+        # (see the module / trigger_runner docstrings for why an *injected*
+        # runner must not be closed here).
+        if runner is not None:
+            self._runner = runner
+            self._owns_runner = False
+        else:
+            self._runner = TriggerRunner()
+            self._owns_runner = True
+
+    @property
+    def runner(self) -> TriggerRunner:
+        """The :class:`TriggerRunner` this service fires through."""
+        return self._runner
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -93,20 +114,15 @@ class TriggeredService(Service[T, K], Generic[T, K]):
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        """Cancel and await any in-flight background runs, then exit the inner.
+        """Exit the inner service; close an owned runner, never a shared one.
 
-        Mirrors :meth:`~resourcey.tasks.scheduler.BackgroundTaskScheduler.__aexit__`:
-        pending runs are cancelled, awaited, and ``CancelledError`` is
-        suppressed, so an in-flight webhook never outlives the service that
-        started it.
+        A shared (injected) runner outlives this single request's service —
+        it is only closed by its app-scoped owner — so this only calls
+        :meth:`~resourcey.triggers.trigger_runner.TriggerRunner.aclose` when
+        no runner was injected (this service created and therefore owns it).
         """
-        pending = [*self._in_flight]
-        self._in_flight.clear()
-        for running in pending:
-            running.cancel()
-        for running in pending:
-            with suppress(asyncio.CancelledError):
-                await running
+        if self._owns_runner:
+            await self._runner.aclose()
         if self._owns_inner and self._inner.entered:
             await self._inner.__aexit__(*exc)
             self._owns_inner = False
@@ -191,34 +207,14 @@ class TriggeredService(Service[T, K], Generic[T, K]):
     # Firing
     # ------------------------------------------------------------------
 
-    async def _fire(self, edits: TriggerEdits, results: TriggerResults) -> None:
-        """Fire every configured trigger once, in the background or inline.
+    async def _fire(
+        self, edits: list[Create[T] | Update[T] | Delete[K]], results: list[T | None]
+    ) -> None:
+        """Fire every configured trigger once, through this service's runner.
 
-        ``background=True`` (default) schedules :meth:`_run_all` as a tracked
-        task and returns immediately — the edit's response is never delayed by
-        trigger latency. ``background=False`` awaits it inline instead.
+        Delegated to :meth:`~resourcey.triggers.trigger_runner.TriggerRunner.fire`
+        (shared and app-scoped when a runner was injected, owned by this
+        service otherwise) — see the module docstring for why firing /
+        in-flight tracking cannot live directly on this per-request service.
         """
-        if not self._triggers:
-            return
-        if self._background:
-            task = asyncio.create_task(self._run_all(edits, results))
-            self._in_flight.add(task)
-            task.add_done_callback(self._in_flight.discard)
-        else:
-            await self._run_all(edits, results)
-
-    async def _run_all(self, edits: TriggerEdits, results: TriggerResults) -> None:
-        """Invoke every trigger, isolating each in its own catch block."""
-        outcomes = await asyncio.gather(
-            *(trigger.callback(edits, results) for trigger in self._triggers),
-            return_exceptions=True,
-        )
-        for trigger, outcome in zip(self._triggers, outcomes, strict=True):
-            if isinstance(outcome, asyncio.CancelledError):
-                raise outcome
-            if isinstance(outcome, BaseException):
-                logger.exception(
-                    "Trigger %s raised; the remaining triggers still ran.",
-                    type(trigger).__name__,
-                    exc_info=outcome,
-                )
+        await self._runner.fire(self._triggers, edits, results, background=self._background)

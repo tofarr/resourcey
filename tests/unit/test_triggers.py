@@ -51,6 +51,7 @@ from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyB
 from resourcey.sql.sql_resource import SqlResource
 from resourcey.triggers.trigger import Trigger
 from resourcey.triggers.trigger_config import TriggerConfig, TriggerEntry
+from resourcey.triggers.trigger_runner import TriggerRunner
 from resourcey.triggers.triggered_dependency_builder import TriggeredDependencyBuilder
 from resourcey.triggers.triggered_resource import TriggeredResource
 from resourcey.triggers.triggered_service import TriggeredService
@@ -162,6 +163,57 @@ async def inner() -> AsyncIterator[SqlResource[Any, Any]]:
         await conn.run_sync(TriggersBase.metadata.create_all)
     yield resource
     await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# TriggerRunner — the shared, app-scoped firing/tracking primitive
+# ---------------------------------------------------------------------------
+
+
+class TestTriggerRunner:
+    async def test_no_triggers_is_a_no_op(self) -> None:
+        runner = TriggerRunner()
+        await runner.fire([], [], [], background=True)
+        assert runner.in_flight == frozenset()
+
+    async def test_inline_awaits_before_returning(self) -> None:
+        trigger = RecordingTrigger()
+        runner = TriggerRunner()
+        await runner.fire([trigger], [Create(item="x")], ["x"], background=False)
+        assert len(trigger.calls) == 1
+        assert runner.in_flight == frozenset()
+
+    async def test_background_tracks_then_self_discards_on_completion(self) -> None:
+        trigger = RecordingTrigger()
+        runner = TriggerRunner()
+        await runner.fire([trigger], [Create(item="x")], ["x"], background=True)
+        assert len(runner.in_flight) == 1
+        assert trigger.calls == []  # scheduled, not yet run
+        # A handful of hops: one schedules the tracked task, the next
+        # schedules ``asyncio.gather``'s own child task for the trigger's
+        # callback, and a couple more let the finished tracked task's
+        # done_callback actually run and discard it.
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert trigger.calls == [([Create(item="x")], ["x"])]
+        assert runner.in_flight == frozenset()  # done_callback discarded it
+
+    async def test_aclose_cancels_and_awaits_pending_runs(self) -> None:
+        trigger = SlowTrigger()
+        runner = TriggerRunner()
+        await runner.fire([trigger], [], [], background=True)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # let it actually start sleeping
+        assert len(runner.in_flight) == 1
+        await runner.aclose()
+        assert runner.in_flight == frozenset()
+        assert trigger._cancelled is True
+
+    async def test_aclose_is_idempotent(self) -> None:
+        runner = TriggerRunner()
+        await runner.aclose()
+        await runner.aclose()
+        assert runner.in_flight == frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -372,23 +424,37 @@ class TestFiring:
             trigger.release()
             await asyncio.sleep(0)  # let the background run finish cleanly
 
-    async def test_background_in_flight_is_cancelled_and_awaited_on_exit(
+    async def test_background_survives_the_per_request_service_exit(
         self, inner: SqlResource[Any, Any]
     ) -> None:
+        """A per-request service's own exit must not cancel a background run.
+
+        ``TriggeredService`` is built fresh **per request** (``get_service()``
+        is awaited once per call); tracking -- and cancelling -- an in-flight
+        background run on *that* instance would settle it before the event
+        loop ever gives it a turn to execute, before any real webhook latency
+        could elapse (see ``trigger_runner.py``). The resource's one, shared
+        ``TriggerRunner`` tracks it instead, so it survives this single
+        request's service exiting.
+        """
         trigger = SlowTrigger()
         wrapped = TriggeredResource(inner, on_edit=[trigger], background=True)
-        service = await wrapped.get_service()
-        assert isinstance(service, TriggeredService)
-        async with service:
-            dto_type = wrapped.get_dto_type()
-            await service.create(dto_type.model_validate({"title": "hello"}))
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)  # let the background task actually start sleeping
-            assert len(service._in_flight) == 1
-        # Exit cancelled and awaited the in-flight run rather than leaking it.
-        assert service._in_flight == set()
-        assert trigger._started is True
+        async with wrapped:
+            service = await wrapped.get_service()
+            assert isinstance(service, TriggeredService)
+            async with service:
+                dto_type = wrapped.get_dto_type()
+                await service.create(dto_type.model_validate({"title": "hello"}))
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)  # let the background task actually start sleeping
+                assert len(service.runner.in_flight) == 1
+            # The per-request service exited -- the run is untouched.
+            assert trigger._started is True
+            assert trigger._cancelled is False
+            assert len(service.runner.in_flight) == 1
+        # The *resource* exited (the app-scoped owner) -- that drains it.
         assert trigger._cancelled is True
+        assert service.runner.in_flight == frozenset()
 
     async def test_no_configured_triggers_is_a_no_op(self, inner: SqlResource[Any, Any]) -> None:
         wrapped = TriggeredResource(inner, background=False)
@@ -602,3 +668,35 @@ class TestTriggeredDependencyBuilder:
         builder = TriggeredDependencyBuilder.from_config(config)
         assert builder.resource_triggers == {"threads": [trigger]}
         assert isinstance(builder.inner, OpenDependencyBuilder)
+
+    async def test_background_survives_the_request_and_is_drained_as_a_manager(
+        self, inner: SqlResource[Any, Any]
+    ) -> None:
+        """The per-request-exit fix, through the HTTP + builder composition.
+
+        ``get_service_dependency(resource)`` runs once per resource, at
+        registration, so the ``TriggerRunner`` it creates there is shared by
+        every request's ``TriggeredService`` -- a background run outlives the
+        single request that started it. Adding the *same builder instance* to
+        ``Manifest(managers=[...])`` is what drains it, on app shutdown.
+        """
+        trigger = SlowTrigger()
+        builder = TriggeredDependencyBuilder(
+            resource_triggers={inner.get_resource_path(): [trigger]}, background=True
+        )
+        manifest = Manifest(resources=[inner], managers=[builder])
+        async with manifest:
+            app = create_app(manifest, dependency_builder=builder)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post("/threads", json={"title": "hi"})
+                assert response.status_code == 201
+            # The request's own (per-request) dependency has already exited --
+            # the response came back -- yet the background run is untouched.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert trigger._started is True
+            assert trigger._cancelled is False
+        # Manifest exit -> managers exit (after resources) -> the builder
+        # drains every runner it created.
+        assert trigger._cancelled is True

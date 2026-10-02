@@ -22,10 +22,28 @@ layers (``config`` / ``util``).
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Annotated, Any
+
+from pydantic import BaseModel, Field, SkipValidation, field_validator
 
 from resourcey.config.config_base import BaseConfig
 from resourcey.triggers.trigger import Trigger
+
+# A nested ``Trigger`` field is validated by the ``mode="before"`` resolver
+# below (which routes a wire ``dict`` through ``Trigger.model_validate`` and
+# accepts an already-built instance as-is) and then accepted verbatim.
+# Without ``SkipValidation`` a *parameterised* generic annotation
+# (``Trigger[Any, Any]``) re-enters the discriminated-union validator on an
+# already-built instance, which the mixin's ``data.pop("kind")`` path cannot
+# handle -- the same reason
+# :data:`~resourcey.util.search_filter.NestedFilter` needs it.
+TriggerField = Annotated["Trigger[Any, Any]", SkipValidation]
+
+
+def _resolve_trigger(value: Any) -> Any:
+    if isinstance(value, dict):
+        return Trigger.model_validate(value)
+    return value
 
 
 class TriggerEntry(BaseModel):
@@ -34,11 +52,19 @@ class TriggerEntry(BaseModel):
     Attributes:
         resource_path: The target resource's REST path segment (matching
             :meth:`~resourcey.core.resource.Resource.get_resource_path`).
-        trigger: The configured, polymorphic :class:`Trigger` instance.
+        trigger: The configured, polymorphic :class:`Trigger` instance. Typed
+            ``Trigger[Any, Any]`` here -- a config entry cannot know the
+            target resource's DTO / id types ahead of time (it is resolved by
+            resource path, not type).
     """
 
     resource_path: str
-    trigger: Trigger
+    trigger: TriggerField
+
+    @field_validator("trigger", mode="before")
+    @classmethod
+    def _resolve(cls, value: Any) -> Any:
+        return _resolve_trigger(value)
 
 
 class TriggerConfig(BaseConfig):
@@ -52,9 +78,9 @@ class TriggerConfig(BaseConfig):
 
     triggers: list[TriggerEntry] = Field(default_factory=list)
 
-    def resource_triggers(self) -> dict[str, list[Trigger]]:
+    def resource_triggers(self) -> dict[str, list[Trigger[Any, Any]]]:
         """Group the configured entries by ``resource_path``, in declaration order."""
-        grouped: dict[str, list[Trigger]] = {}
+        grouped: dict[str, list[Trigger[Any, Any]]] = {}
         for entry in self.triggers:
             grouped.setdefault(entry.resource_path, []).append(entry.trigger)
         return grouped
