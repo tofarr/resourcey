@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -44,6 +43,7 @@ from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
 from resourcey.auth.auth_config import SessionCookieConfig
+from resourcey.auth.auth_oauth import OAuthAuthenticator
 from resourcey.auth.auth_oauth_config import IdpConfig
 from resourcey.auth.auth_oauth_provider import (
     OAuthCredentialProvider,
@@ -56,6 +56,11 @@ from resourcey.auth.auth_role import roles_from_credential
 from resourcey.core.errors import InvalidInputError
 from resourcey.core.resource import Resource
 from resourcey.encryption.encryption_service import EncryptionService, get_encryption_service
+
+# The OIDC scope that makes a provider include an ID token in the token
+# response. Requested in addition to the client's configured scopes on the
+# interactive login route only — the outbound-only path requests none.
+_OPENID_SCOPE = "openid"
 
 # The flow-state JWE claim keys (carried in the short-TTL state cookie).
 _STATE_CLAIM = "state"
@@ -78,10 +83,12 @@ def register_oauth_routes(
     *,
     token_resource: Resource[Any, Any] | None = None,
     identity_resource: Resource[Any, Any] | None = None,
+    authenticator: OAuthAuthenticator | None = None,
     config: IdpConfig | None = None,
     session_config: SessionCookieConfig | None = None,
     encryption_service: EncryptionService | None = None,
     http_post: Callable[..., Any] | None = None,
+    http_get: Callable[..., Any] | None = None,
     prefix: str = "",
 ) -> APIRouter:
     """Mount the interactive login / callback / refresh routes.
@@ -93,6 +100,11 @@ def register_oauth_routes(
             (the login redirect needs only the client resource).
         identity_resource: The ``ExternalIdentity`` resource; required to resolve
             ``(iss, sub)`` to an internal user on callback.
+        authenticator: The :class:`~resourcey.auth.auth_oauth.OAuthAuthenticator`
+            whose JWKS verification the callback reuses to verify the provider's
+            **ID token** (never an unverified decode). Defaults to a bare one
+            built over ``client_resource`` (verification only — no identity /
+            principal-store checks, which the callback performs itself).
         config: The OAuth config block (flow paths / state TTL). Default
             :meth:`IdpConfig.get_instance`.
         session_config: The session-cookie config. Default
@@ -100,11 +112,16 @@ def register_oauth_routes(
         encryption_service: The service that mints the flow-state / session JWEs.
             Defaults to the process-wide one.
         http_post: An injectable token-exchange poster (tests inject a fake).
+        http_get: An injectable JWKS fetcher for the default authenticator
+            (ignored when ``authenticator`` is supplied; tests inject a fake).
         prefix: An optional mount prefix.
     """
     resolved = config if config is not None else IdpConfig.get_instance()
     session = session_config if session_config is not None else SessionCookieConfig.get_instance()
     encryption = encryption_service or get_encryption_service()
+    token_verifier = authenticator or OAuthAuthenticator(
+        client_resource=client_resource, http_get=http_get
+    )
 
     router = APIRouter(tags=["OAuth"])
 
@@ -115,6 +132,7 @@ def register_oauth_routes(
             client_resource,
             token_resource,
             identity_resource,
+            token_verifier,
             resolved,
             session,
             encryption,
@@ -152,7 +170,11 @@ def _add_login_route(
         verifier = _code_verifier()
         state = secrets.token_urlsafe(32)
         url = authorize_url(
-            record, state=state, redirect_uri=redirect_uri, code_challenge=_code_challenge(verifier)
+            record,
+            state=state,
+            redirect_uri=redirect_uri,
+            code_challenge=_code_challenge(verifier),
+            extra_scopes=(_OPENID_SCOPE,),
         )
         state_token = encryption.create_jwe_token(
             {
@@ -188,6 +210,7 @@ def _add_callback_route(
     client_resource: Resource[Any, Any],
     token_resource: Resource[Any, Any],
     identity_resource: Resource[Any, Any],
+    authenticator: OAuthAuthenticator,
     config: IdpConfig,
     session: SessionCookieConfig,
     encryption: EncryptionService,
@@ -213,7 +236,9 @@ def _add_callback_route(
                 redirect_uri=str(flow.get(_REDIRECT_CLAIM)),
                 code_verifier=str(verifier) if verifier else None,
             )
-            principal = await _resolve_principal(identity_resource, record, exchanged)
+            principal = await _resolve_principal(
+                identity_resource, record, exchanged, authenticator
+            )
             stored = await token_service.store(
                 principal_id=cast(UUID, principal.id),
                 client_id=record.id,
@@ -300,21 +325,36 @@ async def _token_service(token_resource: Resource[Any, Any]) -> OAuthTokenServic
 
 
 async def _resolve_principal(
-    identity_resource: Resource[Any, Any], record: Any, token: TokenResponse
+    identity_resource: Resource[Any, Any],
+    record: Any,
+    token: TokenResponse,
+    authenticator: OAuthAuthenticator,
 ) -> Principal:
     """Resolve the internal principal for the exchanged token's ``(iss, sub)``.
 
-    The token is trusted here (the code was just exchanged over TLS with the
-    provider); inbound verification is
-    :class:`~resourcey.auth.auth_oauth.OAuthAuthenticator`'s job for machine
-    clients presenting a token directly. ``(iss, sub)`` is resolved through the
+    Identity on the interactive flow comes from the OIDC **ID token**, never the
+    access token: the access token's format and contents are provider-defined
+    (and frequently opaque — Google, Microsoft Entra ID, Okta/Auth0 default
+    settings, Keycloak, GitHub, …), while the ID token is the JWT OIDC
+    guarantees carries ``iss`` / ``sub`` / ``aud`` / ``exp``. It is verified
+    through the same JWKS path :class:`~resourcey.auth.auth_oauth.OAuthAuthenticator`
+    uses for the bearer-token path (signature, issuer, audience, expiry, and
+    ``alg`` pinned to the client row's allowlist) — never an unverified decode,
+    even though the exchange itself ran over a trusted back-channel to the
+    provider's token endpoint. ``(iss, sub)`` is then resolved through the
     ``ExternalIdentity`` mapping; a first-seen pair is **fail-closed**.
     """
-    claims = _decode_unverified(token.access_token)
+    if not token.id_token:
+        raise InvalidInputError(
+            "Provider returned no ID token; request the 'openid' scope for interactive login."
+        )
+    claims = await authenticator.verify_token(token.id_token, record)
+    if claims is None:
+        raise InvalidInputError("The provider's ID token failed verification")
     subject = claims.get("sub")
-    issuer = claims.get("iss") or getattr(record, "issuer", None)
+    issuer = claims.get("iss")
     if not isinstance(subject, str) or not subject:
-        raise InvalidInputError("Provider token carries no subject")
+        raise InvalidInputError("Provider ID token carries no subject")
     service: Any = await identity_resource.get_service({})
     async with service:
         mapping = await service.find_by_issuer_subject(str(issuer), subject)
@@ -425,18 +465,6 @@ def _code_verifier() -> str:
 def _code_challenge(verifier: str) -> str:
     digest = hashlib.sha256(verifier.encode("ascii")).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-
-
-def _decode_unverified(token: str) -> dict[str, Any]:
-    parts = token.split(".")
-    if len(parts) != 3:
-        return {}
-    segment = parts[1] + "=" * (-len(parts[1]) % 4)
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(segment))
-    except (ValueError, TypeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
 
 
 def _as_uuid(value: Any) -> UUID:

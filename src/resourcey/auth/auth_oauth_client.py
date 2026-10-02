@@ -98,11 +98,14 @@ class OAuthClient(OAuthBase):
     """A stored OAuth / OIDC client row.
 
     See :class:`~resourcey.auth.auth_oauth_config.OAuthClientConfig` for the
-    field semantics; this is the model-first counterpart. ``issuer`` is indexed
-    because a presented token's ``iss`` selects the row.
+    field semantics; this is the model-first counterpart. ``issuer`` is
+    **unique** (not just indexed): it is the sole selector ``find_by_issuer``
+    uses to pick which row's JWKS a presented token is verified against, so two
+    rows sharing an issuer would make that selection ambiguous.
     """
 
     __tablename__ = "oauth_clients"
+    __table_args__ = (UniqueConstraint("issuer", name="uq_oauth_client_issuer"),)
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     provider: Mapped[str | None] = mapped_column(String(128), nullable=True)

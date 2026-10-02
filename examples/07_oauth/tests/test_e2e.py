@@ -310,7 +310,10 @@ async def flow_client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]
     ) -> _FakeResponse:
         return _FakeResponse(
             {
-                "access_token": idp_token,
+                # Deliberately opaque, unlike the ID token: the callback's
+                # identity resolution must read the ID token, never this.
+                "access_token": "opaque-provider-access-token",
+                "id_token": idp_token,
                 "refresh_token": "IDP-REFRESH",
                 "expires_in": 120,
                 "scope": "openid",

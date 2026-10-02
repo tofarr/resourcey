@@ -34,6 +34,7 @@ import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import unquote_plus
 from uuid import UUID
 
 import pytest
@@ -241,6 +242,29 @@ async def test_db_client_find_by_issuer(maker: async_sessionmaker[AsyncSession])
         assert created.id == "db1"
         found = await service.find_by_issuer(ISSUER)
         assert found is not None and found.id == "db1"
+
+
+async def test_db_client_issuer_is_unique(maker: async_sessionmaker[AsyncSession]) -> None:
+    """Two rows configured with the same issuer would make ``find_by_issuer``
+    ambiguous (the sole selector for which JWKS a presented token is verified
+    against), so the column is a unique constraint, not just an index.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    resource = stored_oauth_client_resource(session_factory=maker)
+    service = await resource.get_service({})
+    async with service:
+        await service.create(
+            resource.get_dto_type()(
+                id="db1", issuer=ISSUER, algorithms=["RS256"], scopes=[], roles=[]
+            )
+        )
+        with pytest.raises(IntegrityError):
+            await service.create(
+                resource.get_dto_type()(
+                    id="db2", issuer=ISSUER, algorithms=["RS256"], scopes=[], roles=[]
+                )
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +605,50 @@ async def test_refresh_serializes_across_concurrent_callers(
     assert len(calls) == 1  # at most one refresher; the rest observed the result
 
 
+async def test_store_handles_a_concurrent_first_time_insert(
+    maker: async_sessionmaker[AsyncSession],
+) -> None:
+    """A double-submitted login racing the first ``store()`` for a pair doesn't 500.
+
+    ``store()``'s read-then-insert is not itself atomic: a second caller's
+    existence check can run before the first caller's row exists, and then
+    lose the insert race to the ``uq_oauth_token`` unique constraint. That is
+    reproduced deterministically here (rather than relying on true
+    cross-connection concurrency, which SQLite's pooling makes unreliable to
+    assert on) by forcing the second ``store()`` call's own existence check to
+    report "no row" even though the first call's row already landed. The
+    savepoint-guarded insert must absorb the resulting ``IntegrityError`` and
+    fall back to updating the row in place, not raise.
+    """
+    resource = oauth_token_resource(session_factory=maker, encryption_service=_encryption())
+    service = await resource.get_service({})
+    async with service:
+        await service.store(
+            principal_id=USER_ID,
+            client_id="c1",
+            access_token="FIRST",
+            refresh_token="R1",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+        async def stale_no_row(principal_id: UUID, client_id: str) -> None:
+            return None
+
+        service._row = stale_no_row  # type: ignore[method-assign]
+        await service.store(
+            principal_id=USER_ID,
+            client_id="c1",
+            access_token="SECOND",
+            refresh_token="R2",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+    async with await resource.get_service({}) as service:
+        token = await service.get(USER_ID, "c1")
+        assert token is not None
+        assert token.access_token.get_secret_value() == "SECOND"
+
+
 async def test_refresh_failure_revokes_and_requires_reauth(
     maker: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -630,24 +698,32 @@ def _flow_app(
     rsa_key: RSAKey,
     *,
     identity_linked: bool = True,
-    idp_token: str | None = None,
+    idp_id_token: str | None = None,
+    include_id_token: bool = True,
 ) -> tuple[FastAPI, IdpConfig]:
     config = _idp_config()
     client_inner = config_oauth_client_resource(config)
     token_inner = oauth_token_resource(session_factory=maker, encryption_service=_encryption())
     identity = external_identity_resource(session_factory=maker)
+    jwks = {"keys": [rsa_key.as_dict(private=False)]}
+
+    async def fake_get(url: str) -> dict[str, Any]:
+        return jwks
 
     async def fake_post(
         url: str, *, data: dict[str, str], headers: dict[str, str]
     ) -> _FakeResponse:
-        return _FakeResponse(
-            {
-                "access_token": idp_token or _token(rsa_key),
-                "refresh_token": "IDP-REFRESH",
-                "expires_in": 120,
-                "scope": "openid",
-            }
-        )
+        payload: dict[str, Any] = {
+            # Deliberately opaque (unlike a JWT): proves the callback resolves
+            # identity from the ID token, never the access token.
+            "access_token": "opaque-provider-access-token",
+            "refresh_token": "IDP-REFRESH",
+            "expires_in": 120,
+            "scope": "openid",
+        }
+        if include_id_token:
+            payload["id_token"] = idp_id_token or _token(rsa_key)
+        return _FakeResponse(payload)
 
     app = create_app(Manifest(resources=[]), dependency_builder=None)
     register_oauth_routes(
@@ -661,6 +737,7 @@ def _flow_app(
         ),
         encryption_service=_encryption(),
         http_post=fake_post,
+        http_get=fake_get,
     )
     return app, config
 
@@ -738,6 +815,76 @@ async def test_callback_rejects_unlinked_identity(
         state = login.headers["location"].split("state=")[1].split("&")[0]
         response = await c.get("/oauth/callback", params={"code": "abc", "state": state})
         assert response.status_code == 400
+
+
+async def test_login_requests_openid_scope_even_when_not_configured() -> None:
+    """A client configured without ``openid`` still gets an ID token on callback.
+
+    Login always requests ``openid`` in addition to the client's configured
+    scopes, so the provider includes an ID token in the token response — the
+    callback's identity resolution depends on it.
+    """
+    config = _idp_config(_client_config(scopes=["email"]))
+    inner = config_oauth_client_resource(config)
+    app = create_app(Manifest(resources=[]), dependency_builder=None)
+    register_oauth_routes(
+        app, inner, config=config, session_config=SessionCookieConfig(session_cookie_secure=False)
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=False
+    ) as c:
+        response = await c.get("/oauth/login", params={"client": "c1"})
+        location = response.headers["location"]
+        scope_param = location.split("scope=")[1].split("&")[0]
+        requested = unquote_plus(scope_param).split(" ")
+        assert "openid" in requested
+        assert "email" in requested
+
+
+async def test_callback_rejects_a_missing_id_token(
+    maker: async_sessionmaker[AsyncSession], rsa_key: RSAKey
+) -> None:
+    """An access-token-only response (a common real-world shape) fails closed.
+
+    The provider's access token is opaque and never used for identity; if it
+    returns no ``id_token`` the callback must reject the login rather than
+    silently fall back to (unverified) access-token claims.
+    """
+    await _seed_identity(maker)
+    app, _ = _flow_app(maker, rsa_key, include_id_token=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=False
+    ) as c:
+        login = await c.get("/oauth/login", params={"client": "c1"})
+        state = login.headers["location"].split("state=")[1].split("&")[0]
+        response = await c.get("/oauth/callback", params={"code": "abc", "state": state})
+        assert response.status_code == 400
+        assert "ID token" in response.text
+
+
+async def test_callback_rejects_an_id_token_with_the_wrong_audience(
+    maker: async_sessionmaker[AsyncSession], rsa_key: RSAKey
+) -> None:
+    """A verifiable-but-wrong-audience ID token fails verification, not identity lookup.
+
+    Proves the callback actually **verifies** the ID token (signature + ``iss``
+    / ``aud``) through the authenticator's JWKS path rather than trusting an
+    unverified decode.
+    """
+    await _seed_identity(maker)
+    bad_token = _token(rsa_key, aud="someone-else")
+    app, _ = _flow_app(maker, rsa_key, idp_id_token=bad_token)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=False
+    ) as c:
+        login = await c.get("/oauth/login", params={"client": "c1"})
+        state = login.headers["location"].split("state=")[1].split("&")[0]
+        response = await c.get("/oauth/callback", params={"code": "abc", "state": state})
+        assert response.status_code == 400
+        assert "verification" in response.text
 
 
 async def test_refresh_route_uses_the_stored_token(

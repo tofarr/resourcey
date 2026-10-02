@@ -108,12 +108,18 @@ class OAuthSetup:
         return OAuthCredentialProvider(token_service, http_post)
 
     def register_routes(self, app: Any, **kwargs: Any) -> Any:
-        """Mount the interactive flow routes (see ``register_oauth_routes``)."""
+        """Mount the interactive flow routes (see ``register_oauth_routes``).
+
+        Passes ``self.authenticator`` through as the callback's ID-token
+        verifier, so the same JWKS cache and client lookup serve both the
+        bearer-token and interactive-login paths.
+        """
         return register_oauth_routes(
             app,
             self.client_resource,
             token_resource=self.token_resource,
             identity_resource=self.identity_resource,
+            authenticator=self.authenticator,
             config=self.config,
             session_config=self.session_config,
             encryption_service=self.encryption_service,

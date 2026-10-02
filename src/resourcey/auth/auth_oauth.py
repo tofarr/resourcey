@@ -157,6 +157,18 @@ class OAuthAuthenticator(Authenticator):
         """The ``Bearer`` challenge, so a 401 names the scheme."""
         return OAUTH_CHALLENGE
 
+    async def verify_token(self, token: str, client: Any) -> dict[str, Any] | None:
+        """Verify an arbitrary token against ``client``'s JWKS; ``None`` on failure.
+
+        The public seam shared with :meth:`authenticate`'s bearer-token path:
+        signature, ``iss`` / ``aud`` / ``exp`` / ``nbf``, and ``alg`` pinned to
+        the row's allowlist, reusing the same JWKS cache. A caller that must
+        verify a token the request-time bearer path never sees — e.g. the login
+        callback's OIDC **ID token** — uses this instead of re-implementing (or
+        worse, skipping) verification.
+        """
+        return await self._verify(token, client)
+
     # ------------------------------------------------------------------
     # Verification
     # ------------------------------------------------------------------

@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, SecretStr
 from sqlalchemy import DateTime, String, UniqueConstraint, delete, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -184,6 +185,13 @@ class OAuthTokenService(SqlService[Any, Any]):
         The access / refresh tokens are encrypted before binding, so the row
         never holds a usable provider credential. An existing pair is replaced
         (a re-login or a refresh), and the lease is cleared.
+
+        The initial insert (no row yet) is attempted inside a ``SAVEPOINT``: a
+        concurrent first-time store for the same ``(principal_id, client_id)``
+        (e.g. a double-submitted login) can race the read-then-insert and hit
+        the ``uq_oauth_token`` unique constraint. Rather than surface that as an
+        unhandled ``IntegrityError``, the savepoint rolls back and the loser
+        falls back to updating the row the winner just inserted.
         """
         session = self._active_session()
         table = self._resource.table
@@ -202,9 +210,16 @@ class OAuthTokenService(SqlService[Any, Any]):
         }
         existing = await self._row(principal_id, client_id)
         if existing is None:
-            values["id"] = uuid.uuid4()
-            values["created_at"] = now
-            await session.execute(table.insert().values(**values))
+            insert_values = {**values, "id": uuid.uuid4(), "created_at": now}
+            try:
+                async with session.begin_nested():
+                    await session.execute(table.insert().values(**insert_values))
+            except IntegrityError:
+                await session.execute(
+                    update(table)
+                    .where(table.c.principal_id == principal_id, table.c.client_id == client_id)
+                    .values(**values)
+                )
         else:
             await session.execute(
                 update(table).where(table.c.id == existing["id"]).values(**values)

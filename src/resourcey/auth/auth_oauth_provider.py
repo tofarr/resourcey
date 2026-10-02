@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
@@ -47,6 +47,11 @@ class TokenResponse(BaseModel):
 
     Attributes:
         access_token: The access token (plaintext).
+        id_token: The OIDC ID token (a JWT), when the provider returned one —
+            requesting the ``openid`` scope is what makes it appear. This, not
+            ``access_token``, is what OIDC guarantees carries ``iss`` / ``sub`` /
+            ``aud`` / ``exp`` for establishing *who signed in*; an access token's
+            format and contents are provider-defined and are frequently opaque.
         refresh_token: The refresh token, if the provider returned one.
         expires_at: When the access token expires (derived from ``expires_in``).
         refresh_expires_at: The provider-side refresh-token life, if given.
@@ -56,6 +61,7 @@ class TokenResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     access_token: str
+    id_token: str | None = None
     refresh_token: str | None = None
     expires_at: datetime
     refresh_expires_at: datetime | None = None
@@ -74,6 +80,7 @@ class TokenResponse(BaseModel):
             if isinstance(expires_in, (int, float, str)) and str(expires_in).isdigit()
             else now + timedelta(hours=1)
         )
+        id_token = payload.get("id_token")
         refresh = payload.get("refresh_token")
         refresh_expires_in = payload.get("refresh_expires_in")
         refresh_expires_at = (
@@ -85,6 +92,7 @@ class TokenResponse(BaseModel):
         scope = payload.get("scope")
         return cls(
             access_token=access,
+            id_token=id_token if isinstance(id_token, str) and id_token else None,
             refresh_token=refresh if isinstance(refresh, str) and refresh else None,
             expires_at=expires_at,
             refresh_expires_at=refresh_expires_at,
@@ -118,21 +126,37 @@ class CredentialProvider(ABC):
 
     @abstractmethod
     def authorize_url(
-        self, client: Any, *, state: str, redirect_uri: str, code_challenge: str | None = None
+        self,
+        client: Any,
+        *,
+        state: str,
+        redirect_uri: str,
+        code_challenge: str | None = None,
+        extra_scopes: Iterable[str] = (),
     ) -> str:
         """Build the provider's authorization URL (the login redirect)."""
         raise NotImplementedError
 
 
 def authorize_url(
-    client: Any, *, state: str, redirect_uri: str, code_challenge: str | None = None
+    client: Any,
+    *,
+    state: str,
+    redirect_uri: str,
+    code_challenge: str | None = None,
+    extra_scopes: Iterable[str] = (),
 ) -> str:
     """Build a provider's authorization URL from a client row / config entry.
 
     ``response_type=code`` with the client id, redirect URI, and state; the
-    requested scopes are space-joined, and PKCE parameters are added when a
-    challenge is supplied. Raises :class:`~resourcey.core.errors.InvalidInputError`
-    when the client has no ``auth_url``.
+    requested scopes are the client's configured scopes plus ``extra_scopes``
+    (de-duplicated, order-preserving), space-joined, and PKCE parameters are
+    added when a challenge is supplied. The interactive login route requests
+    ``openid`` through ``extra_scopes`` so the provider includes an ID token in
+    the token response (the BFF callback needs it to resolve identity); the
+    outbound-only path requests none. Raises
+    :class:`~resourcey.core.errors.InvalidInputError` when the client has no
+    ``auth_url``.
     """
     if not getattr(client, "auth_url", None):
         raise InvalidInputError(f"Client {client.id!r} has no auth URL")
@@ -142,8 +166,9 @@ def authorize_url(
         "redirect_uri": redirect_uri,
         "state": state,
     }
-    if client.scopes:
-        params["scope"] = " ".join(client.scopes)
+    scopes = list(dict.fromkeys([*client.scopes, *extra_scopes]))
+    if scopes:
+        params["scope"] = " ".join(scopes)
     if code_challenge:
         params["code_challenge"] = code_challenge
         params["code_challenge_method"] = "S256"
@@ -212,11 +237,21 @@ class OAuthCredentialProvider(CredentialProvider):
         return await self._post_token(client, client.token_url, payload)
 
     def authorize_url(
-        self, client: Any, *, state: str, redirect_uri: str, code_challenge: str | None = None
+        self,
+        client: Any,
+        *,
+        state: str,
+        redirect_uri: str,
+        code_challenge: str | None = None,
+        extra_scopes: Iterable[str] = (),
     ) -> str:
         """Build the authorization URL from the client's ``auth_url`` and config."""
         return authorize_url(
-            client, state=state, redirect_uri=redirect_uri, code_challenge=code_challenge
+            client,
+            state=state,
+            redirect_uri=redirect_uri,
+            code_challenge=code_challenge,
+            extra_scopes=extra_scopes,
         )
 
     async def _post_token(self, client: Any, url: str, payload: dict[str, str]) -> TokenResponse:

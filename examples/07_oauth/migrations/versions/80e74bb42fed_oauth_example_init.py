@@ -61,7 +61,8 @@ def upgrade() -> None:
     sa.Column('refresh_is_single_use', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('issuer', name='uq_oauth_client_issuer')
     )
     op.create_index(op.f('ix_oauth_clients_issuer'), 'oauth_clients', ['issuer'], unique=False)
     op.create_table('oauth_tokens',
