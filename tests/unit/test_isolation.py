@@ -3,7 +3,7 @@
 The framework lives directly under ``resourcey/`` (the old version prefix was folded
 away in #144). This test pins the **layer ranks** inside it:
 
-    util < core < {sql, mongo, list, http, config, cache, encryption, auth, view}
+    util < core < {sql, mongo, list, http, config, cache, encryption, auth, view, tasks, triggers}
 
 no module may import a strictly-higher project layer at runtime. This subsumes
 both "``util`` imports nothing project-level" (it is the bottom layer) and
@@ -45,6 +45,7 @@ _LAYER_RANK = {
     "auth": 2,
     "filestore": 2,
     "tasks": 2,
+    "triggers": 2,
 }
 
 
@@ -286,6 +287,20 @@ def test_the_tasks_files_exist_without_an_init():
     names = {p.name for p in sorted(tasks.glob("*.py"))}
     assert names == {"cli.py", "cron.py", "scheduler.py", "task.py"}
     assert not (tasks / "__init__.py").exists()
+
+
+def test_the_triggers_files_exist_without_an_init():
+    triggers = FRAMEWORK_DIR / "triggers"
+    names = {p.name for p in sorted(triggers.glob("*.py"))}
+    assert names == {
+        "trigger.py",
+        "trigger_config.py",
+        "trigger_runner.py",
+        "triggered_dependency_builder.py",
+        "triggered_resource.py",
+        "triggered_service.py",
+    }
+    assert not (triggers / "__init__.py").exists()
 
 
 def test_the_auth_files_exist_without_an_init():

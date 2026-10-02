@@ -1169,12 +1169,94 @@ that a `schedule=None` task never ticks but still runs by name, that only
 enabled tasks tick, and that selection is independent per task (so a failure
 never changes another's selection). It is part of `make specs` and CI.
 
+### `triggers` — edit-event callbacks (issue #155)
+
+`src/resourcey/triggers/` is a backend-agnostic rung over `core`'s `Resource` /
+`Service` (the `view` / `tasks` layer rank), giving a deployment a way to react
+to a resource's writes — the primary case is a **webhook**: notify an external
+system when rows change — without changing the resource's storage or schema.
+`Trigger` (`trigger.py`) mirrors `BackgroundTask`'s shape: a
+`DiscriminatedUnionMixin`, abstract `async def callback(self, edits, results)`,
+an app declares its own kinds (a webhook notifier, a pub/sub publisher, …) as
+subclasses carrying whatever config fields they need. `callback` runs **once
+per edit operation, never per item**: a single `create()` normalizes to
+`[Create(item=payload)]` / `[result]`; a `batch_edit` of five passes its five
+`Edit` nodes and their five results verbatim, positionally aligned (a delete /
+a miss is `None`, and a miss still fires — it is not an error). The trigger
+sees the inner DTO, not the projected REST model.
+
+* `triggered_resource.py` — `TriggeredResource(resource, *, on_edit=(),
+  background=True)` wraps another resource. Unlike `ResourceView`, a trigger
+  changes nothing observable — no field hidden, no action narrowed, the cache
+  policy untouched — so every schema / action / query-sort-surface /
+  cache-policy / registration / lifecycle method is a plain delegation to the
+  inner; only `get_service` changes, wrapping the inner service in a
+  `TriggeredService`. `get_exposed_resource()` returns `self` (the same reason
+  `ResourceView` does): the wrapper must be what gets registered, or the
+  mounted service would have no triggers attached. `on_edit` accepts only
+  `Trigger` instances (a bare callable would lose the config fields `Trigger`
+  exists to carry) and rejects a duplicate (by value equality), both validated
+  at construction.
+* `triggered_service.py` — `TriggeredService` forwards every action to the
+  inner verbatim and, after a **write** (`create` / `update` / `delete` /
+  `batch_edit`) returns successfully, fires every configured trigger once with
+  that operation's whole `(edits, results)`. Reads never fire, and an inner
+  exception on a write fires nothing — the trigger only ever sees a success.
+  **Per-invocation isolation**: each trigger's callback runs inside its own
+  `asyncio.gather(..., return_exceptions=True)` slot, so one raising trigger is
+  caught, `logger.exception`-logged, and never stops the rest. **Background by
+  default** (`background=True`): firing is `asyncio.create_task(...)` and
+  returns without awaiting, so webhook latency never blocks the edit's
+  response; `background=False` awaits inline for reliability-critical paths.
+  **In-flight tracking** mirrors `BackgroundTaskScheduler`'s `_in_flight`
+  pattern: `__aexit__` cancels and awaits any still-running background runs,
+  suppressing `CancelledError`, so a run never outlives the service that
+  started it. It is **best-effort, at-most-once** — no redelivery / ordering /
+  exactly-once; a trigger needing durability implements that itself. Its own
+  `__aenter__` / `__aexit__` follow `AuthorizedService`'s already-entered-inner
+  rule: an inner handed to it already entered (composed behind a
+  `DependencyBuilder`'s own `Depends(...)` resolution) stays owned by whoever
+  opened it, so this wrapper neither double-enters nor double-closes it.
+* `trigger_config.py` — `TriggerConfig` (a `BaseConfig`) is the opt-in,
+  env-parseable rung on top of the `TriggeredResource(..., on_edit=[...])`
+  seam: a flat list of `TriggerEntry` (`resource_path` + a polymorphic
+  `Trigger`), parsed as `APP_TRIGGERS_<n>_RESOURCE_PATH` /
+  `_TRIGGER_KIND` (the trigger subclass's dotted path) plus any kind-specific
+  field — the same list-of-nested-polymorphic-entry shape `SqlConfig` uses for
+  its connections. `resource_triggers()` groups the flat list by
+  `resource_path`, the same "flat config, grouped at the point of use" shape
+  `RolePolicyResolver` uses for its per-resource maps.
+* `triggered_dependency_builder.py` — `TriggeredDependencyBuilder` (a
+  `DependencyBuilder`, the `AuthorizedDependencyBuilder` composition shape)
+  resolves configured triggers **per resource path** and wraps that resource's
+  service in a `TriggeredService` — so a deployment can attach a webhook to an
+  existing app with no resource change. It **composes with an inner builder**
+  rather than replacing it (`inner` defaults to `OpenDependencyBuilder`; plug
+  it in front of an `AuthorizedDependencyBuilder`, either order is the app's
+  choice — this builder only ever wraps what `inner` yields). A resource with
+  no configured triggers passes its inner dependency through **verbatim**
+  (identity, not a copy) — a no-op for an app that has not opted in — and a
+  resource that is already a `TriggeredResource` (so it already fires its own
+  `on_edit`) is never wrapped a second time: the constructor list wins.
+  `from_config(config)` is the sugar building `resource_triggers` from a
+  `TriggerConfig` instead of grouping by hand.
+
+`specs/triggers.qnt` pins the execution policy (in `make specs` and CI): only
+a write action can fire and only on success (a read, or any failed action,
+fires nothing); a batch of any size invokes each trigger exactly once, not
+once per item, with aligned `(edits, results)`; one trigger raising never
+changes whether any other configured trigger ran (per-trigger isolation);
+`background=true` orders the response before the trigger awaits complete and
+`background=false` the reverse; and exit settles every in-flight run
+(`Pending` -> `Cancelled`, idempotent), never leaving one `Pending`.
+
 ### Framework isolation
 
 `core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `tasks`,
-`encryption`, `util`, `config`, `cache`, and `http` are the framework, and the
-earlier packages/modules have been removed. A test pins the **layer ranks**
-`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks}`:
+`triggers`, `encryption`, `util`, `config`, `cache`, and `http` are the
+framework, and the earlier packages/modules have been removed. A test pins the
+**layer ranks**
+`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, triggers}`:
 no module imports a strictly-higher project layer at runtime (a static AST walk
 covering every layer in one rule), `if TYPE_CHECKING:` imports still allowed.
 `sql`, `mongo`, and `list` implement whatever small helpers they need locally
@@ -1192,7 +1274,7 @@ keyset cursor codec, extracted from `sql` by issue #116) and the shared
 `util` imports **no project package** at all (not even `core`),
 so the layer ranks are a clean
 
-    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks}
+    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, triggers}
 
 and `core` may import `util` — the dependency runs one way.
 
