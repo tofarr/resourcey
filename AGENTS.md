@@ -30,7 +30,7 @@ until the first release.
 
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
-  `04_simple_roles`, `05_full_rbac`, `06_filestore` — standalone
+  `04_simple_roles`, `05_full_rbac`, `06_filestore`, `07_oauth` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **reference app** (issue
@@ -92,11 +92,22 @@ until the first release.
   download routes *after* `create_app`, and the local medium's framework-signed
   `/_files/{key}` `PUT` / `GET` transfer endpoints. It is what proves the
   handshake end to end: create (`pending`, opaque key) → `upload-url` → byte
-  transfer → `complete` (`ready`, ETag) → `download`.
+  transfer → `complete` (`ready`, ETag) → `download`. `07_oauth` is the
+  **OAuth / OIDC app** (issue #151, Part 4 of the auth roadmap): the same board,
+  but authentication federates to an external identity provider — a
+  `configure_oauth(...)` call builds the config-rung client resource, the
+  `ExternalIdentity` map, the encrypted `OAuthToken` table, and an
+  `OAuthAuthenticator` (issuer-keyed lookup, JWKS validation, `alg` pinned to the
+  row's allowlist, `(iss, sub)` mapped to a local user the store validates as
+  live + `enabled`), and `register_oauth_routes` mounts the interactive
+  login / callback / refresh flow after `create_app`, minting a BFF session
+  cookie the composed `CookieAuthenticator` accepts. The committed migration
+  seeds the local users and the identity links, and `oauth_example/dev_idp.py`
+  mints a dev JWKS / token so the demo runs without an external IdP.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
-  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06).
+  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06), 8087 (07).
 
 ## Core design principles
 
@@ -127,15 +138,20 @@ Invoke these via `invoke_skill(name="...")` when working in the relevant area:
 ### `auth` — authentication and authorization
 
 `src/resourcey/auth/` is the authentication and authorization package (issues
-#63 / #118 / #127 / #131 / #132 / #133): `auth_principal.py` (the `Principal` /
+#63 / #118 / #127 / #131 / #132 / #133 / #151): `auth_principal.py` (the `Principal` /
 `PrincipalKind` / `AuthResult` vocabulary, the `Authenticator` seam, the
-`CompositeAuthenticator`, and the lenient/strict principal dependencies),
+`CompositeAuthenticator`, the shared `principal_is_active` store check, and the
+lenient/strict principal dependencies),
 `auth_api_key.py` (the `ApiKeyAuthenticator`), `auth_cookie.py` (the
 `CookieAuthenticator`), `auth_api_key_resource.py` (the DB-backed ORM `ApiKey` +
 inner `SqlResource`, the config-list inner `ListResource`, the exposed
 `ResourceView`s, and the key-generation helpers), `auth_api_key_service.py`
 (`StoredApiKeyService` / `ConfigApiKeyService`, both exposing `find_by_key`),
-and `auth_config.py` (`ApiKeysConfig` / `ApiKeyConfig` / `SessionCookieConfig`).
+`auth_config.py` (`ApiKeysConfig` / `ApiKeyConfig` / `SessionCookieConfig`), and
+the OAuth / OIDC method (issue #151) in `auth_oauth.py` / `auth_oauth_client.py`
+/ `auth_oauth_config.py` / `auth_oauth_provider.py` / `auth_oauth_routes.py` /
+`auth_oauth_service.py` / `auth_oauth_setup.py` / `auth_oauth_token.py` (see the
+OAuth section below).
 It imports only the lower framework layers, and `http` must not import `auth`
 (the app supplies the builder), so no cycle exists.
 
@@ -363,6 +379,113 @@ group-member / ACL), the group → role → permission walk, per-resource scopin
 multiple roles unioning, deny never overriding a grant, same-attribute ACLs
 collapsing to one set, the set leaf agreeing with the join, the threshold
 bounding a membership change, and the caller-scoping derivation.
+
+### `auth` OAuth / OIDC — the external-IdP rung (issue #151)
+
+Part 4 federates to an **external identity provider**. Every method so far is
+first-party (the framework mints and validates its own credential); OAuth accepts
+a credential the provider issued, or acts against an external service on a
+user's behalf. It plugs into the same `Authenticator` /
+`AuthorizedDependencyBuilder` seam, and composes with an API-key authenticator
+through `CompositeAuthenticator` for "OAuth **or** API key". Eight modules, all
+importing only the lower framework layers:
+
+* `auth_oauth_config.py` — `OAuthClientConfig` (one client) and **`IdpConfig`**
+  (a `BaseConfig` block parsing `APP_OAUTH_CLIENTS_<n>_*`, plus the flow paths /
+  state TTL / refresh-lease / JWKS-cache tuning). The **field split is
+  load-bearing**: the *verification* fields (`issuer`, `jwks_uri`, `audience`,
+  `algorithms`) are what `authenticate` reads per request; the *flow* fields
+  (`auth_url`, `token_url`, `refresh_url`, `client_secret`, `redirect_uri`,
+  `scopes`) are what the app reads. `refresh_url` (the provider's token endpoint)
+  is unrelated to `CookieAuthenticator.refresh_after` (the framework's own
+  cookie-staleness margin).
+* `auth_oauth_client.py` — the client resources and the `ExternalIdentity` map,
+  modeled on the API-key dual-source pattern: one declaration of full storage
+  truth, two backends (a config `ListResource` over `ConfigOAuthClient`, a DB
+  `SqlResource` over the `OAuthClient` ORM), a narrowing `oauth_client_view` that
+  projects `client_secret` away (the `KEY_QUERY_SURFACE_HIDDEN` idiom — no
+  one-time reveal, the flow path reads the secret server-side). The
+  `ExternalIdentity` ORM (`external_identities`) links a provider
+  `(issuer, subject)` pair to our internal `user_id`, unique on the pair and
+  indexed on `user_id`, so a principal can be correlated **across providers**.
+  Three `create_*_tables` helpers (`OAuthBase` / `ExternalIdentityBase` /
+  `OAuthTokenBase`) mirror `ApiKeyBase` / `FileBlobBase`.
+* `auth_oauth_service.py` — the `find_by_issuer` seam both client resources
+  expose (a dedicated method, never a `SearchFilter` — the query surface is
+  closed over the secret, so a guess-confirmation oracle must not be reachable),
+  plus `ExternalIdentityService.find_by_issuer_subject` / `link`.
+* `auth_oauth.py` — **`OAuthAuthenticator`**, the inbound verifier. Reads the
+  `Authorization: Bearer` token, decodes the **unverified** `iss` (used only to
+  *select* the row), looks the client up with `find_by_issuer`, and verifies the
+  token against **that row's** JWKS: signature, registered claims (`iss` / `aud`
+  / `exp` / `nbf`), and **`alg` pinned to the row's allowlist** — the header's
+  `alg` is never trusted (no `none` / HMAC-confusion). Claims map onto the
+  `Principal` vocabulary (`sub` → `external_id`, `scope` / `scp` → `scopes`, a
+  roles claim → `roles`, the rest → `claims`, provenance only). `(iss, sub)` is
+  resolved through the `ExternalIdentity` map to our internal `user_id` — a
+  first-seen pair is **fail-closed** — and the resolved id is checked with the
+  shared `principal_is_active`, so a valid external credential for a missing /
+  disabled local user is rejected: **the local user store stays authoritative
+  over the IdP**. A client row's own `roles` are unioned onto the principal's
+  (the #132 credential-carried vocabulary). The JWKS fetch is cached
+  (`jwks_cache_ttl`) and optionally host-allowlisted (`allowed_hosts`), since
+  `jwks_uri` from a row is an SSRF vector and `authenticate` runs per request.
+* `auth_oauth_token.py` — the one durable tier: the `OAuthToken` ORM
+  (`oauth_tokens`) with `access_token` / `refresh_token` as `SecretStr` columns
+  **encrypted at rest** (via `EncryptionService`), and **`OAuthTokenService`**
+  (`store` / `get` / `revoke` / `refresh`). Refresh is **not** a naive
+  read-modify-write: `lease_owner` + `lease_until` are a lease / compare-and-swap
+  column (never `SELECT … FOR UPDATE`, which SQLite silently drops and Mongo
+  lacks), and a refresh is claimed with a conditional `UPDATE` whose affected row
+  count is the whole answer. The winner exchanges the token and persists the new
+  (and rotated) one atomically with releasing the lease; a loser polls briefly
+  and observes the fresh token — **at most one refresher per
+  `(principal, client)`**. A refresh failure marks the row revoked (re-auth is
+  required). `refresh_rotates_token` / `refresh_is_single_use` are the
+  provider-flavour flags.
+* `auth_oauth_provider.py` — **`CredentialProvider`**, the outbound seam
+  (`async access_token(principal, client) -> str`), and its concrete
+  `OAuthCredentialProvider` over the token service: the same refresh lifecycle
+  serves both directions (inbound *verifies*, outbound *supplies*), so a caller
+  needing a fresh outbound token for `(principal, client)` refreshes under the
+  lease and gets a valid one. `authorize_url` / `exchange_code` / `refresh`
+  perform the flow exchanges; the HTTP client is injected so tests touch no
+  network.
+* `auth_oauth_routes.py` — `register_oauth_routes(app, client_resource, …)`,
+  mounted **after** `create_app` (the `06_filestore` pattern), owning the
+  interactive flow: `GET …/oauth/login` → `auth_url` (state + PKCE in a
+  short-TTL JWE **cookie**, not a table), `GET …/oauth/callback` → exchange the
+  code, persist the token, mint **our own** session cookie, `POST …/oauth/refresh`
+  → the locked refresh. **BFF posture**: the browser presents *our* cookie, never
+  the provider's access token. **Expiry alignment**: our session `exp` matches
+  the IdP token's expiry and the browser `Max-Age` is clamped down to it, never
+  longer than the provider grants. The refresh token lives only, encrypted, in
+  the token table — encoding a provider credential into a cookie or an API key is
+  explicitly out.
+* `auth_oauth_setup.py` — **`configure_oauth(...)`**, the one-stop wiring helper
+  (`OAuthSetup`): one call builds the client resource from whichever rung
+  (`"config"` / `"db"`), the token + identity resources, the client / token
+  views, and a ready `OAuthAuthenticator`, and hands back the pieces
+  `register_oauth_routes` needs.
+
+`Principal` gains one additive field, **`external_id: str | None`** — the
+provider's opaque subject carried *alongside* the internal `uuid.UUID` id (a
+subject is `auth0|abc`, a numeric Google id, a DN; it is never coerced into the
+id). The shared store check is factored into
+`auth_principal.principal_is_active(user_resource, principal)`, used by **both**
+the API-key and OAuth authenticators so the store stays authoritative over any
+external credential. `oauth_token_view` exposes the token table read-only with
+every secret-bearing field projected away — debuggability is why it is a
+resource; hiding it entirely is the production default. The DB-backed client
+resource is a **privilege surface** (writing a row's `issuer` / `jwks_uri` points
+validation at a JWKS the attacker controls), so access must be admin-only.
+
+`specs/oauth.qnt` pins the verification pipeline (in `make specs` and CI): issuer
+selects the client, `aud` is scoped to that row, a token failing `iss` / `aud` /
+`exp` / `alg` is **invalid** (not anonymous), `alg` is pinned to the row's
+allowlist (no HMAC confusion), an unmapped `(iss, sub)` is fail-closed, the local
+user store is authoritative (a disabled / missing user ⇒ invalid), and absent is
+not invalid. `examples/07_oauth` is the runnable app.
 
 ### Storage backends and the shared paging base
 

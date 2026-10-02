@@ -55,9 +55,9 @@ from resourcey.auth.auth_principal import (
     AuthResult,
     Principal,
     PrincipalKind,
+    principal_is_active,
 )
 from resourcey.auth.auth_role import roles_from_credential
-from resourcey.core.service import NotFoundError
 
 API_KEY_HEADER_NAME = "X-API-Key"
 
@@ -225,25 +225,11 @@ class ApiKeyAuthenticator(Authenticator):
     async def _principal_is_active(self, principal: Principal) -> bool:
         """Whether ``principal`` is a live user in the configured principal store.
 
-        With no ``user_resource`` every principal is accepted (credential-only
-        posture). With one, an **anonymous-id service** principal is left to the
-        key check alone (there is nothing to look up), while a principal with an
-        id must be found in the store and pass its ``enabled`` flag — so a
-        disabled user is rejected however their key was issued. A store object
-        that does not carry an ``enabled`` attribute is treated as enabled (the
-        store's own choice to be identity-only), while a store row that is
-        *missing* is a rejection. The lookup runs over a **fresh ctx**, like
-        :meth:`lookup_api_key`, so it never adopts the request's storage.
+        Delegates to the shared
+        :func:`~resourcey.auth.auth_principal.principal_is_active` so the
+        API-key and OAuth methods enforce the identical store rule.
         """
-        if self.user_resource is None or principal.id is None:
-            return True
-        service = await self.user_resource.get_service({})
-        async with service:
-            try:
-                user = await service.read(principal.id)
-            except NotFoundError:
-                return False
-        return bool(getattr(user, "enabled", True))
+        return await principal_is_active(self.user_resource, principal)
 
 
 def _reject() -> HTTPException:

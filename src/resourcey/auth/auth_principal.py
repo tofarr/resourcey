@@ -44,6 +44,7 @@ from typing import Any
 from fastapi import Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from resourcey.core.service import NotFoundError
 from resourcey.util.models import DiscriminatedUnionMixin
 
 # The ``WWW-Authenticate`` challenge sent with a generic 401. A method may send
@@ -83,6 +84,13 @@ class Principal(BaseModel):
             ``user_id`` a policy reduction scopes against, and — in the
             store-backed rung — the key a roles / groups lookup resolves.
         kind: Whether this is a human, a machine, or anonymous.
+        external_id: The identity provider's subject for the credential in play
+            (an OAuth / OIDC ``sub``), when the principal authenticated through
+            an external IdP. A provider subject is an opaque string (``auth0|abc``,
+            a numeric Google id, a DN), so it is carried *alongside* the internal
+            :attr:`id` rather than coerced into it; ``None`` for a first-party
+            credential. Correlation across providers is the ``ExternalIdentity``
+            mapping's job.
         roles: The principal's roles. **Simple-case only**: populated when roles
             are few and carried on the credential; deliberately empty in the
             store-backed rung, which resolves roles per request.
@@ -96,6 +104,7 @@ class Principal(BaseModel):
 
     id: uuid.UUID | None = None
     kind: PrincipalKind = PrincipalKind.ANONYMOUS
+    external_id: str | None = None
     roles: frozenset[str] = frozenset()
     scopes: frozenset[str] = frozenset()
     claims: dict[str, str] = Field(default_factory=dict)
@@ -348,3 +357,30 @@ async def current_principal(request: Request) -> Principal | None:
     """
     stored = _stored_auth_result(request)
     return stored.principal if stored is not None else None
+
+
+async def principal_is_active(user_resource: Any, principal: Principal) -> bool:
+    """Whether ``principal`` is a live user in the configured principal store.
+
+    The shared principal-store check: with no ``user_resource`` every principal
+    is accepted (the credential-only posture), and a principal with no id (a
+    bare service principal) has nothing to look up. With a store, the id must be
+    found and pass its ``enabled`` flag — so a disabled user is rejected however
+    their credential was issued. A store row that does not carry an ``enabled``
+    attribute is treated as enabled (an identity-only store), while a *missing*
+    row is a rejection. The lookup runs over a **fresh ctx**, so it never adopts
+    (or is adopted by) the request's storage.
+
+    Every authenticator that can resolve a stored principal uses this — the
+    API-key and OAuth methods share one implementation so the store stays
+    authoritative over any external credential.
+    """
+    if user_resource is None or principal.id is None:
+        return True
+    service = await user_resource.get_service({})
+    async with service:
+        try:
+            user = await service.read(principal.id)
+        except NotFoundError:
+            return False
+    return bool(getattr(user, "enabled", True))
