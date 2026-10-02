@@ -1,38 +1,24 @@
-"""The ``files`` resource — the metadata half of the file store.
+"""The ``files`` resource — a medium-native existence record (issue #158).
 
-The byte half is a :class:`~resourcey.filestore.file_store.FileStore`; the
-metadata half is an ordinary SQL resource, so it gets the full standard surface
-(create / read / update / delete / search / count / batch) plus cache headers.
-:func:`build_files_resource` wires the two together through
-:func:`~resourcey.filestore.file_metadata.file_resource`, which:
-
-* assigns the opaque storage ``key`` and the ``pending`` status on create
-  (server-owned, never client-supplied);
-* removes the stored object when a row is deleted, so no orphan remains;
-* validates an optional declared-size cap (``APP_MAX_SIZE``);
-* caches reads with a strong ETag over the projected bytes.
-
-A client addresses a file by ``id``; the ``key`` is hidden from every response
-and reachable only through the handshake routes.
+There is no metadata table: :class:`~resourcey.filestore.file_resource.FileResource`
+serves ``files`` directly over whichever :class:`~resourcey.filestore.file_store.FileStore`
+medium the app selects (``store``, the same instance registered in the
+manifest's ``managers`` slot), so "does the medium have the bytes" is the only
+source of truth for a file's existence. :func:`build_files_resource` is a thin
+wrapper so ``app.py`` need not import :class:`FileResource` directly.
 """
 
 from __future__ import annotations
 
-from resourcey.filestore.file_metadata import FileMetadataResource, file_resource
+from resourcey.filestore.file_resource import FileResource
 from resourcey.filestore.file_store import FileStore
-from resourcey.sql.session_manager import SqlSessionManager
 
 
 def build_files_resource(
     store: FileStore,
     *,
-    session_manager: SqlSessionManager | None = None,
     path: str = "files",
-) -> FileMetadataResource:
-    """The conventional ``files`` metadata resource over ``store``.
-
-    ``store`` is the same medium instance registered in the manifest's
-    ``managers`` slot (so it is entered with the app); ``session_manager`` is the
-    app's manager, threaded the same way the board's resources thread it.
-    """
-    return file_resource(store, path=path, session_manager=session_manager)
+    max_size: int | None = None,
+) -> FileResource[object, str]:
+    """The conventional ``files`` resource over ``store``."""
+    return FileResource(store, path=path, max_size=max_size)

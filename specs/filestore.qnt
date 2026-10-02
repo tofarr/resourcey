@@ -1,140 +1,98 @@
-// filestore.qnt — formal spec for the pre-signed-URL file handshake (issue #117).
+// filestore.qnt — formal spec for the pre-signed-URL file store (issues #117, #158).
 //
-// File bytes live in a storage medium (S3 / SQL blob / local directory) and the
-// metadata — name, size, MIME type, ETag, status, opaque key — is a normal
-// resource. The bytes never pass through a metadata request handler: the API
-// mints a short-lived *capability* URL bound to exactly one ``(key, op)`` pair,
-// and the client transfers directly against it.
-//
-// The handshake has three steps:
-//   1. ``create``     — allocate an opaque key + ``pending`` status.
-//   2. ``upload``     — the client PUTs the bytes against the ``put`` capability.
-//   3. ``complete``   — the API heads the object, verifies it, flips to ``ready``,
-//                       and records the medium's ETag.
-// A ``ready`` file can be ``download``ed (a ``get`` capability); ``delete``
-// removes the row *and* the object, so no orphan remains.
+// File bytes live in a storage medium (S3 / SQL blob / local directory). There
+// is **no metadata table and no tracked status**: "does the medium have the
+// bytes" is the only source of truth for a file's existence. ``create`` only
+// *allocates* an opaque key and mints an upload capability — nothing is
+// persisted; the file comes into existence the moment the bytes land, with no
+// separate completion call. A capability carries the client's declared size
+// (and, in the real service, a checksum) as a signed claim, verified against
+// the uploaded bytes before the write commits (``verify_upload``) — a mismatch
+// is simply rejected, with no ``failed`` status to track: the client may retry
+// against the same (still-valid) capability. ``delete`` removes the object, so
+// no orphan remains.
 //
 // The failure cases are modelled as *preconditions* (pure predicates over the
 // state) rather than failing actions, so a test can assert the guard directly.
 // Each predicate mirrors a check the service enforces.
 //
 // Invariants:
-//   - keysAreUnique: no two file rows share a storage key (the key is the
+//   - keysAreUnique: no two allocations share a storage key (the key is the
 //     medium's addressing unit; a collision would let one client overwrite
 //     another's bytes).
-//   - readyImpliesUploaded: a ``ready`` file's key is present in the medium.
-//   - etagMatchesTheMedium: a ``ready`` file's recorded ETag equals the medium's
-//     ETag for its key.
-//   - pendingHasNoEtag: a ``pending`` file records no ETag.
-//   - capabilityIsBound: a capability token authorizes exactly the operation and
-//     the key it was minted for.
+//   - fileExistsIffUploaded: a key is readable (``read`` / ``search`` finds it)
+//     exactly when the medium holds bytes for it — there is no intermediate
+//     "pending" state distinct from upload itself.
+//   - uploadRejectsAMismatch: an upload whose byte count does not match its
+//     capability's declared size leaves the medium unchanged (the state after
+//     a rejected upload is identical to the state before it).
+//   - capabilityIsBound: a capability token authorizes exactly the operation
+//     and the key it was minted for.
 
 module filestore {
-  // A file's lifecycle status. ``pending`` is created-but-not-completed;
-  // ``ready`` is verified and downloadable.
-  type Status = Pending | Ready
-
   // A capability operation, mirroring PUT_OPERATION / GET_OPERATION.
   type Op = Put | Get
 
-  // The medium's ETag for a key: absent until the object exists.
-  type Etag = NoEtag | EtagOf(int)
-
-  // A metadata row: the opaque key, the client's declared size, the status, and
-  // the medium's ETag once completed (``NoEtag`` while pending).
-  type Row = {
-    key: int,
-    declaredSize: int,
-    status: Status,
-    etag: Etag,
-  }
-
-  var rows: int -> Row
+  // An allocated key's declared size claim (the capability's signed claim),
+  // recorded at ``create`` time so ``upload`` can verify against it.
+  var declaredSize: int -> int
   var nextId: int
-  // The medium: key -> stored object size. A key absent here has no object.
+  // The medium: key -> stored object size. A key absent here has no object —
+  // and therefore does not exist as a file.
   var store: int -> int
 
   action init = all {
-    rows' = Map(),
+    declaredSize' = Map(),
     nextId' = 1,
     store' = Map(),
   }
 
-  // create: allocate the next id as the key, status pending, no ETag.
+  // create: allocate the next id as the key and record its declared-size
+  // claim. Nothing is written to the medium yet.
   action create(declared: int): bool = {
     val id = nextId
     all {
-      rows' = rows.put(id, { key: id, declaredSize: declared, status: Pending, etag: NoEtag }),
+      declaredSize' = declaredSize.put(id, declared),
       store' = store,
       nextId' = nextId + 1,
       true,
     }
   }
 
-  // upload: the ``put`` capability writes bytes for a key. A key with no row is
-  // refused (the capability is minted only for an existing file).
+  // upload: the ``put`` capability writes bytes for an allocated key, but only
+  // when the byte count matches the declared-size claim (``verify_upload``) —
+  // a mismatch leaves the medium unchanged (the client may retry).
   action upload(key: int, stored: int): bool = all {
-    assert(rows.keys().exists(id => rows.get(id).key == key)),
-    store' = store.put(key, stored),
-    rows' = rows,
+    assert(declaredSize.keys().contains(key)),
+    store' = if (stored == declaredSize.get(key)) store.put(key, stored) else store,
+    declaredSize' = declaredSize,
     nextId' = nextId,
     true,
   }
 
-  // complete: verify the uploaded object then flip the row to ready.
-  action complete(id: int): bool = {
-    val row = rows.get(id)
-    all {
-      assert(canComplete(id, rows, store)),
-      rows' = rows.put(id, { ...row, status: Ready, etag: EtagOf(store.get(row.key)) }),
-      store' = store,
-      nextId' = nextId,
-      true,
-    }
-  }
-
-  // download: allowed only for a ready file (the row's status gates the mint).
-  action download(id: int): bool = all {
-    assert(rows.keys().contains(id)),
-    assert(rows.get(id).status == Ready),
-    rows' = rows,
-    store' = store,
+  // delete: remove the object, so no orphan remains. A key with no object is
+  // a no-op (mirrors the medium's own delete semantics).
+  action delete(key: int): bool = all {
+    store' = store.keys().filter(k => k != key).fold(
+      Map(),
+      (acc, k) => acc.put(k, store.get(k))
+    ),
+    declaredSize' = declaredSize,
     nextId' = nextId,
     true,
-  }
-
-  // delete: remove the row and the object, so no orphan remains.
-  action delete(id: int): bool = {
-    val key = rows.get(id).key
-    all {
-      rows' = rows.keys().filter(k => k != id).fold(
-        Map(),
-        (acc, k) => acc.put(k, rows.get(k))
-      ),
-      store' = store.keys().filter(k => k != key).fold(
-        Map(),
-        (acc, k) => acc.put(k, store.get(k))
-      ),
-      nextId' = nextId,
-      true,
-    }
   }
 
   // The preconditions, as pure predicates over the state.
 
-  // complete succeeds only for a pending row whose object exists and whose size
-  // matches the declared size. Mirrors the service's checks.
-  pure def canComplete(id: int, r: int -> Row, s: int -> int): bool = {
-    val row = r.get(id)
-    r.keys().contains(id) and
-    row.status == Pending and
-    s.keys().contains(row.key) and
-    s.get(row.key) == row.declaredSize
-  }
+  // read / download / content all gate on the same existence check: the
+  // medium holds bytes for the key. No separate "ready" flag exists.
+  pure def fileExists(key: int, s: int -> int): bool =
+    s.keys().contains(key)
 
-  // download succeeds only for a ready row.
-  pure def canDownload(id: int, r: int -> Row): bool =
-    r.keys().contains(id) and r.get(id).status == Ready
+  // An upload with the given byte count would be accepted (committed) rather
+  // than silently rejected.
+  pure def uploadWouldSucceed(key: int, stored: int, claims: int -> int): bool =
+    claims.keys().contains(key) and claims.get(key) == stored
 
   // A capability token authorizes exactly one (key, op) pair. Verifying a token
   // against a presented (key, op) succeeds only on an exact match.
@@ -148,92 +106,60 @@ module filestore {
 
   // Tests
 
-  // The happy path: create -> upload the declared size -> complete -> ready.
-  run handshakeReachesReady = {
+  // The happy path: create -> the file does not exist yet -> upload the
+  // declared size -> the file exists.
+  run happyPath = {
     init
       .then(create(5))
+      .then(all {
+        assert(not(fileExists(1, store))),
+        declaredSize' = declaredSize,
+        nextId' = nextId,
+        store' = store,
+      })
       .then(upload(1, 5))
-      .then(complete(1))
       .then(all {
-        assert(rows.get(1).status == Ready),
-        assert(rows.get(1).etag == EtagOf(5)),
-        assert(store.keys().contains(rows.get(1).key)),
-        rows' = rows,
+        assert(fileExists(1, store)),
+        assert(store.get(1) == 5),
+        declaredSize' = declaredSize,
         nextId' = nextId,
         store' = store,
       })
   }
 
-  // complete requires an uploaded object.
-  run completeRequiresAnObject = {
-    init
-      .then(create(5))
-      .then(all {
-        assert(not(store.keys().contains(rows.get(1).key))),
-        assert(not(canComplete(1, rows, store))),
-        assert(rows.get(1).status == Pending),
-        rows' = rows,
-        nextId' = nextId,
-        store' = store,
-      })
-  }
-
-  // complete verifies the uploaded size against the declared size.
-  run completeVerifiesSize = {
+  // A size mismatch is rejected: the medium is left exactly as it was, so a
+  // retry against the same capability can still succeed.
+  run uploadRejectsAMismatch = {
     init
       .then(create(5))
       .then(upload(1, 3))
       .then(all {
-        assert(store.get(rows.get(1).key) != rows.get(1).declaredSize),
-        assert(not(canComplete(1, rows, store))),
-        rows' = rows,
+        assert(not(uploadWouldSucceed(1, 3, declaredSize))),
+        assert(not(fileExists(1, store))),
+        declaredSize' = declaredSize,
+        nextId' = nextId,
+        store' = store,
+      })
+      // The client retries with the correct size against the same capability.
+      .then(upload(1, 5))
+      .then(all {
+        assert(fileExists(1, store)),
+        declaredSize' = declaredSize,
         nextId' = nextId,
         store' = store,
       })
   }
 
-  // complete is refused on an already-ready file (no double-complete).
-  run completeIsIdempotentOnce = {
+  // An already-uploaded key can be uploaded again (the claim still matches) —
+  // there is no "no double-upload" guard, since there is no status to track.
+  run uploadIsNotOneShot = {
     init
       .then(create(5))
       .then(upload(1, 5))
-      .then(complete(1))
-      .then(all {
-        assert(not(canComplete(1, rows, store))),
-        assert(rows.get(1).status == Ready),
-        rows' = rows,
-        nextId' = nextId,
-        store' = store,
-      })
-  }
-
-  // download is refused before the file is ready, allowed after.
-  run downloadRequiresReady = {
-    init
-      .then(create(5))
       .then(upload(1, 5))
       .then(all {
-        assert(not(canDownload(1, rows))),
-        rows' = rows,
-        nextId' = nextId,
-        store' = store,
-      })
-      .then(complete(1))
-      .then(all {
-        assert(canDownload(1, rows)),
-        rows' = rows,
-        nextId' = nextId,
-        store' = store,
-      })
-  }
-
-  // upload is refused for a key with no metadata row.
-  run uploadRequiresARow = {
-    init
-      .then(create(5))
-      .then(all {
-        assert(not(rows.keys().exists(id => rows.get(id).key == 999))),
-        rows' = rows,
+        assert(fileExists(1, store)),
+        declaredSize' = declaredSize,
         nextId' = nextId,
         store' = store,
       })
@@ -245,11 +171,10 @@ module filestore {
       .then(create(5))
       .then(create(5))
       .then(all {
-        assert(rows.keys().size() == 2),
-        assert(rows.get(1).key == 1),
-        assert(rows.get(2).key == 2),
-        assert(rows.get(1).key != rows.get(2).key),
-        rows' = rows,
+        assert(declaredSize.keys().size() == 2),
+        assert(declaredSize.keys().contains(1)),
+        assert(declaredSize.keys().contains(2)),
+        declaredSize' = declaredSize,
         nextId' = nextId,
         store' = store,
       })
@@ -266,17 +191,15 @@ module filestore {
     }
   }
 
-  // delete removes both the row and the object.
+  // delete removes the object; the file no longer exists.
   run deleteRemovesTheObject = {
     init
       .then(create(5))
       .then(upload(1, 5))
-      .then(complete(1))
       .then(delete(1))
       .then(all {
-        assert(not(rows.keys().contains(1))),
-        assert(store.keys().size() == 0),
-        rows' = rows,
+        assert(not(fileExists(1, store))),
+        declaredSize' = declaredSize,
         nextId' = nextId,
         store' = store,
       })
@@ -287,19 +210,17 @@ module filestore {
     init
       .then(create(5))
       .then(all {
-        assert(rows.keys().size() == 1),
-        assert(rows.get(1).etag == NoEtag),
-        rows' = rows,
+        assert(declaredSize.keys().size() == 1),
+        assert(not(fileExists(1, store))),
+        declaredSize' = declaredSize,
         nextId' = nextId,
         store' = store,
       })
       .then(upload(1, 5))
-      .then(complete(1))
       .then(all {
-        assert(rows.get(1).status == Ready),
-        assert(rows.get(1).etag == EtagOf(store.get(rows.get(1).key))),
-        assert(store.keys().contains(rows.get(1).key)),
-        rows' = rows,
+        assert(fileExists(1, store)),
+        assert(store.get(1) == 5),
+        declaredSize' = declaredSize,
         nextId' = nextId,
         store' = store,
       })
