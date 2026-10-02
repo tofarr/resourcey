@@ -1,0 +1,57 @@
+[project]
+name = "webhooks-example"
+version = "0.1.0"
+description = "Example 08 — edit-event triggers / webhooks built on resourcey.triggers (SQLite by default)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # resourcey from GitHub main. A standalone copy of this example installs
+    # this git dependency directly; inside the resourcey repository the
+    # [tool.uv.sources] override below redirects it to the parent checkout
+    # (your branch or PR) instead.
+    "resourcey @ git+https://github.com/tofarr/resourcey.git@main",
+    # SQLite async driver — the example defaults to a local SQLite file.
+    "aiosqlite>=0.22",
+    # Alembic is driven directly against the ORM metadata, so it is a direct
+    # dependency of the example, not only a transitive one.
+    "alembic>=1.13",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+]
+
+[project.scripts]
+# Run with `uvicorn webhooks_example.app:app` (the manifest-built FastAPI app).
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["webhooks_example"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv.sources]
+# Resolve resourcey from the parent checkout when running inside the resourcey
+# repository — this is what makes the example test your branch/PR, not main.
+# A standalone copy no longer finds that path; run `uv sync --no-sources` there
+# to fall back to the git dependency declared above (see README).
+resourcey = { path = "../..", editable = true }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["resourcey", "webhooks_example"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

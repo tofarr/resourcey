@@ -101,6 +101,21 @@
             "options": { "cwd": "${workspaceFolder}/examples/07_oauth" },
             "dependsOn": "examples: sync 07_oauth",
             "problemMatcher": []
+        },
+        {
+            "label": "examples: sync 08_webhooks",
+            "type": "shell",
+            "command": "uv sync",
+            "options": { "cwd": "${workspaceFolder}/examples/08_webhooks" },
+            "problemMatcher": []
+        },
+        {
+            "label": "examples: migrate 08_webhooks",
+            "type": "shell",
+            "command": "uv run --env-file .env alembic upgrade head",
+            "options": { "cwd": "${workspaceFolder}/examples/08_webhooks" },
+            "dependsOn": "examples: sync 08_webhooks",
+            "problemMatcher": []
         }
     ]
 }

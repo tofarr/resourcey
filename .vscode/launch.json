@@ -99,6 +99,18 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "preLaunchTask": "examples: migrate 07_oauth"
+        },
+        {
+            "name": "Debug 08 — Webhooks (SQLite)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["webhooks_example.app:app", "--env-file", ".env", "--port", "8088"],
+            "cwd": "${workspaceFolder}/examples/08_webhooks",
+            "python": "${workspaceFolder}/examples/08_webhooks/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 08_webhooks"
         }
     ],
     "compounds": [
@@ -111,7 +123,8 @@
                 "Debug 04 — Simple Roles (SQLite)",
                 "Debug 05 — Full RBAC (SQLite)",
                 "Debug 06 — File Store (local medium, SQLite)",
-                "Debug 07 — OAuth (SQLite)"
+                "Debug 07 — OAuth (SQLite)",
+                "Debug 08 — Webhooks (SQLite)"
             ],
             "stopAll": true
         }

@@ -30,7 +30,8 @@ until the first release.
 
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
-  `04_simple_roles`, `05_full_rbac`, `06_filestore`, `07_oauth` — standalone
+  `04_simple_roles`, `05_full_rbac`, `06_filestore`, `07_oauth`,
+  `08_webhooks` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **reference app** (issue
@@ -104,10 +105,24 @@ until the first release.
   cookie the composed `CookieAuthenticator` accepts. The committed migration
   seeds the local users and the identity links, and `oauth_example/dev_idp.py`
   mints a dev JWKS / token so the demo runs without an external IdP.
+  `08_webhooks` is the **triggers / webhooks app** (issue #18, built on
+  `resourcey.triggers` from issue #155 / PR #156): the same `Thread` /
+  `Message` board, demonstrating **both** ways to attach an edit-event
+  trigger on two different resources — `threads` wraps a plain `SqlResource`
+  directly in `TriggeredResource(..., on_edit=[...])` (the no-config seam),
+  while `messages` stays an untouched resource declaration and gets its
+  trigger from the opt-in, env-driven `TriggerConfig` (`APP_TRIGGERS_<n>_*`)
+  via `TriggeredDependencyBuilder.from_config(...)` passed as `create_app`'s
+  `dependency_builder=`. The concrete `Trigger`, `LoggingWebhookTrigger`
+  (`webhooks_example/triggers.py`), logs exactly what a real webhook sender
+  would have POSTed instead of making a network call — proving fire-once-per-
+  write / success-only / per-trigger-isolated / background-by-default
+  end to end with no second server, no mock, and no network access.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
-  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06), 8087 (07).
+  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06), 8087 (07),
+  8088 (08).
 
 ## Core design principles
 
@@ -1372,6 +1387,7 @@ changes whether any other configured trigger ran (per-trigger isolation);
 `background=true` orders the response before the trigger awaits complete and
 `background=false` the reverse; and exit settles every in-flight run
 (`Pending` -> `Cancelled`, idempotent), never leaving one `Pending`.
+`examples/08_webhooks` is the runnable app (issue #18).
 
 ### Framework isolation
 
