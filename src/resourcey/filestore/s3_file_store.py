@@ -1,30 +1,33 @@
-"""``S3FileStore`` -- file bytes in an S3 bucket with native pre-signed URLs (issue #117, #158).
+"""``S3FileStore`` -- file bytes in an S3 bucket, uploaded through the API (issue #117, #158).
 
-The production medium. Put / get / head / delete / list use the S3 client (the
-server-side fallback), while ``presign_upload`` / ``presign_get`` are a purely
-local SigV4 computation -- no network round trip and no blocking of the event
-loop -- so the client transfers directly against S3 and the API only mints the
-capability.
+The production medium. ``create`` is a direct ``multipart/form-data`` upload
+to the API (case 2 of the upload-design discussion, not a pre-signed-URL
+handshake), so the API process proxies the bytes to S3 via ``put_object`` --
+the trade-off deliberately made in exchange for the bytes genuinely existing
+by the time ``create`` returns (so a :class:`~resourcey.triggers.triggered_resource.TriggeredResource`
+fires only after a real upload). ``presign_get`` stays a purely local SigV4
+computation -- no network round trip -- so **download** still transfers
+directly against S3, unaffected by this trade-off.
 
-``presign_upload`` mints a **presigned ``POST``** (not a ``PUT``), with policy
-conditions enforcing the exact key, the declared ``content-length-range``, and
-the content type -- so S3 itself enforces the upload matches the client's
-declaration atomically, the same guarantee :func:`~resourcey.filestore.file_store.verify_upload`
-gives the local / SQL media. ``name`` / ``checksum`` ride along as extra
-presigned-POST form fields, stored as S3 object **user metadata**
-(``x-amz-meta-*``) -- readable only via ``HeadObject`` (i.e. only through
+``name`` / ``checksum`` are stored as S3 object **user metadata**
+(``x-amz-meta-*``), readable only via ``HeadObject`` (i.e. only through
 ``head``), never through ``ListObjectsV2`` (``list_objects``), which is why
 ``list_objects`` below reports ``name`` / ``content_type`` / ``checksum`` as
 ``None``: it is the cheapest common contract across the three media, made
 explicit rather than letting this medium be incidentally richer than it can
 actually list.
 
+A single ``put_object`` call still means the upload is bound by
+``S3_MAX_PUT_BYTES`` (5 GiB, S3's own single-``PUT`` cap); streaming the
+upload straight into S3's multipart-upload API (so neither this process nor
+S3 ever needs the whole object in memory at once) is valuable future work,
+deliberately out of scope here.
+
 ``boto3`` (and the ``s3`` extra, ``resourcey[s3]``) is imported **lazily**,
 only when a real client is built, so ``filestore`` imports cleanly without
 it. An explicit ``client=`` is the escape hatch: tests and callers may inject a
 stub exposing ``put_object`` / ``get_object`` / ``head_object`` /
-``delete_object`` / ``list_objects_v2`` / ``generate_presigned_url`` /
-``generate_presigned_post``.
+``delete_object`` / ``list_objects_v2`` / ``generate_presigned_url``.
 
 This module imports no code outside the framework.
 """
@@ -39,10 +42,9 @@ from pydantic import PrivateAttr
 
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.encryption.encryption_service import utc_now
-from resourcey.filestore.file_store import FileStore, PresignedUrl, StoredObject, UploadCapability
+from resourcey.filestore.file_store import FileStore, PresignedUrl, StoredObject
 
-# The action names boto3 generates pre-signed URLs for.
-_PUT_ACTION = "put_object"
+# The action name boto3 generates pre-signed URLs for.
 _GET_ACTION = "get_object"
 
 # S3's single-``PUT`` object cap; multipart uploads are out of scope.
@@ -93,7 +95,6 @@ class S3FileStore(FileStore):
         content_type: str | None = None,
         name: str | None = None,
         checksum: str | None = None,
-        declared_size: int | None = None,
     ) -> StoredObject:
         if len(data) > S3_MAX_PUT_BYTES:
             raise ResourceyConfigError(
@@ -190,52 +191,7 @@ class S3FileStore(FileStore):
                 return total
             continuation = response.get("NextContinuationToken")
 
-    # -- native pre-signed capabilities --------------------------------
-
-    def presign_upload(
-        self,
-        key: str,
-        *,
-        name: str | None,
-        content_type: str | None,
-        size: int | None,
-        checksum: str | None,
-        expires_in_seconds: int,
-    ) -> UploadCapability:
-        """Mint a presigned ``POST`` whose policy conditions pin the upload.
-
-        The exact key, a ``content-length-range`` from the declared ``size``
-        (falling back to ``S3_MAX_PUT_BYTES``), and the content type are all
-        policy conditions, so S3 itself rejects an upload that does not match
-        -- the client cannot widen its own declaration.
-        """
-        client = self._get_client()
-        object_key = self._object_key(key)
-        fields: dict[str, str] = {}
-        conditions: list[Any] = [{"key": object_key}]
-        if content_type is not None:
-            fields["Content-Type"] = content_type
-            conditions.append({"Content-Type": content_type})
-        metadata = _metadata_fields(name, checksum)
-        for meta_key, meta_value in metadata.items():
-            field_name = f"x-amz-meta-{meta_key}"
-            fields[field_name] = meta_value
-            conditions.append({field_name: meta_value})
-        max_bytes = size if size is not None else S3_MAX_PUT_BYTES
-        conditions.append(["content-length-range", 0, max_bytes])
-        presigned = client.generate_presigned_post(
-            Bucket=self.bucket,
-            Key=object_key,
-            Fields=fields,
-            Conditions=conditions,
-            ExpiresIn=expires_in_seconds,
-        )
-        return UploadCapability(
-            url=presigned["url"],
-            method="POST",
-            fields=dict(presigned["fields"]),
-            expires_at=utc_now() + timedelta(seconds=expires_in_seconds),
-        )
+    # -- native pre-signed capability -----------------------------------
 
     def presign_get(self, key: str, *, expires_in_seconds: int) -> PresignedUrl:
         url = self._presign(

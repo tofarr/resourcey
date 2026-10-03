@@ -1,32 +1,35 @@
 """File-store example app entry point.
 
-This example shows the file store (issue #158): file **bytes** live in a
-pluggable medium, the client transfers them directly against a short-lived
-capability URL, and the API owns only **authorization**. There is no metadata
-table -- "does the medium have the bytes" is the only source of truth for a
-file's existence:
+This example shows the file store (issues #117, #158): file **bytes** live in
+a pluggable medium, and the API owns only **authorization**. There is no
+metadata table -- "does the medium have the bytes" is the only source of
+truth for a file's existence:
 
-1. ``POST /files`` allocates an opaque key and mints an upload capability
-   (``202``; nothing is persisted yet).
-2. The client transfers the bytes directly against that capability (a ``PUT``
-   for the local / SQL media, a presigned ``POST`` for S3).
-3. The file now exists: ``GET /files/{id}`` / ``GET /files`` resolve directly
+1. ``POST /files`` -- a ``multipart/form-data`` body with one ``file`` part --
+   *is* the upload: ``name`` / ``content_type`` are read off the part, and
+   ``size`` / ``checksum`` are computed from the bytes actually received.
+   The response (``201``) is the created file, bytes and all already landed.
+2. The file now exists: ``GET /files/{id}`` / ``GET /files`` resolve directly
    against the medium.
-4. ``GET /files/{id}/download`` mints a fresh ``get`` capability (the JSON
-   shape -- for a non-browser client); ``GET /files/{id}/content`` fetches the
-   bytes themselves (a redirect for S3, streamed directly for Local / SQL --
-   see :mod:`resourcey.filestore.file_routes` for why both exist: a plain
+3. ``GET /files/{id}/download`` mints a ``get`` capability (the JSON shape --
+   for a non-browser client); ``GET /files/{id}/content`` fetches the bytes
+   themselves (a redirect for S3, streamed directly for Local / SQL -- see
+   :mod:`resourcey.filestore.file_routes` for why both exist: a plain
    ``<a href>`` / ``<img src>`` cannot carry an API key).
 
-The medium decides *what the upload/download URL is*:
+The medium decides *what the download URL is*:
 :class:`~resourcey.filestore.s3_file_store.S3FileStore` returns S3's own native
-SigV4 URLs, while the local / SQL media return a framework-signed capability
-served by this app's own ``/_files/{key}`` ``PUT`` / ``GET`` transfer
-endpoints.
+SigV4 URL, while the local / SQL media return a framework-signed capability
+served by this app's own ``/_files/{key}`` ``GET`` transfer endpoint. Upload
+has no capability of its own: the API process always receives the bytes
+directly and proxies them into the medium (S3 included), the deliberate
+trade-off that lets a wrapping
+:class:`~resourcey.triggers.triggered_resource.TriggeredResource` fire only
+once the bytes have genuinely landed.
 
-The app is assembled from the pieces the other examples use — a
+The app is assembled from the pieces the other examples use -- a
 :class:`~resourcey.core.manifest.Manifest` (the resource set and its
-lifecycle) and :func:`~resourcey.http.app.create_app` — plus two
+lifecycle) and :func:`~resourcey.http.app.create_app` -- plus two
 file-store specifics:
 
 * the **medium** (a :class:`~resourcey.filestore.file_store.FileStore`) is a
@@ -38,11 +41,10 @@ file-store specifics:
   (``MEDIUM_CLASS=...SqlFileStore``).
 * :func:`~resourcey.filestore.file_routes.register_file_routes` mounts the
   whole ``files`` surface **after** ``create_app`` and is the **sole** place
-  its routes are mounted — ``files`` is therefore *not* listed in
-  ``Manifest(resources=...)`` (see that function's docstring for why: minting
-  a ``202`` on create requires swapping out the generically generated ``201``
-  route, which only works if ``register_routes`` is called exactly once, by
-  ``register_file_routes`` itself).
+  its routes are mounted -- ``files`` is therefore *not* listed in
+  ``Manifest(resources=...)`` (see that function's docstring for why: the
+  multipart ``create`` route is hand-written, since it is not among the
+  actions ``register_routes`` generates).
 
 The medium is chosen with no code change: ``MEDIUM_CLASS`` names a ``FileStore``
 subclass (default :class:`~resourcey.filestore.local_file_store.LocalFileStore`),

@@ -42,7 +42,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action
-from resourcey.filestore.file_store import StoredObject, verify_upload
+from resourcey.filestore.file_store import StoredObject
 from resourcey.filestore.signed_url import SignedFileStore
 from resourcey.sql.sql_resource import SqlResource
 from resourcey.view.resource_view import ResourceView
@@ -161,9 +161,7 @@ class SqlFileStore(SignedFileStore):
         content_type: str | None = None,
         name: str | None = None,
         checksum: str | None = None,
-        declared_size: int | None = None,
     ) -> StoredObject:
-        verify_upload(data, declared_size=declared_size, checksum=checksum)
         etag = _etag(data)
         updated_at = _now()
         async with self._maker()() as session:

@@ -10,11 +10,12 @@ environment under the ``MEDIUM_`` prefix (e.g. ``MEDIUM_ROOT`` for a
 :class:`~resourcey.filestore.local_file_store.LocalFileStore`, so tests and
 local development work out of the box.
 
-The TTLs and size cap are ordinary fields under the process-wide prefix
-(``APP_UPLOAD_URL_TTL_SECONDS`` / ``APP_DOWNLOAD_URL_TTL_SECONDS`` /
-``APP_MAX_SIZE``). The ``*_seconds`` spelling keeps them env-parseable (the
-parser has no ``timedelta``), and the ``*_ttl`` properties expose them as
-``timedelta`` for call sites that prefer it.
+The download TTL and size cap are ordinary fields under the process-wide
+prefix (``APP_DOWNLOAD_URL_TTL_SECONDS`` / ``APP_MAX_SIZE``). There is no
+upload TTL: ``create`` is a direct upload, not a capability to use later, so
+there is nothing to expire. The ``*_seconds`` spelling keeps the TTL
+env-parseable (the parser has no ``timedelta``), and ``download_url_ttl``
+exposes it as a ``timedelta`` for call sites that prefer it.
 
 This module imports no code outside the framework.
 """
@@ -29,8 +30,8 @@ from resourcey.config.lazy_field import LazyField
 from resourcey.filestore.file_store import FileStore
 from resourcey.filestore.local_file_store import LocalFileStore
 
-# The default capability TTL: short, because a signed URL is a bearer token.
-DEFAULT_URL_TTL_SECONDS = 15 * 60
+# The default download-capability TTL: short, because a signed URL is a bearer token.
+DEFAULT_DOWNLOAD_URL_TTL_SECONDS = 15 * 60
 
 
 class FileStoreConfig(BaseConfig):
@@ -39,20 +40,13 @@ class FileStoreConfig(BaseConfig):
     Attributes:
         medium: The selected medium instance, resolved lazily from
             ``MEDIUM_CLASS`` (default :class:`LocalFileStore`).
-        upload_url_ttl_seconds: How long a ``put`` capability stays valid.
         download_url_ttl_seconds: How long a ``get`` capability stays valid.
-        max_size: An optional cap on the declared upload size, in bytes.
+        max_size: An optional cap on an upload's size, in bytes.
     """
 
     medium: ClassVar[FileStore] = LazyField(default=LocalFileStore)  # type: ignore[assignment]
-    upload_url_ttl_seconds: int = DEFAULT_URL_TTL_SECONDS
-    download_url_ttl_seconds: int = DEFAULT_URL_TTL_SECONDS
+    download_url_ttl_seconds: int = DEFAULT_DOWNLOAD_URL_TTL_SECONDS
     max_size: int | None = None
-
-    @property
-    def upload_url_ttl(self) -> timedelta:
-        """The ``put`` capability TTL as a ``timedelta``."""
-        return timedelta(seconds=self.upload_url_ttl_seconds)
 
     @property
     def download_url_ttl(self) -> timedelta:
