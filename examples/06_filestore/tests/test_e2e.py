@@ -76,19 +76,16 @@ async def client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]:
         await manifest.__aexit__(None, None, None)
 
 
-async def _create(client: AsyncClient, **overrides: object) -> dict[str, object]:
-    payload: dict[str, object] = {"name": "a.txt", "content_type": "text/plain", "size": 5}
-    payload.update(overrides)
-    resp = await client.post("/files", json=payload)
-    assert resp.status_code == 202
+async def _create(
+    client: AsyncClient,
+    *,
+    name: str = "a.txt",
+    content_type: str = "text/plain",
+    body: bytes = b"hello",
+) -> dict[str, object]:
+    resp = await client.post("/files", files={"file": (name, body, content_type)})
+    assert resp.status_code == 201
     return resp.json()
-
-
-async def _upload(client: AsyncClient, created: dict[str, object], body: bytes = b"hello") -> None:
-    cap = created["upload"]
-    assert isinstance(cap, dict)
-    resp = await client.put(str(cap["url"]), content=body, headers={"content-type": "text/plain"})
-    assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -97,20 +94,17 @@ async def _upload(client: AsyncClient, created: dict[str, object], body: bytes =
 
 
 class TestFilesSurface:
-    async def test_create_mints_a_capability_and_persists_nothing(
-        self, client: AsyncClient
-    ) -> None:
-        body = await _create(client, name="report.pdf", content_type="application/pdf", size=10)
+    async def test_create_persists_immediately(self, client: AsyncClient) -> None:
+        body = await _create(client, name="report.pdf", content_type="application/pdf")
         assert body["name"] == "report.pdf"
         assert body["content_type"] == "application/pdf"
-        assert body["size"] == 10
-        assert body["upload"]["method"] == "PUT"
+        assert body["size"] == len(b"hello")
+        assert body["checksum"]
         assert "id" in body
-        assert (await client.get(f"/files/{body['id']}")).status_code == 404
+        assert (await client.get(f"/files/{body['id']}")).status_code == 200
 
-    async def test_read_after_upload(self, client: AsyncClient) -> None:
+    async def test_read_after_create(self, client: AsyncClient) -> None:
         created = await _create(client)
-        await _upload(client, created)
         resp = await client.get(f"/files/{created['id']}")
         assert resp.status_code == 200
         assert resp.json()["name"] == created["name"]
@@ -123,15 +117,13 @@ class TestFilesSurface:
 
     async def test_delete_then_read_404(self, client: AsyncClient) -> None:
         created = await _create(client)
-        await _upload(client, created)
         resp = await client.delete(f"/files/{created['id']}")
         assert resp.status_code == 204
         assert (await client.get(f"/files/{created['id']}")).status_code == 404
 
     async def test_search_and_count(self, client: AsyncClient) -> None:
         for name in ("one.txt", "two.txt", "three.txt"):
-            created = await _create(client, name=name)
-            await _upload(client, created)
+            await _create(client, name=name)
 
         resp = await client.get("/files")
         assert resp.status_code == 200
@@ -146,8 +138,7 @@ class TestFilesSurface:
 
 class TestDownloadAndContent:
     async def test_full_round_trip(self, client: AsyncClient) -> None:
-        created = await _create(client, size=5)
-        await _upload(client, created)
+        created = await _create(client)
 
         download = (await client.get(f"/files/{created['id']}/download")).json()
         fetched = await client.get(download["url"])
@@ -158,15 +149,19 @@ class TestDownloadAndContent:
         assert content.status_code == 200
         assert content.content == b"hello"
 
-    async def test_download_and_content_require_an_upload(self, client: AsyncClient) -> None:
-        created = await _create(client)
-        assert (await client.get(f"/files/{created['id']}/download")).status_code == 404
-        assert (await client.get(f"/files/{created['id']}/content")).status_code == 404
+    async def test_download_and_content_for_a_missing_id_are_404(
+        self, client: AsyncClient
+    ) -> None:
+        missing_id = uuid.uuid4().hex
+        assert (await client.get(f"/files/{missing_id}/download")).status_code == 404
+        assert (await client.get(f"/files/{missing_id}/content")).status_code == 404
 
-    async def test_expired_or_foreign_capability_is_rejected(self, client: AsyncClient) -> None:
+    async def test_foreign_capability_is_rejected(self, client: AsyncClient) -> None:
         created = await _create(client)
-        token = created["upload"]["url"].split("token=")[1]
-        resp = await client.put(f"/_files/{uuid.uuid4().hex}?token={token}", content=b"x")
+        other = await _create(client, name="other.txt")
+        download = await client.get(f"/files/{created['id']}/download")
+        token = download.json()["url"].split("token=")[1]
+        resp = await client.get(f"/_files/{other['id']}?token={token}")
         assert resp.status_code == 400
 
 
@@ -178,7 +173,6 @@ class TestDownloadAndContent:
 class TestCaching:
     async def test_read_is_cacheable(self, client: AsyncClient) -> None:
         created = await _create(client)
-        await _upload(client, created)
         fetched = await client.get(f"/files/{created['id']}")
         last_modified = fetched.headers.get("last-modified")
         assert last_modified

@@ -8,12 +8,25 @@ file's existence, so this resource is served directly over the
 resolve against the medium's own ``head`` / ``list_objects``, uniformly across
 every medium (Local / SQL / S3).
 
-Action surface: ``create`` (202, allocates a key + mints an upload capability --
-nothing is persisted), ``read``, ``delete``, ``search``, ``count``,
-``batch_read``, ``batch_edit`` (narrowed by ``normalize_actions`` to
-``Create`` / ``Delete`` kinds only). **No ``update``**: a file's bytes are
-immutable once uploaded -- "changing" a file means delete the old id and create
-a new one.
+``create`` *is* the upload (case 2 of the upload-design discussion): the
+transport (:mod:`resourcey.filestore.file_routes`) parses a
+``multipart/form-data`` body, reads ``name`` / ``content_type`` off the upload
+itself, and hands the raw bytes to :meth:`FileService.create` as the DTO's
+internal-only ``content`` field -- ``size`` / ``checksum`` are computed here
+from those bytes, never a client declaration. Because there is no
+pre-signed-URL handshake, ``Action.CREATE`` is not in this resource's
+declared action set (mirroring how ``Action.UPDATE`` was already absent): the
+generic JSON create-request / batch-edit ``Create`` kind do not apply to a
+multipart upload, so ``register_file_routes`` mounts the real ``POST
+{resource}`` route by hand, same as it already did for ``download`` /
+``content``. Authorization is unaffected -- ``AuthorizedService.create()``
+checks the ``Action.CREATE`` policy regardless of what a resource declares.
+
+Action surface: ``read``, ``delete``, ``search``, ``count``, ``batch_read``,
+``batch_edit`` (narrowed by ``normalize_actions`` to the ``Delete`` kind
+only -- a JSON batch body cannot carry file bytes, so batch creation is not
+offered). **No ``update``**: a file's bytes are immutable once uploaded --
+"changing" a file means delete the old id and create a new one.
 
 ``search`` / ``count`` have no filter or sort surface: a medium's cheap listing
 call (``list_objects`` / ``count_objects``) cannot filter or sort by declared
@@ -28,6 +41,7 @@ This module imports no code outside the framework.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, MutableMapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, TypeVar
@@ -36,7 +50,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 
 from resourcey.cache.cache_defaults import DefaultCacheStrategyMixin
-from resourcey.core.dto import DTO, DtoField, RestModels, apply_operation_defaults
+from resourcey.core.dto import DTO, DtoField, RestModels
 from resourcey.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.core.resource import Resource
 from resourcey.core.service import (
@@ -53,7 +67,7 @@ from resourcey.core.service import (
 )
 from resourcey.encryption.encryption_service import EncryptionService, get_encryption_service
 from resourcey.filestore.file_config import FileStoreConfig
-from resourcey.filestore.file_store import FileStore, StoredObject, UploadCapability
+from resourcey.filestore.file_store import FileStore, StoredObject
 from resourcey.util.cursor import decode_cursor, encode_cursor
 from resourcey.util.missing import MISSING
 from resourcey.util.search_filter import SearchFilter
@@ -65,13 +79,26 @@ if TYPE_CHECKING:
 T = TypeVar("T", bound=BaseModel)
 K = TypeVar("K")
 
-# Fields the server owns entirely: never client input, never a factory default
-# (their only source of truth is the medium).
+# Fields the server owns entirely: never client input, never a factory
+# default (their only source of truth is the medium). They *are* available in
+# the create response -- ``create`` is the upload, so the medium has already
+# reported them by the time it returns.
 _SERVER_OWNED = DtoField(
+    in_create_request=False,
+    in_update_request=False,
+    in_update_response=False,
+)
+
+# A field that exists only to carry data between the transport and the
+# service, in-process, for the lifetime of one ``create`` call -- never
+# projected onto any of the six REST shapes.
+_INTERNAL_ONLY = DtoField(
     in_create_request=False,
     in_create_response=False,
     in_update_request=False,
     in_update_response=False,
+    in_read_response=False,
+    in_search_response=False,
 )
 
 
@@ -83,33 +110,27 @@ class FileDTO(DTO):
     :meth:`FileService.create` assigns it explicitly). ``created_at`` /
     ``updated_at`` collapse into the single ``updated_at`` (a key is written
     once and never rewritten, so there is nothing a second timestamp would
-    distinguish). ``upload`` is a one-time-reveal field (the create response
-    only), mirroring the API-key secret-reveal convention.
+    distinguish). ``name`` / ``content_type`` / ``size`` / ``checksum`` are all
+    server-derived from the upload (never client input, so none is in the
+    create request) -- there is no create request left to speak of for this
+    resource; see :mod:`resourcey.filestore.file_routes` for the hand-written
+    multipart route. ``content`` is not a medium-native field at all: it is the
+    one-request-lifetime carrier for the uploaded bytes between the transport
+    and :meth:`FileService.create`, excluded from every REST shape.
     """
 
     id: str
-    name: Annotated[str, DtoField(in_search_response=False)]
-    content_type: Annotated[str | None, DtoField(default_for_create=None, in_search_response=False)]
-    size: int
-    checksum: Annotated[str | None, DtoField(default_for_create=None, in_search_response=False)]
+    name: Annotated[str, DtoField(in_create_request=False, in_search_response=False)]
+    content_type: Annotated[str | None, DtoField(in_create_request=False, in_search_response=False)]
+    size: Annotated[int, DtoField(in_create_request=False)]
+    checksum: Annotated[str | None, DtoField(in_create_request=False, in_search_response=False)]
     etag: Annotated[str | None, _SERVER_OWNED]
     updated_at: Annotated[datetime, _SERVER_OWNED]
-    upload: Annotated[
-        UploadCapability | None,
-        DtoField(
-            in_create_request=False,
-            in_read_response=False,
-            in_search_response=False,
-            in_update_request=False,
-            in_update_response=False,
-            default_for_create=None,
-        ),
-    ]
+    content: Annotated[bytes, _INTERNAL_ONLY]
 
 
 _SUPPORTED_ACTIONS: frozenset[Action] = frozenset(
     {
-        Action.CREATE,
         Action.READ,
         Action.DELETE,
         Action.SEARCH,
@@ -128,10 +149,10 @@ class FileResource(DefaultCacheStrategyMixin, Resource[T, K]):
             in. The same instance must be entered through the manifest's
             ``managers`` slot.
         path: An explicit REST path segment (default ``"files"``).
-        max_size: An optional cap on the declared upload size, in bytes
-            (default: :attr:`~resourcey.filestore.file_config.FileStoreConfig.max_size`).
-        upload_url_ttl_seconds / download_url_ttl_seconds: Capability TTLs
-            (default: the matching :class:`FileStoreConfig` fields).
+        max_size: An optional cap on an upload's size, in bytes (default:
+            :attr:`~resourcey.filestore.file_config.FileStoreConfig.max_size`).
+        download_url_ttl_seconds: The download-capability TTL (default:
+            :attr:`~resourcey.filestore.file_config.FileStoreConfig.download_url_ttl_seconds`).
     """
 
     def __init__(
@@ -140,18 +161,12 @@ class FileResource(DefaultCacheStrategyMixin, Resource[T, K]):
         *,
         path: str = "files",
         max_size: int | None = None,
-        upload_url_ttl_seconds: int | None = None,
         download_url_ttl_seconds: int | None = None,
     ) -> None:
         self._store = store
         self._path = path
         config = FileStoreConfig.get_instance()
         self._max_size = max_size if max_size is not None else config.max_size
-        self._upload_url_ttl_seconds = (
-            upload_url_ttl_seconds
-            if upload_url_ttl_seconds is not None
-            else config.upload_url_ttl_seconds
-        )
         self._download_url_ttl_seconds = (
             download_url_ttl_seconds
             if download_url_ttl_seconds is not None
@@ -234,7 +249,6 @@ class FileResource(DefaultCacheStrategyMixin, Resource[T, K]):
             mapping,
             self._store,
             max_size=self._max_size,
-            upload_url_ttl_seconds=self._upload_url_ttl_seconds,
             download_url_ttl_seconds=self._download_url_ttl_seconds,
         )
 
@@ -246,6 +260,11 @@ class FileResource(DefaultCacheStrategyMixin, Resource[T, K]):
     @property
     def download_url_ttl_seconds(self) -> int:
         return self._download_url_ttl_seconds
+
+    @property
+    def max_size(self) -> int | None:
+        """The resolved upload-size cap, in bytes (the escape hatch for the route)."""
+        return self._max_size
 
     # ------------------------------------------------------------------
     # Registration / lifecycle
@@ -291,7 +310,6 @@ class FileService(Service[T, K]):
         store: FileStore,
         *,
         max_size: int | None,
-        upload_url_ttl_seconds: int,
         download_url_ttl_seconds: int,
     ) -> None:
         super().__init__()
@@ -299,7 +317,6 @@ class FileService(Service[T, K]):
         self._ctx = ctx
         self._store = store
         self._max_size = max_size
-        self._upload_url_ttl_seconds = upload_url_ttl_seconds
         self._download_url_ttl_seconds = download_url_ttl_seconds
 
     async def __aenter__(self) -> FileService[T, K]:
@@ -312,36 +329,28 @@ class FileService(Service[T, K]):
     # ------------------------------------------------------------------
 
     async def create(self, payload: Any) -> Any:
-        """Allocate a key and mint an upload capability; nothing is persisted.
+        """Commit the uploaded bytes to the medium; ``create`` *is* the upload.
 
-        Declared ``name`` / ``content_type`` / ``size`` / ``checksum`` travel as
-        signed claims on the capability, so the transfer handler can verify the
-        upload against them before it becomes visible.
+        ``payload`` carries ``name`` / ``content_type`` as read off the
+        upload by the transport, plus the raw bytes in ``content``. ``size`` /
+        ``checksum`` are computed here, from those bytes -- never a client
+        declaration to trust or verify.
         """
         self._require_entered()
-        data = apply_operation_defaults(
-            self._resource.get_dto_declaration(), _values(payload), "create"
-        )
-        name = data["name"]
-        size = data["size"]
-        if self._max_size is not None and size > self._max_size:
+        values = _values(payload)
+        name = values["name"]
+        content_type = values.get("content_type") or "application/octet-stream"
+        data: bytes = values["content"]
+        if self._max_size is not None and len(data) > self._max_size:
             raise InvalidInputError(
-                f"Declared size {size} bytes exceeds the {self._max_size}-byte cap"
+                f"Upload is {len(data)} bytes, exceeding the {self._max_size}-byte cap"
             )
-        content_type = data.get("content_type")
-        checksum = data.get("checksum")
+        checksum = hashlib.sha256(data).hexdigest()
         key = uuid4().hex
-        capability = self._store.presign_upload(
-            key,
-            name=name,
-            content_type=content_type,
-            size=size,
-            checksum=checksum,
-            expires_in_seconds=self._upload_url_ttl_seconds,
+        stored = await self._store.put(
+            key, data, name=name, content_type=content_type, checksum=checksum
         )
-        data["id"] = key
-        data["upload"] = capability
-        return self._dto_type()(**data)
+        return self._full_dto(stored)
 
     async def read(self, id: K) -> Any:  # noqa: A002
         self._require_entered()
@@ -393,9 +402,10 @@ class FileService(Service[T, K]):
         results: list[Any] = []
         for edit in edits:
             if isinstance(edit, Create):
-                if Action.CREATE not in supported:
-                    raise InvalidInputError("batch_edit cannot create: create is not supported")
-                results.append(await self.create(edit.item))
+                raise InvalidInputError(
+                    "batch_edit cannot create a file: uploading requires multipart/form-data, "
+                    "which a JSON batch body cannot carry. POST to the resource directly."
+                )
             elif isinstance(edit, Update):
                 raise InvalidInputError("batch_edit cannot update: files have no update action")
             else:

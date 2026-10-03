@@ -39,7 +39,7 @@ from pathlib import Path
 from pydantic import field_validator
 
 from resourcey.core.errors import InvalidInputError
-from resourcey.filestore.file_store import StoredObject, verify_upload
+from resourcey.filestore.file_store import StoredObject
 from resourcey.filestore.signed_url import SignedFileStore
 
 
@@ -76,9 +76,7 @@ class LocalFileStore(SignedFileStore):
         content_type: str | None = None,
         name: str | None = None,
         checksum: str | None = None,
-        declared_size: int | None = None,
     ) -> StoredObject:
-        verify_upload(data, declared_size=declared_size, checksum=checksum)
         path = self._path_for(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         # Write bytes + sidecar to temp files in the same directory, then

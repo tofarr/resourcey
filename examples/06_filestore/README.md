@@ -1,39 +1,36 @@
 # Example 6 — The File Store
 
-A file store built on `resourcey`'s pre-signed-URL API: file **bytes** live in a
-pluggable medium, the client transfers them **directly** against a short-lived
-capability URL, and the API owns only the **authorization**. There is **no
-metadata table** (issue #158): "does the medium have the bytes" is the only
-source of truth for a file's existence, so a file simply does not exist until
-its bytes do, and appears the instant they land — with no extra client call,
-across every medium (including S3, where a client uploads straight to the
-bucket and nothing else tells the API the bytes arrived).
+A file store where file **bytes** live in a pluggable medium and the API
+owns both the **upload** and the **authorization**. There is **no metadata
+table** (issue #158): "does the medium have the bytes" is the only source of
+truth for a file's existence, so a file simply does not exist until its bytes
+do, and appears the instant `create` returns — there is no separate
+capability-and-transfer handshake for the client to complete afterward.
 
 It is deliberately small — one resource, `files` — because the point is the
-handshake, not the business domain. On the happy path the bytes never pass
-through a request handler: the API mints a capability, and the client talks to
-the medium directly.
+upload/download handshake, not the business domain. `create` *is* the upload:
+a plain `multipart/form-data` body, the same shape an HTML `<input
+type="file">` form already produces, so Swagger UI's "Try it out" uploads a
+real file with no extra client code.
 
 ## The flow
 
 ```
-1. POST /files                    -> 202  allocate a key + mint an upload capability
-                                           (nothing persisted yet)
-2. PUT/POST <capability>          -> 200  the client transfers the bytes directly
-                                           to the medium (PUT for Local/SQL, a
-                                           presigned POST for S3)
-   -- the file now exists --
-3. GET  /files/{id}                -> 200  read resolves directly against the medium
+1. POST /files  (multipart/form-data, one `file` part)
+                                    -> 201  the upload itself -- the file exists
+                                            the instant this returns
+2. GET  /files/{id}                -> 200  read resolves directly against the medium
    GET  /files                    -> 200  search lists the medium's own objects
-4. GET  /files/{id}/download       -> 200  a fresh `get` capability URL (JSON)
+3. GET  /files/{id}/download       -> 200  a `get` capability URL (JSON)
    GET  /files/{id}/content        -> 200  the bytes themselves (redirect for S3,
                                             streamed for Local / SQL)
-5. DELETE /files/{id}              -> 204  removes the object -- no orphan row
+4. DELETE /files/{id}              -> 204  removes the object -- no orphan row
 ```
 
 `GET /files`, `GET /files/count`, `GET /files/batch-read`, `POST
-/files/batch-edit` (create / delete only) are the ordinary generated actions.
-There is **no `update`** — a file's bytes are immutable once uploaded;
+/files/batch-edit` (delete only — a JSON batch body cannot carry a file
+upload) are the ordinary generated actions. There is **no `update`** — a
+file's bytes are immutable once uploaded;
 "changing" one means delete the old id and create a new one.
 
 ## `download` vs `content`
@@ -62,22 +59,23 @@ bare `<img src>` / `<a href>` request carries **no** credential and gets a
 ## What the medium decides
 
 The medium is a `FileStore`, selected from config with **no code change**
-(`MEDIUM_CLASS`; unset -> `LocalFileStore`). It decides what the capability URL
-*is* and how the upload is verified, and the client flow is identical across
-media:
+(`MEDIUM_CLASS`; unset -> `LocalFileStore`). Every medium receives the upload
+the same way -- `create` always lands on this API process, which then writes
+the bytes into the medium -- so the medium only decides how the bytes are
+*stored* and how a download URL is minted:
 
-| Medium | Upload capability | Verification | Bytes served by |
-| ------ | ------------------ | ------------- | --------------- |
-| `S3FileStore` | S3's **native** presigned `POST` (policy conditions) | S3 itself enforces size / content-type atomically | S3 directly (no API endpoint) |
-| `LocalFileStore` | a **framework-signed** JWE `PUT` capability | `verify_upload` checks size / checksum before an atomic `os.replace()` | this app's `/_files/{key}` `PUT` / `GET` |
-| `SqlFileStore` | a **framework-signed** JWE `PUT` capability | `verify_upload` checks size / checksum before the row commits | this app's `/_files/{key}` `PUT` / `GET` |
+| Medium | Upload | Download capability | Bytes served by |
+| ------ | ------ | -------------------- | --------------- |
+| `S3FileStore` | the API `put`s the bytes to the bucket | S3's **native** presigned `GET` | S3 directly (no API endpoint) |
+| `LocalFileStore` | the API writes under `MEDIUM_ROOT` (atomic `os.replace()`) | a **framework-signed** JWE `GET` capability | this app's `/_files/{key}` `GET` |
+| `SqlFileStore` | the API writes a row in `file_blobs` | a **framework-signed** JWE `GET` capability | this app's `/_files/{key}` `GET` |
 
-A size / checksum mismatch is simply rejected (`409`) — there is no `failed`
-status to track; the client retries against the same (still-valid) capability.
-For S3 the capability points straight at the bucket, so `register_file_routes`
-mounts **no** transfer endpoint at all. For the local / SQL media the
-framework mints its own capability (an encrypted token bound to one `(key,
-operation)` pair) served by the two `/_files/{key}` routes.
+There is no size / checksum *declaration* to verify against an upload: `size` /
+`checksum` are computed from the bytes the API actually received, so there is
+nothing for them to disagree with. For S3 the download capability points
+straight at the bucket; for the local / SQL media the framework mints its own
+capability (an encrypted token bound to one key) served by the `/_files/{key}`
+route.
 
 ## Layout
 
@@ -140,32 +138,22 @@ uv run pytest
 
 ## Example requests
 
-Allocate a key and mint an upload capability (declaring the size and MIME type
-up front):
+Upload a file — `create` *is* the upload, so the file exists the instant this
+returns:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8086/files \
-  -H "Content-Type: application/json" \
-  -d '{"name":"notes.txt","content_type":"text/plain","size":5}'
-# -> 202 {"id":"...","name":"notes.txt","content_type":"text/plain","size":5,
-#         "checksum":null,"etag":null,"updated_at":"...",
-#         "upload":{"url":".../_files/<key>?token=...","method":"PUT","expires_at":"...","headers":{}}}
-```
+echo -n "hello" > notes.txt
+curl -s -X POST http://127.0.0.1:8086/files -F "file=@notes.txt;type=text/plain"
+# -> 201 {"id":"...","name":"notes.txt","content_type":"text/plain","size":5,
+#         "checksum":"2cf24dba5fb0a3...","etag":"...","updated_at":"..."}
 
-Transfer the bytes against the capability from the create response — the file
-does not exist until this lands:
-
-```bash
 FILE_ID=...                       # the id from the create response
-URL=...                            # upload.url from the create response
-curl -s -X PUT "$URL" -H "Content-Type: text/plain" --data-binary "hello"
-
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8086/files/$FILE_ID
-# -> 200   (404 before the upload)
+# -> 200
 ```
 
-Fetch it back — `download` mints a fresh JSON capability, `content` returns
-the bytes directly:
+Fetch it back — `download` mints a JSON capability, `content` returns the
+bytes directly:
 
 ```bash
 DOWNLOAD=$(curl -s http://127.0.0.1:8086/files/$FILE_ID/download)
@@ -205,9 +193,8 @@ so every command passes `--env-file .env`.
 | `MEDIUM_ROOT` | `./.resourcey_files` | Local medium's byte directory. |
 | `MEDIUM_BUCKET` / `MEDIUM_REGION` / `MEDIUM_PREFIX` | — | S3 medium's bucket / region / key prefix. |
 | `MEDIUM_CONNECTION_NAME` | `main` | SQL blob medium's connection. |
-| `APP_UPLOAD_URL_TTL_SECONDS` | `900` | How long an upload capability stays valid. |
 | `APP_DOWNLOAD_URL_TTL_SECONDS` | `900` | How long a `download` / `content` capability stays valid. |
-| `APP_MAX_SIZE` | *(unset)* | Cap on a declared upload size, in bytes. |
+| `APP_MAX_SIZE` | *(unset)* | Cap on an upload's size, in bytes. |
 
 ### Switching media
 
@@ -220,12 +207,12 @@ MEDIUM_REGION=us-east-1
 # optional: MEDIUM_ENDPOINT_URL (MinIO), MEDIUM_PREFIX, MEDIUM_ACCESS_KEY_ID / _SECRET_ACCESS_KEY
 ```
 
-The flow is unchanged: step 2's capability is now an S3 presigned `POST` (a
-multipart form, not a raw `PUT`) whose policy conditions — the exact key, a
-`content-length-range` from the declared size, the content type — make S3
-itself reject an upload that does not match. The API mounts no transfer
-endpoint, and `read` / `search` resolve directly against S3's `HeadObject` /
-`ListObjectsV2`.
+The upload flow is unchanged: `POST /files` still lands on this API process,
+which then `put`s the received bytes to the bucket. Only `download` /
+`content` differ -- they mint S3's own **native** presigned `GET` rather than
+the framework-signed capability, so the API mounts no transfer endpoint for
+either direction. `read` / `search` resolve directly against S3's
+`HeadObject` / `ListObjectsV2`.
 
 **SQL blob table** (`file_blobs` on the app's own connection):
 
@@ -254,14 +241,15 @@ uv run --env-file .env alembic upgrade head
 
 ## Security notes
 
-* A capability URL is a **bearer token**: anyone holding it can use it until it
-  expires. Keep the TTLs short; treat the URL like a credential.
-* It is bound to exactly one `(key, operation)` pair, so a `get` token cannot be
-  replayed as a `put`, nor against another object's key.
-* The local / SQL media verify a declared size / checksum **before** the bytes
-  become visible (`verify_upload`); a mismatch is a `409`, not a corrupted
-  file — the client simply retries. S3 enforces the same conditions natively
-  via its presigned-POST policy.
+* A download capability URL is a **bearer token**: anyone holding it can use
+  it until it expires. Keep the TTL short; treat the URL like a credential.
+* It is bound to exactly one key, so a token minted for one object cannot be
+  replayed against another's.
+* `size` / `checksum` are never a client declaration to verify against the
+  bytes -- they are computed from the bytes the API actually received, so
+  there is no mismatch to reject and no `409` for an upload to retry.
+  `max_size` is still enforced (as the upload streams in, before the whole
+  body is buffered), answering `400` if exceeded.
 * The local medium rejects any key that is empty, absolute, `~`, or contains
   `..`, and re-checks the resolved path stays under `root`; it also writes via
   a temp file + atomic `os.replace()` so a concurrent reader never observes a
@@ -270,26 +258,27 @@ uv run --env-file .env alembic upgrade head
   `<img src>` markup when the app is unauthenticated (as this example is) or
   secured by a `CookieAuthenticator` — an API-key-secured app still 404s /
   401s a credential-less request to it, same as every other route.
-* Minting is **authorized**: both `download` and `content` resolve the file
-  through the resource's normal `DependencyBuilder` seam first (a `404` before
-  any capability is minted or any bytes move), so to secure the app pass an
-  `AuthorizedDependencyBuilder` as `dependency_builder=` (exactly as examples
-  03-05 do). This example ships the open (`OpenDependencyBuilder`) default for
-  clarity.
+* Minting is **authorized**: `download` / `content` resolve the file through
+  the resource's normal `DependencyBuilder` seam first (a `404` before any
+  capability is minted or any bytes move), and `create` checks the same
+  `Action.CREATE` policy regardless of the resource declaring the action or
+  not. To secure the app pass an `AuthorizedDependencyBuilder` as
+  `dependency_builder=` (exactly as examples 03-05 do). This example ships the
+  open (`OpenDependencyBuilder`) default for clarity.
 
 ## Auto-generated REST surface
 
 | Method | Path | Action |
 | ------ | ---- | ------ |
-| `POST` | `/files` | create (hand-written — `202`, not the generated `201`) |
+| `POST` | `/files` | create (hand-written — `multipart/form-data`, `201`) |
 | `GET` | `/files/{id}` | read |
 | `DELETE` | `/files/{id}` | delete |
 | `GET` | `/files` | search |
 | `GET` | `/files/count` | count |
 | `GET` | `/files/batch-read` | batch_read |
-| `POST` | `/files/batch-edit` | batch_edit (create / delete only — no `update`) |
+| `POST` | `/files/batch-edit` | batch_edit (delete only — no `create` / `update`) |
 
 Plus `GET /files/{id}/download`, `GET /files/{id}/content`, and — for the local
-/ SQL media only — the framework-signed transfer routes `PUT` / `GET`
-`/_files/{key}` (hidden from the schema; S3 mints native URLs and never
-reaches them).
+/ SQL media only — the framework-signed transfer route `GET /_files/{key}`
+(hidden from the schema; S3 mints a native URL and never reaches it). There is
+no `PUT` transfer route at all: upload has no capability of its own to serve.

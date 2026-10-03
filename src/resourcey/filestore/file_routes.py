@@ -1,47 +1,43 @@
-"""The file-transfer routes (issue #117, #158).
+"""The ``files`` surface's hand-written routes (issue #117, #158).
 
 ``files`` is an ordinary resource (:mod:`resourcey.filestore.file_resource`),
 so :func:`~resourcey.http.routes.register_routes` already mounts its standard
 surface -- ``read`` / ``delete`` / ``search`` / ``count`` / ``batch_read`` /
-``batch_edit`` -- correctly. Two things still need hand-written routes:
+``batch_edit`` -- correctly. Three things still need hand-written routes:
 
-* ``create`` must mint the upload capability and answer **``202 Accepted``**
-  (nothing exists yet), not the generated builder's hardcoded ``201``. The
-  generated route is still what makes ``batch_edit``'s ``Create`` kind and the
-  create defaults resolve correctly (both read the one
-  ``get_supported_actions()`` declaration), so :func:`register_file_routes`
-  lets ``register_routes`` build everything first and then **swaps** the one
-  generated ``POST {resource}`` route for a hand-written one -- the same
-  "a developer's own route wins" escape hatch, applied after the fact rather
-  than before it, so there is exactly one route for the path in both the
-  runtime dispatch *and* the OpenAPI schema (no shadowed duplicate operation).
-* ``download`` (the JSON capability, unchanged from #117) and the new
-  ``content`` (bytes) routes are not among the eight standard actions at all.
+* ``create`` -- not among the actions ``register_routes`` generates at all
+  (``files`` does not declare ``Action.CREATE``; see
+  :mod:`~resourcey.filestore.file_resource`'s docstring for why). It is a
+  direct ``multipart/form-data`` upload (case 2 of the upload-design
+  discussion), answering the ordinary ``201 Created`` once the bytes have
+  genuinely landed -- there is no capability-minting step to make a placeholder
+  status code necessary.
+* ``download`` (the JSON capability, unchanged from #117) and ``content``
+  (bytes, #158) are not among the eight standard actions at all.
 
 ::
 
-    POST   {resource}            mint an upload capability (202)
+    POST   {resource}                 the upload itself (201; multipart/form-data)
     GET    {resource}/{id}/download   mint a ``get`` capability (the JSON shape)
     GET    {resource}/{id}/content    the bytes: a redirect for S3, streamed
                                        directly for Local / SQL
 
-The framework-signed ``PUT`` / ``GET`` ``/_files/{key}`` transfer endpoints are
-mounted here too, for a :class:`~resourcey.filestore.signed_url.SignedFileStore`
-medium (Local / SQL); S3 mints native URLs and never reaches them. The ``PUT``
-handler verifies the uploaded bytes against the capability's signed claims
-(:func:`~resourcey.filestore.file_store.verify_upload`, via the medium's
-``put``) before they become visible.
+The framework-signed ``GET`` ``/_files/{key}`` transfer endpoint is mounted
+here too, for a :class:`~resourcey.filestore.signed_url.SignedFileStore`
+medium (Local / SQL); S3 mints native URLs and never reaches it. Upload has no
+transfer endpoint of its own to mount -- ``create`` *is* the upload, served
+directly by the route above.
 
 :func:`register_file_routes` is called **after**
 :func:`~resourcey.http.app.create_app`, exactly like every other after-the-fact
 mount in this framework (``register_oauth_routes``, the earlier
 ``register_file_routes``), and is the **sole** place ``files``'s routes are
-mounted -- it calls ``register_routes`` itself (to get the swap-then-replace
-right), so the resource must **not** also be listed in the
-``Manifest(resources=...)`` passed to ``create_app`` (that would register the
-generated ``201`` route a second time, on its own router, which runs first and
-shadows the swap below). The medium still goes in the manifest's ``managers``
-slot exactly as before::
+mounted -- it calls ``register_routes`` itself (which, with no ``Action.CREATE``
+declared, mounts every *other* standard route correctly and nothing for
+``create``), so the resource must **not** also be listed in the
+``Manifest(resources=...)`` passed to ``create_app`` (that would register its
+other standard routes a second time, on its own router). The medium still goes
+in the manifest's ``managers`` slot exactly as before::
 
     manifest = Manifest(resources=[], managers=[store])  # files is not a manifest resource
     app = create_app(manifest, dependency_builder=builder)
@@ -54,24 +50,31 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, UploadFile, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from resourcey.core.dto import request_to_dto
 from resourcey.core.errors import InvalidInputError, ResourceyConfigError
 from resourcey.core.resource import Resource
-from resourcey.core.service import NotFoundError, Service
+from resourcey.core.service import NotFoundError
 from resourcey.filestore.file_config import FileStoreConfig
-from resourcey.filestore.file_store import GET_OPERATION, PUT_OPERATION, FileStore
+from resourcey.filestore.file_store import FileStore
 from resourcey.filestore.signed_url import DEFAULT_SIGNED_URL_PATH, SignedFileStore
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
 from resourcey.http.routes import (
+    _cached_json_response,
     _dump,
+    _header_for,
     _project,
     _resource_display_name,
     _service_dependency,
     register_routes,
 )
+
+# Bounds how much of an over-cap upload this process buffers before rejecting
+# it: the upload is read and hashed in chunks, so a ``max_size`` cap is
+# enforced as soon as it is exceeded rather than only after the whole body
+# has already been read into memory.
+_UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 
 def register_file_routes(
@@ -91,7 +94,11 @@ def register_file_routes(
         resource: The ``files`` resource (see :mod:`~resourcey.filestore.file_resource`).
         dependency_builder: The seam every route authorizes through (default
             :class:`~resourcey.http.dependency_builder.OpenDependencyBuilder`).
-        config: TTLs / size cap (default ``FileStoreConfig.get_instance()``).
+        config: TTL / size cap (default ``FileStoreConfig.get_instance()``);
+            a ``max_size`` the resource itself was constructed with takes
+            precedence over this config's, mirroring the resource-level
+            override :class:`~resourcey.filestore.file_resource.FileResource`
+            already honours for the service-level enforcement.
         prefix: An optional mount prefix.
     """
     if resource.get_manifest() is not None:
@@ -104,13 +111,14 @@ def register_file_routes(
     exposed = resource.get_exposed_resource() or resource
     resolved_config = config if config is not None else FileStoreConfig.get_instance()
     builder = dependency_builder if dependency_builder is not None else OpenDependencyBuilder()
+    max_size = resource.max_size if hasattr(resource, "max_size") else resolved_config.max_size
 
     router = register_routes(
         app_or_router, resource, prefix=prefix, dependency_builder=dependency_builder
     )
     path = "/" + exposed.get_resource_path().lstrip("/")
 
-    _replace_create_route(router, exposed, builder, path)
+    _add_create_route(router, exposed, builder, path, max_size)
     _add_download_route(router, exposed, store, builder, path, resolved_config)
     _add_content_route(router, exposed, store, builder, path, resolved_config)
     _add_signed_transfer_routes(router, store)
@@ -118,53 +126,72 @@ def register_file_routes(
 
 
 # ---------------------------------------------------------------------------
-# create -- swap the generated 201 route for a hand-written 202 one
+# create -- the upload itself
 # ---------------------------------------------------------------------------
 
 
-def _replace_create_route(
+def _add_create_route(
     router: APIRouter,
     exposed: Resource[Any, Any],
     builder: DependencyBuilder,
     path: str,
+    max_size: int | None,
 ) -> None:
-    """Drop the generated ``POST {path}`` route and mount our own (202).
+    """Mount ``POST {path}``: a ``multipart/form-data`` body with one ``file`` part.
 
-    ``register_routes`` already built it (from the same ``get_supported_actions()``
-    declaration ``batch_edit``'s ``Create`` kind needs), so it is removed --
-    not left to be shadowed -- so exactly one route exists for the path, in
-    both the live dispatch *and* the generated OpenAPI schema.
+    This is the same shape a plain HTML ``<input type="file">`` form already
+    produces, so a no-JS form -- and Swagger UI's "Try it out" -- can create a
+    file directly, with no separate capability step. ``name`` / ``content_type``
+    are read off the upload; the service computes ``size`` / ``checksum`` from
+    the bytes it actually receives. Not among the actions
+    ``register_routes`` mounts (``files`` does not declare ``Action.CREATE``),
+    so there is no generated route to replace here, only one to add.
     """
-    router.routes = [
-        r
-        for r in router.routes
-        if not (getattr(r, "path", None) == path and "POST" in (getattr(r, "methods", None) or ()))
-    ]
     service_dep = _service_dependency(exposed, builder)
     models = exposed.get_rest_models()
     dto_model = exposed.get_dto_type()
     resource_name = _resource_display_name(exposed)
+    strategy = exposed.get_cache_strategy()
     auth_dep = builder.get_principal_dependency()
     route_deps = [Depends(auth_dep)] if auth_dep is not None else None
 
-    async def handler(payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
-        created = await service.create(request_to_dto(dto_model, payload))
+    async def handler(  # type: ignore[no-untyped-def]
+        request: Request,
+        file: UploadFile = File(...),  # noqa: B008
+        service=Depends(service_dep),  # noqa: B008
+    ):
+        name = file.filename
+        if not name:
+            raise InvalidInputError("The uploaded file has no filename")
+        content_type = file.content_type or "application/octet-stream"
+        chunks: list[bytes] = []
+        total = 0
+        while chunk := await file.read(_UPLOAD_CHUNK_SIZE):
+            total += len(chunk)
+            if max_size is not None and total > max_size:
+                raise InvalidInputError(f"Upload exceeds the {max_size}-byte cap")
+            chunks.append(chunk)
+        payload = dto_model(name=name, content_type=content_type, content=b"".join(chunks))
+        created = await service.create(payload)
         context = service.serialization_context()
         projected = _project(created, models.create_response, context)
-        return JSONResponse(content=_dump(projected, context), status_code=status.HTTP_202_ACCEPTED)
+        header = _header_for(strategy, [projected], context, service)
+        return _cached_json_response(
+            request, _dump(projected, context), header, status.HTTP_201_CREATED
+        )
 
-    handler.__annotations__ = {"payload": models.create_request, "service": Service}
     router.add_api_route(
         path,
         handler,
         methods=["POST"],
-        status_code=status.HTTP_202_ACCEPTED,
+        status_code=status.HTTP_201_CREATED,
         dependencies=route_deps,
         response_model=None,
         summary=f"Create {resource_name}",
         description=(
-            f"Allocate a storage key and mint an upload capability for a new {resource_name}. "
-            "Nothing is persisted until the upload lands."
+            f"Upload a new {resource_name}: a multipart/form-data body with one `file` part. "
+            "`name` / `content_type` are read from the upload; `size` / `checksum` are computed "
+            "from the bytes received, not a client declaration."
         ),
     )
 
@@ -260,29 +287,19 @@ def _add_content_route(
 
 
 def _add_signed_transfer_routes(router: APIRouter, store: FileStore) -> None:
-    """Mount the signed ``PUT`` / ``GET`` transfer endpoints for a signed store.
+    """Mount the signed ``GET`` transfer endpoint for a signed store.
 
     Only a :class:`~resourcey.filestore.signed_url.SignedFileStore` serves
-    these; an S3 store mints native URLs and a capability never reaches the API.
+    this (Local / SQL); an S3 store mints native URLs and a capability never
+    reaches the API. There is no ``PUT`` counterpart: upload has no capability
+    of its own to serve -- ``create`` *is* the upload, mounted directly by
+    :func:`_add_create_route` above.
     """
     if not isinstance(store, SignedFileStore):
         return
 
-    async def put_handler(key: str, request: Request) -> Response:
-        capability = _verify(store, request, key, PUT_OPERATION)
-        data = await request.body()
-        stored = await store.put(
-            key,
-            data,
-            content_type=capability.content_type,
-            name=capability.name,
-            checksum=capability.checksum,
-            declared_size=capability.size,
-        )
-        return JSONResponse(content=stored.model_dump(mode="json"))
-
     async def get_handler(key: str, request: Request) -> Response:
-        _verify(store, request, key, GET_OPERATION)
+        _verify(store, request, key)
         data = await store.get(key)
         if data is None:
             raise NotFoundError(key)
@@ -296,15 +313,6 @@ def _add_signed_transfer_routes(router: APIRouter, store: FileStore) -> None:
                 headers["ETag"] = reported.etag
         return Response(content=data, media_type=media_type, headers=headers)
 
-    if not _existing_route(router, DEFAULT_SIGNED_URL_PATH, "PUT"):
-        router.add_api_route(
-            DEFAULT_SIGNED_URL_PATH,
-            put_handler,
-            methods=["PUT"],
-            response_model=None,
-            summary="Signed object upload",
-            include_in_schema=False,
-        )
     if not _existing_route(router, DEFAULT_SIGNED_URL_PATH, "GET"):
         router.add_api_route(
             DEFAULT_SIGNED_URL_PATH,
@@ -323,15 +331,14 @@ def _existing_route(router: APIRouter, path: str, method: str) -> bool:
     )
 
 
-def _verify(store: SignedFileStore, request: Request, key: str, operation: str) -> Any:
+def _verify(store: SignedFileStore, request: Request, key: str) -> None:
     """Verify the capability token and that it is bound to the route's key."""
     token = request.query_params.get("token")
     if not token:
         raise InvalidInputError("Missing signed-URL token")
-    capability = store.verify(token, expected_operation=operation)
-    if capability.key != key:
+    verified_key = store.verify(token)
+    if verified_key != key:
         raise InvalidInputError("Signed URL is for a different object")
-    return capability
 
 
 # ---------------------------------------------------------------------------

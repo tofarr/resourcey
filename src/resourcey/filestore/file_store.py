@@ -1,28 +1,28 @@
 """``FileStore`` — the pluggable storage-medium seam for file bytes (issue #117, #158).
 
-A ``FileStore`` moves opaque file *bytes* against a medium (S3, an internal SQL
-blob table, a local directory) while the API owns only *authorization*; there is
-no separate metadata table and no tracked ``pending`` / ``ready`` status. **"Does
-the medium have the bytes" is the only source of truth for a file's existence**:
-``read`` / ``search`` resolve directly against the medium's own
-``head`` / ``list_objects``, so a file simply does not exist until its bytes do,
-and appears the moment they land -- with no additional client call, and no
-orphan-row problem, across all three media uniformly (including S3, where a
-client uploads straight to the bucket and nothing else tells the API the bytes
-arrived).
+A ``FileStore`` moves file *bytes* against a medium (S3, an internal SQL blob
+table, a local directory) while the API owns only *authorization*; there is no
+separate metadata table and no tracked ``pending`` / ``ready`` status. **"Does
+the medium have the bytes" is the only source of truth for a file's
+existence**: ``read`` / ``search`` resolve directly against the medium's own
+``head`` / ``list_objects``.
 
-``create`` therefore only *allocates* an opaque key and mints an upload
-capability (a ``PUT`` for the local / SQL media, a presigned ``POST`` for S3);
-nothing is persisted until the upload lands. The capability carries the
-client's declared ``name`` / ``content_type`` / ``size`` / ``checksum`` as
-**signed claims**, verified against the uploaded bytes before they are
-committed (:func:`verify_upload`) -- a mismatch is simply rejected, with no
-``failed`` status to track, and the client may retry against the same
-capability until it expires.
+``create`` *is* the upload (case 2 of the upload-design discussion, not a
+pre-signed-URL handshake): the client ``POST``s a ``multipart/form-data`` body
+directly to the API (:mod:`resourcey.filestore.file_routes`), which streams it
+straight into ``put`` -- ``name`` / ``content_type`` are read off the upload
+itself and ``size`` / ``checksum`` are computed from the bytes actually
+received, never a client declaration to verify. This means the bytes commit
+synchronously inside the one request, so a wrapping
+:class:`~resourcey.triggers.triggered_resource.TriggeredResource` fires its
+``on_edit`` trigger only once the upload has genuinely landed, and the
+generated ``201 Created`` (not a placeholder ``202``) is accurate. ``download``
+is unchanged: :meth:`~FileStore.presign_get` still mints a short-lived
+capability URL the client fetches directly.
 
-``presign_upload`` / ``presign_get`` are **sync**: for S3 a pre-signed URL/POST
-is a purely local SigV4 computation (no network round trip), and for SQL /
-local it is a local JWE mint -- neither blocks the event loop. Only
+``presign_get`` is **sync**: for S3 a pre-signed URL is a purely local SigV4
+computation (no network round trip), and for SQL / local it is a local JWE
+mint -- neither blocks the event loop. Only
 ``put`` / ``get`` / ``head`` / ``delete`` / ``list_objects`` / ``count_objects``
 touch I/O and are async.
 
@@ -38,19 +38,12 @@ and no optional driver (``boto3`` is imported lazily by
 
 from __future__ import annotations
 
-import hashlib
 from abc import ABC, abstractmethod
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-from resourcey.core.errors import ConflictError
 from resourcey.util.models import DiscriminatedUnionMixin
-
-# The two capability operations a signed URL can be bound to. Plain strings
-# because they are serialized into the JWE claim dict.
-PUT_OPERATION = "put"
-GET_OPERATION = "get"
 
 
 class StoredObject(BaseModel):
@@ -94,49 +87,6 @@ class PresignedUrl(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
-class UploadCapability(BaseModel):
-    """A short-lived upload capability, minted by ``create``.
-
-    Attributes:
-        url: The URL the client transfers against.
-        method: ``PUT`` (local / SQL media -- the client sends raw bytes) or
-            ``POST`` (S3 -- a presigned POST policy, the client sends a
-            multipart form).
-        fields: Extra form fields the client must include with a ``POST``
-            (S3's policy conditions -- key, content-type, declared size,
-            metadata). Empty for a ``PUT``.
-        headers: Headers the client must echo on a ``PUT`` (e.g.
-            ``Content-Type``, baked into the signature). Empty for a ``POST``.
-        expires_at: When the capability stops being usable.
-    """
-
-    url: str
-    method: str
-    fields: dict[str, str] = Field(default_factory=dict)
-    headers: dict[str, str] = Field(default_factory=dict)
-    expires_at: datetime
-
-
-def verify_upload(
-    data: bytes, *, declared_size: int | None = None, checksum: str | None = None
-) -> None:
-    """Reject ``data`` that does not match the claims it was uploaded under.
-
-    Shared by the local and SQL media (which receive the bytes themselves, so
-    they can verify before committing); S3 enforces the same conditions
-    natively via its presigned-POST policy. Raises
-    :class:`~resourcey.core.errors.ConflictError` (mapped to ``409``) on a
-    mismatch -- there is no ``failed`` status to track, the client simply
-    retries against the same (still-valid) capability.
-    """
-    if declared_size is not None and len(data) != declared_size:
-        raise ConflictError(f"Uploaded object is {len(data)} bytes, expected {declared_size}")
-    if checksum is not None:
-        actual = hashlib.sha256(data).hexdigest()
-        if actual != checksum:
-            raise ConflictError(f"Uploaded object checksum {actual} does not match {checksum}")
-
-
 class FileStore(DiscriminatedUnionMixin, ABC):
     """The abstract storage-medium seam, discriminated by ``kind``.
 
@@ -165,12 +115,12 @@ class FileStore(DiscriminatedUnionMixin, ABC):
         content_type: str | None = None,
         name: str | None = None,
         checksum: str | None = None,
-        declared_size: int | None = None,
     ) -> StoredObject:
         """Write ``data`` under ``key`` and return what the medium recorded.
 
-        ``declared_size`` / ``checksum``, when given, are verified against
-        ``data`` (:func:`verify_upload`) before the write is committed.
+        ``name`` / ``content_type`` / ``checksum`` are already resolved by the
+        caller (read off the upload, or computed from ``data`` itself) --
+        nothing here is a client declaration to verify.
         """
 
     @abstractmethod
@@ -199,25 +149,6 @@ class FileStore(DiscriminatedUnionMixin, ABC):
     @abstractmethod
     async def count_objects(self) -> int:
         """The total number of stored objects."""
-
-    @abstractmethod
-    def presign_upload(
-        self,
-        key: str,
-        *,
-        name: str | None,
-        content_type: str | None,
-        size: int | None,
-        checksum: str | None,
-        expires_in_seconds: int,
-    ) -> UploadCapability:
-        """Mint an upload capability for one object key (sync).
-
-        The declared ``name`` / ``content_type`` / ``size`` / ``checksum``
-        travel with the capability (signed claims for the local / SQL media,
-        policy conditions + metadata fields for S3) so the upload can be
-        verified against them before it is visible.
-        """
 
     @abstractmethod
     def presign_get(self, key: str, *, expires_in_seconds: int) -> PresignedUrl:
