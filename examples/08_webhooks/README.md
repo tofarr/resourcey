@@ -7,15 +7,20 @@ close out the original ask in issue
 [#18](https://github.com/tofarr/resourcey/issues/18).
 
 It is the same `Thread` / `Message` board as example 01. The point here is not
-a new domain — it's the trigger wiring. The configured trigger,
-`LoggingWebhookTrigger`, does not actually call out over the network: it
-**logs** exactly what a real webhook sender would have POSTed, and to which
-URL. That is enough to prove the mechanism end-to-end (fires once per write,
-only on success, isolated per trigger, in the background by default) without a
-second server, a mock, or any network access — watch the `uvicorn` console
-while you make requests below. Swapping the log line for a real
-`httpx.AsyncClient().post(...)` call is the only change a production webhook
-sender needs; see `webhooks_example/triggers.py`.
+a new domain — it's the trigger wiring. The configured trigger is
+`resourcey.triggers.webhook_trigger.WebhookTrigger` — the framework's own,
+generic HTTP-delivering trigger (`url`, `headers` with secret values, and a
+configurable `retry` strategy; no HTTP-sending code lives in this example). It
+really does `POST` over HTTP: a production deployment would point it at a
+separate, independently owned service, but to stay a **working**, runnable
+example with nothing external to stand up, this app also mounts its own
+receiving endpoint (`webhooks_example/webhook_receiver.py`) on the *same*
+FastAPI app and points both configured triggers at it. That is enough to prove
+the mechanism end-to-end — a genuine delivery (fires once per write, only on
+success, isolated per trigger, in the background by default) over real HTTP —
+watch the `uvicorn` console while you make requests below: the receiver logs
+exactly what arrived, in a banner that is unmistakable among the usual
+`uvicorn` access-log noise.
 
 ## Two ways to attach a trigger
 
@@ -47,7 +52,7 @@ code change** — that's the whole point of the config-driven rung.
 │   ├── app.py                 # manager + manifest + both trigger-wiring styles (uvicorn target)
 │   ├── models.py              # Thread & Message ORM models + Base (schema of record)
 │   ├── message.py             # MessageResource (plain -- its trigger comes from config)
-│   └── triggers.py            # LoggingWebhookTrigger -- the example's concrete Trigger
+│   └── webhook_receiver.py    # the example's own receiving endpoint (POST /_webhooks/{name})
 ├── migrations/
 │   ├── env.py                 # Alembic env, diffs against the ORM metadata
 │   └── versions/               # generated + reviewed revisions
@@ -94,10 +99,33 @@ curl -s -X POST http://127.0.0.1:8088/threads \
   -d '{"title":"Hello","description":"first thread"}'
 ```
 
-The server console logs:
+The server console logs a genuine, received HTTP request — this is
+`webhook_receiver.py`'s route handler, reached by a real `POST` the
+`WebhookTrigger` made over loopback:
 
 ```
-INFO:webhooks_example.webhook:[webhook:audit-log] would POST to https://example.com/webhooks/inbox: create -> {'id': 1, 'title': 'Hello', ...}
+INFO:webhooks_example.webhook_receiver:
+======================================================================
+WEBHOOK RECEIVED -- subscriber='audit-log'
+======================================================================
+Headers: {'x-webhook-secret': 'audit-log-dev-secret', 'user-agent': 'python-httpx/0.28.1', ...}
+[
+  {
+    "kind": "create",
+    "item": {
+      "title": "Hello",
+      "description": "first thread"
+    },
+    "result": {
+      "id": 1,
+      "title": "Hello",
+      "description": "first thread",
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  }
+]
+======================================================================
 ```
 
 Create a message under it (the **config-driven** wiring — `slack-notify`, from
@@ -110,7 +138,19 @@ curl -s -X POST http://127.0.0.1:8088/messages \
 ```
 
 ```
-INFO:webhooks_example.webhook:[webhook:slack-notify] would POST to https://hooks.example.com/services/T000/B000/XXXX: create -> {'id': 1, 'thread_id': 1, 'text': 'hi there', ...}
+INFO:webhooks_example.webhook_receiver:
+======================================================================
+WEBHOOK RECEIVED -- subscriber='slack-notify'
+======================================================================
+Headers: {'x-webhook-secret': 'slack-notify-dev-secret', ...}
+[
+  {
+    "kind": "create",
+    "item": {"thread_id": 1, "text": "hi there"},
+    "result": {"id": 1, "thread_id": 1, "text": "hi there", ...}
+  }
+]
+======================================================================
 ```
 
 Update and delete both fire too:
@@ -118,14 +158,14 @@ Update and delete both fire too:
 ```bash
 curl -s -X PATCH http://127.0.0.1:8088/messages/1 \
   -H "Content-Type: application/json" -d '{"text":"edited"}'
-# → logs: ... update -> {'id': 1, ..., 'text': 'edited', ...}
+# → logs: "kind": "update", "item": {"text": "edited"}, "result": {..., "text": "edited", ...}
 
 curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://127.0.0.1:8088/messages/1
-# → 204, logs: ... delete id=1
+# → 204, logs: [{"kind": "delete", "id": 1}]
 ```
 
-A **batch edit** fires its trigger **once**, not once per item — the whole
-batch is one edit operation:
+A **batch edit** delivers **one** webhook request, not one per item — the
+whole batch is one edit operation:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8088/messages/batch-edit \
@@ -135,8 +175,8 @@ curl -s -X POST http://127.0.0.1:8088/messages/batch-edit \
         {"kind":"Create","item":{"thread_id":1,"text":"second"}},
         {"kind":"Create","item":{"thread_id":1,"text":"third"}}
       ]'
-# → exactly one log line, naming all three results:
-#   ... create -> {'id': 1, ..., 'text': 'first', ...}; create -> {'id': 2, ..., 'text': 'second', ...}; create -> {'id': 3, ..., 'text': 'third', ...}
+# → exactly one WEBHOOK RECEIVED banner, naming all three records:
+#   [{"kind": "create", ..., "text": "first"}, {"kind": "create", ..., "text": "second"}, {"kind": "create", ..., "text": "third"}]
 ```
 
 A **failed** write fires nothing — try updating a message that doesn't exist:
@@ -158,38 +198,42 @@ loading, so every command passes `--env-file .env`.
 | `APP_SQL_CONNECTIONS_0_URL` | `sqlite+aiosqlite:///webhooks_example.db` | Complete SQLAlchemy URL (driver in scheme). |
 | `APP_ENCRYPTION_KEY_ID` / `_VALUE` | `dev` / *(dev default + warning when unset)* | Cursor-encryption key. |
 | `APP_TRIGGERS_0_RESOURCE_PATH` | `messages` | Which resource's service gets wrapped. |
-| `APP_TRIGGERS_0_TRIGGER_KIND` | `webhooks_example.triggers.LoggingWebhookTrigger` | Dotted path of the `Trigger` subclass. |
-| `APP_TRIGGERS_0_TRIGGER_NAME` | `slack-notify` | The simulated subscriber's label (a `LoggingWebhookTrigger` field). |
-| `APP_TRIGGERS_0_TRIGGER_URL` | *(an example URL)* | The URL a real sender would `POST` to. |
+| `APP_TRIGGERS_0_TRIGGER_KIND` | `resourcey.triggers.webhook_trigger.WebhookTrigger` | Dotted path of the `Trigger` subclass. |
+| `APP_TRIGGERS_0_TRIGGER_URL` | *(this app's own receiver)* | The URL the trigger `POST`s to — **required**, no default. |
+| `APP_TRIGGERS_0_TRIGGER_HEADERS_0_NAME` / `_VALUE` | `X-Webhook-Secret` / *(a dev secret)* | One header sent with every delivery; `_VALUE` is a `SecretStr`. |
+| `APP_TRIGGERS_0_TRIGGER_RETRY_KIND` | `FixedDelayRetry` | Which `RetryStrategy` to use (`NoRetry` / `FixedDelayRetry` / `ExponentialBackoffRetry`). |
+| `APP_TRIGGERS_0_TRIGGER_RETRY_MAX_RETRIES` / `_DELAY_SECONDS` | `2` / `1` | `FixedDelayRetry`'s own fields. |
+| `WEBHOOKS_EXAMPLE_BASE_URL` | `http://127.0.0.1:8088` | Base URL the directly-wired `threads` trigger (`app.py`) points at; a plain process env var, not an `APP_*` config field. |
 
 Add a second entry (`APP_TRIGGERS_1_*`) to attach another trigger, or point
 `messages` at more than one subscriber by repeating `APP_TRIGGERS_<n>_*` with
-the same `RESOURCE_PATH`.
+the same `RESOURCE_PATH`. Delete the `APP_TRIGGERS_0_*` lines entirely and
+`messages` goes back to a plain, trigger-free resource with no code change.
 
-## Writing a real webhook `Trigger`
+## `WebhookTrigger` — the framework's generic sender
 
-`resourcey.triggers` ships only the abstract `Trigger` contract — deliberately
-no HTTP-sending implementation, so no HTTP client becomes a mandatory
-framework dependency. Replace `LoggingWebhookTrigger`'s `callback` body with a
-real delivery, keeping the same shape:
+`resourcey.triggers.webhook_trigger.WebhookTrigger` is the framework's own,
+concrete `Trigger`: it carries exactly three delivery-shaping fields —
 
-```python
-import httpx
-from resourcey.triggers.trigger import Trigger, TriggerEdits, TriggerResults
+* `url` — **required, no default**. A webhook with no destination would
+  silently deliver nowhere.
+* `headers` — a list of `{name, value}` pairs sent with every request; each
+  `value` is a `pydantic.SecretStr`, so it is redacted from default
+  serialization / `repr` / logging (the convention `DbConfig.password` /
+  `ApiKeyConfig.key` already use elsewhere in the framework).
+* `retry` — a polymorphic `RetryStrategy` (`NoRetry` by default — a single
+  attempt). `FixedDelayRetry` and `ExponentialBackoffRetry` ship too; a
+  deployment opts into retries explicitly.
 
-
-class NotifyWebhook(Trigger):
-    url: str
-
-    async def callback(self, edits: TriggerEdits, results: TriggerResults) -> None:
-        async with httpx.AsyncClient() as client:
-            await client.post(self.url, json=[r.model_dump(mode="json") for r in results if r])
-```
-
-Point `APP_TRIGGERS_0_TRIGGER_KIND` at its dotted path and it drops in with no
-other change — error handling, retries, and signing are the trigger
-implementation's job (`resourcey.triggers` fires best-effort, at-most-once; see
-the `trigger.py` / `triggered_service.py` module docstrings).
+It imports `httpx` **lazily**, behind the `resourcey[webhooks]` extra (this
+example's `pyproject.toml` already depends on it) — the same lazy-import shape
+`S3FileStore` uses for `boto3`, so no HTTP client becomes a mandatory framework
+dependency merely because an app attaches one trigger. Error handling beyond
+`retry` — signing, idempotency, ordering — is still the deployment's concern:
+`resourcey.triggers` fires best-effort, at-most-once (see the `trigger.py` /
+`triggered_service.py` module docstrings). No custom `Trigger` subclass is
+needed for this example — `webhooks_example/webhook_receiver.py` is purely the
+*receiving* side, proving delivery really happened.
 
 ## Auto-generated REST surface
 
@@ -207,4 +251,9 @@ Each resource gets the standard actions (`threads` and `messages` alike):
 | `POST` | `/threads/batch-edit` | batch_edit |
 
 Triggers are purely a side effect of a successful write on these same routes —
-no new endpoints are added by this example.
+no *resource* routes are added. One extra, non-resource endpoint exists purely
+to receive the deliveries this example's own triggers make:
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `POST` | `/_webhooks/{name}` | The example's own webhook receiver (`webhook_receiver.py`) — logs what arrived. Not one of the eight standard actions; a real deployment's receiver would live on a separate service entirely. |

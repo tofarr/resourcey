@@ -9,8 +9,12 @@ The app is assembled through the real config path:
 ``webhooks_example.app.build_app`` (the same entry point ``uvicorn`` targets),
 given an isolated session manager and an explicit ``TriggerConfig`` so the
 committed ``.env``'s entries are never needed for the suite to be
-deterministic. ``background=False`` makes every trigger fire inline, so a log
-line is always written before the response is asserted on.
+deterministic. ``background=False`` makes every trigger fire inline, so a
+webhook delivery is always complete (and its log line written) before the
+response is asserted on. ``build_app(base_url=...)`` points the directly-wired
+``threads`` trigger at this fixture's own in-process ASGI transport (see
+``WebhookTrigger.bind_client``) so delivery is a real HTTP round trip into the
+very same app, landing on ``webhook_receiver.py``'s real route handler.
 """
 
 from __future__ import annotations
@@ -24,12 +28,16 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 
 from resourcey.sql.session_manager import SqlSessionManager
 from resourcey.sql.sql_config import SqlConfig
 from resourcey.triggers.trigger_config import TriggerConfig, TriggerEntry
+from resourcey.triggers.webhook_trigger import WebhookHeader, WebhookTrigger
 from webhooks_example.app import build_app
-from webhooks_example.triggers import LoggingWebhookTrigger
+
+BASE_URL = "http://testserver"
+_RECEIVER_LOGGER = "webhooks_example.webhook_receiver"
 
 
 def _migrations_dir() -> Path:
@@ -67,21 +75,31 @@ async def client(tmp_path: Path, monkeypatch) -> AsyncIterator[AsyncClient]:
     _apply_migration(async_url)
 
     manager = SqlSessionManager(SqlConfig.get_instance())
+    slack_trigger = WebhookTrigger(
+        url=f"{BASE_URL}/_webhooks/slack-notify",
+        headers=[WebhookHeader(name="X-Webhook-Secret", value=SecretStr("slack-secret"))],
+    )
     trigger_config = TriggerConfig(
-        triggers=[
-            TriggerEntry(
-                resource_path="messages",
-                trigger=LoggingWebhookTrigger(name="slack-notify"),
-            )
-        ]
+        triggers=[TriggerEntry(resource_path="messages", trigger=slack_trigger)]
     )
-    manifest, app, _builder = build_app(
-        session_manager=manager, trigger_config=trigger_config, background=False
+    manifest, app, _builder, webhook_triggers = build_app(
+        session_manager=manager,
+        trigger_config=trigger_config,
+        background=False,
+        base_url=BASE_URL,
     )
+
+    # Every WebhookTrigger this app wired up delivers back into itself --
+    # bind each to a client whose transport *is* this app, now that the app
+    # exists (see WebhookTrigger.bind_client).
+    transport = ASGITransport(app=app)
+    webhook_client = AsyncClient(transport=transport, base_url=BASE_URL)
+    for trigger in webhook_triggers:
+        trigger.bind_client(webhook_client)
+
     await manifest.__aenter__()
     try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as c:
+        async with webhook_client, AsyncClient(transport=transport, base_url=BASE_URL) as c:
             yield c
     finally:
         await manifest.__aexit__(None, None, None)
@@ -153,29 +171,30 @@ class TestTriggers:
     async def test_direct_wiring_fires_on_thread_create(
         self, client: AsyncClient, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """``threads`` fires its directly-wired trigger (``audit-log``)."""
-        with caplog.at_level(logging.INFO, logger="webhooks_example.webhook"):
+        """``threads`` delivers its directly-wired trigger (``audit-log``) over real HTTP."""
+        with caplog.at_level(logging.INFO, logger=_RECEIVER_LOGGER):
             resp = await client.post("/threads", json={"title": "Hello"})
         assert resp.status_code == 201
-        assert "[webhook:audit-log]" in caplog.text
+        assert "WEBHOOK RECEIVED -- subscriber='audit-log'" in caplog.text
 
     async def test_config_driven_wiring_fires_on_message_create(
         self, client: AsyncClient, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """``messages`` fires its config-driven trigger (``slack-notify``)."""
+        """``messages`` delivers its config-driven trigger (``slack-notify``) over real HTTP."""
         thread = await _make_thread(client)
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="webhooks_example.webhook"):
+        with caplog.at_level(logging.INFO, logger=_RECEIVER_LOGGER):
             resp = await client.post("/messages", json={"thread_id": thread["id"], "text": "hi"})
         assert resp.status_code == 201
-        assert "[webhook:slack-notify]" in caplog.text
+        assert "WEBHOOK RECEIVED -- subscriber='slack-notify'" in caplog.text
+        assert "'x-webhook-secret': 'slack-secret'" in caplog.text
 
     async def test_batch_edit_fires_once_for_the_whole_batch(
         self, client: AsyncClient, caplog: pytest.LogCaptureFixture
     ) -> None:
         thread = await _make_thread(client)
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="webhooks_example.webhook"):
+        with caplog.at_level(logging.INFO, logger=_RECEIVER_LOGGER):
             resp = await client.post(
                 "/messages/batch-edit",
                 json=[
@@ -184,13 +203,13 @@ class TestTriggers:
                 ],
             )
         assert resp.status_code == 200
-        webhook_records = [r for r in caplog.records if r.name == "webhooks_example.webhook"]
+        webhook_records = [r for r in caplog.records if r.name == _RECEIVER_LOGGER]
         assert len(webhook_records) == 1
 
     async def test_the_two_resources_fire_independently(
         self, client: AsyncClient, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """Deleting a ``thread`` fires only ``audit-log``, never ``slack-notify``.
+        """Deleting a ``thread`` delivers only ``audit-log``, never ``slack-notify``.
 
         ``threads``' trigger is wired directly on the resource; ``messages``'
         comes from the config-driven builder. Proving a ``threads`` write
@@ -199,8 +218,8 @@ class TestTriggers:
         """
         thread = await _make_thread(client)
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="webhooks_example.webhook"):
+        with caplog.at_level(logging.INFO, logger=_RECEIVER_LOGGER):
             resp = await client.delete(f"/threads/{thread['id']}")
         assert resp.status_code == 204
-        assert "[webhook:audit-log]" in caplog.text
-        assert "[webhook:slack-notify]" not in caplog.text
+        assert "WEBHOOK RECEIVED -- subscriber='audit-log'" in caplog.text
+        assert "subscriber='slack-notify'" not in caplog.text

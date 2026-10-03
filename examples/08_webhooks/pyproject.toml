@@ -5,11 +5,13 @@ description = "Example 08 — edit-event triggers / webhooks built on resourcey.
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    # resourcey from GitHub main. A standalone copy of this example installs
-    # this git dependency directly; inside the resourcey repository the
-    # [tool.uv.sources] override below redirects it to the parent checkout
-    # (your branch or PR) instead.
-    "resourcey @ git+https://github.com/tofarr/resourcey.git@main",
+    # resourcey from GitHub main, with the `webhooks` extra -- WebhookTrigger
+    # (resourcey.triggers.webhook_trigger) needs httpx at runtime to actually
+    # deliver to the receiver below. A standalone copy of this example
+    # installs this git dependency directly; inside the resourcey repository
+    # the [tool.uv.sources] override below redirects it to the parent
+    # checkout (your branch or PR) instead.
+    "resourcey[webhooks] @ git+https://github.com/tofarr/resourcey.git@main",
     # SQLite async driver — the example defaults to a local SQLite file.
     "aiosqlite>=0.22",
     # Alembic is driven directly against the ORM metadata, so it is a direct

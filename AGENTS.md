@@ -113,11 +113,16 @@ until the first release.
   while `messages` stays an untouched resource declaration and gets its
   trigger from the opt-in, env-driven `TriggerConfig` (`APP_TRIGGERS_<n>_*`)
   via `TriggeredDependencyBuilder.from_config(...)` passed as `create_app`'s
-  `dependency_builder=`. The concrete `Trigger`, `LoggingWebhookTrigger`
-  (`webhooks_example/triggers.py`), logs exactly what a real webhook sender
-  would have POSTed instead of making a network call — proving fire-once-per-
-  write / success-only / per-trigger-isolated / background-by-default
-  end to end with no second server, no mock, and no network access.
+  `dependency_builder=`. The concrete `Trigger` is the framework's own
+  `WebhookTrigger` (`resourcey.triggers.webhook_trigger`) — it really
+  delivers over HTTP, with configurable headers (secret-valued) and retry.
+  Because a production webhook would notify a separate service, but this
+  example stays runnable with nothing external to stand up, it also mounts
+  its own receiving endpoint (`webhooks_example/webhook_receiver.py`, `POST
+  /_webhooks/{name}`) on the *same* app and points both configured triggers
+  at it — a genuine delivery, not a simulation, proving fire-once-per-write /
+  success-only / per-trigger-isolated / background-by-default end to end with
+  no second server and no mocking.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
@@ -1378,6 +1383,26 @@ sees the inner DTO, not the projected REST model.
   `on_edit`) is never wrapped a second time: the constructor list wins.
   `from_config(config)` is the sugar building `resource_triggers` from a
   `TriggerConfig` instead of grouping by hand.
+* `webhook_trigger.py` — `WebhookTrigger`, the framework's own concrete,
+  HTTP-delivering `Trigger` (not just the abstract contract): `url`
+  (**required, no default** — a webhook with no destination would silently
+  deliver nowhere), `headers` (a list of `WebhookHeader(name, value:
+  SecretStr)`, redacted by default the same way `DbConfig.password` /
+  `ApiKeyConfig.key` are), and `retry` (a polymorphic `RetryStrategy` —
+  `NoRetry` by default, plus `FixedDelayRetry` / `ExponentialBackoffRetry`;
+  `delays()` is the whole contract, the seconds to sleep before each retry
+  attempt). `httpx` is imported **lazily**, behind the `webhooks` extra
+  (`resourcey[webhooks]`) — the same lazy-import shape `S3FileStore` uses for
+  `boto3` — so no HTTP client becomes a mandatory framework dependency merely
+  because an app attaches one trigger; an explicit `client=` constructor
+  argument (mirroring `S3FileStore`) injects one directly, and
+  `bind_client(...)` is the escape hatch for when that client can only be
+  built *after* the trigger already exists (its destination is the very app
+  it is attached to — see `examples/08_webhooks`). `callback` `POST`s one
+  JSON array per operation (`{"kind", "item"/"id", "result"}` per
+  `(edit, result)` pair); a failure is retried per `retry.delays()`, and
+  exhausting every attempt re-raises the last error, which
+  `TriggerRunner` isolates and logs like any other raising trigger.
 
 `specs/triggers.qnt` pins the execution policy (in `make specs` and CI): only
 a write action can fire and only on success (a read, or any failed action,
