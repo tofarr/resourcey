@@ -30,7 +30,8 @@ until the first release.
 
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
-  `04_simple_roles`, `05_full_rbac`, `06_filestore`, `07_oauth` — standalone
+  `04_simple_roles`, `05_full_rbac`, `06_filestore`, `07_oauth`,
+  `08_webhooks` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **reference app** (issue
@@ -111,10 +112,29 @@ until the first release.
   cookie the composed `CookieAuthenticator` accepts. The committed migration
   seeds the local users and the identity links, and `oauth_example/dev_idp.py`
   mints a dev JWKS / token so the demo runs without an external IdP.
+  `08_webhooks` is the **triggers / webhooks app** (issue #18, built on
+  `resourcey.triggers` from issue #155 / PR #156): the same `Thread` /
+  `Message` board, demonstrating **both** ways to attach an edit-event
+  trigger on two different resources — `threads` wraps a plain `SqlResource`
+  directly in `TriggeredResource(..., on_edit=[...])` (the no-config seam),
+  while `messages` stays an untouched resource declaration and gets its
+  trigger from the opt-in, env-driven `TriggerConfig` (`APP_TRIGGERS_<n>_*`)
+  via `TriggeredDependencyBuilder.from_config(...)` passed as `create_app`'s
+  `dependency_builder=`. The concrete `Trigger` is the framework's own
+  `WebhookTrigger` (`resourcey.triggers.webhook_trigger`) — it really
+  delivers over HTTP, with configurable headers (secret-valued) and retry.
+  Because a production webhook would notify a separate service, but this
+  example stays runnable with nothing external to stand up, it also mounts
+  its own receiving endpoint (`webhooks_example/webhook_receiver.py`, `POST
+  /_webhooks/{name}`) on the *same* app and points both configured triggers
+  at it — a genuine delivery, not a simulation, proving fire-once-per-write /
+  success-only / per-trigger-isolated / background-by-default end to end with
+  no second server and no mocking.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
-  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06), 8087 (07).
+  8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06), 8087 (07),
+  8088 (08).
 
 ## Core design principles
 
@@ -1397,6 +1417,26 @@ sees the inner DTO, not the projected REST model.
   `on_edit`) is never wrapped a second time: the constructor list wins.
   `from_config(config)` is the sugar building `resource_triggers` from a
   `TriggerConfig` instead of grouping by hand.
+* `webhook_trigger.py` — `WebhookTrigger`, the framework's own concrete,
+  HTTP-delivering `Trigger` (not just the abstract contract): `url`
+  (**required, no default** — a webhook with no destination would silently
+  deliver nowhere), `headers` (a list of `WebhookHeader(name, value:
+  SecretStr)`, redacted by default the same way `DbConfig.password` /
+  `ApiKeyConfig.key` are), and `retry` (a polymorphic `RetryStrategy` —
+  `NoRetry` by default, plus `FixedDelayRetry` / `ExponentialBackoffRetry`;
+  `delays()` is the whole contract, the seconds to sleep before each retry
+  attempt). `httpx` is imported **lazily**, behind the `webhooks` extra
+  (`resourcey[webhooks]`) — the same lazy-import shape `S3FileStore` uses for
+  `boto3` — so no HTTP client becomes a mandatory framework dependency merely
+  because an app attaches one trigger; an explicit `client=` constructor
+  argument (mirroring `S3FileStore`) injects one directly, and
+  `bind_client(...)` is the escape hatch for when that client can only be
+  built *after* the trigger already exists (its destination is the very app
+  it is attached to — see `examples/08_webhooks`). `callback` `POST`s one
+  JSON array per operation (`{"kind", "item"/"id", "result"}` per
+  `(edit, result)` pair); a failure is retried per `retry.delays()`, and
+  exhausting every attempt re-raises the last error, which
+  `TriggerRunner` isolates and logs like any other raising trigger.
 
 `specs/triggers.qnt` pins the execution policy (in `make specs` and CI): only
 a write action can fire and only on success (a read, or any failed action,
@@ -1406,6 +1446,7 @@ changes whether any other configured trigger ran (per-trigger isolation);
 `background=true` orders the response before the trigger awaits complete and
 `background=false` the reverse; and exit settles every in-flight run
 (`Pending` -> `Cancelled`, idempotent), never leaving one `Pending`.
+`examples/08_webhooks` is the runnable app (issue #18).
 
 ### Framework isolation
 

@@ -299,8 +299,19 @@ def test_the_triggers_files_exist_without_an_init():
         "triggered_dependency_builder.py",
         "triggered_resource.py",
         "triggered_service.py",
+        "webhook_trigger.py",
     }
     assert not (triggers / "__init__.py").exists()
+
+
+def test_triggers_never_imports_httpx_at_module_scope():
+    """``WebhookTrigger`` imports its optional driver lazily, behind the ``webhooks`` extra."""
+    offenders = [
+        str(p.relative_to(FRAMEWORK_DIR))
+        for p in sorted((FRAMEWORK_DIR / "triggers").rglob("*.py"))
+        if _module_scope_import(p, "httpx")
+    ]
+    assert offenders == []
 
 
 def test_the_auth_files_exist_without_an_init():
