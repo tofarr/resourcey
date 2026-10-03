@@ -85,14 +85,21 @@ until the first release.
   union their policies: `viewer` ∪ `author` reads all of `messages` but edits
   only its own. A `seed` module populates the store; the whole RBAC set is also
   served over the ordinary REST surface, with an `admin` grant on each table.
-  `06_filestore` is the **file-store app** (issue #117): the pre-signed-URL
-  handshake over the framework's conventional `FileMetadata` resource — a
-  `manifest`-entered medium (`LocalFileStore` from `MEDIUM_CLASS`, defaulting to
-  a directory) plus `register_file_routes` mounting the mint / complete /
-  download routes *after* `create_app`, and the local medium's framework-signed
-  `/_files/{key}` `PUT` / `GET` transfer endpoints. It is what proves the
-  handshake end to end: create (`pending`, opaque key) → `upload-url` → byte
-  transfer → `complete` (`ready`, ETag) → `download`. `07_oauth` is the
+  `06_filestore` is the **file-store app** (issues #117, #158): file bytes
+  live in a pluggable medium with **no metadata table at all** — "does the
+  medium have the bytes" is the only source of truth for a file's existence —
+  served by the framework's conventional `FileResource` directly over whichever
+  `FileStore` the app selects (`LocalFileStore` from `MEDIUM_CLASS`, defaulting
+  to a directory; needing no database), a `manifest`-entered medium, and
+  `register_file_routes` mounting the whole `files` surface (not a manifest
+  resource itself) plus the local/SQL medium's framework-signed `/_files/{key}`
+  `PUT` / `GET` transfer endpoints *after* `create_app`. It proves the flow end
+  to end: `create` (`202`, opaque key + upload capability, nothing persisted)
+  → byte transfer → the file now exists → `read` / `search` resolve directly
+  against the medium → `download` (a fresh capability, JSON) / `content`
+  (the bytes themselves — a redirect for S3, streamed for Local/SQL, since a
+  plain `<a href>` / `<img src>` cannot carry an API key) → `delete`.
+  `07_oauth` is the
   **OAuth / OIDC app** (issue #151, Part 4 of the auth roadmap): the same board,
   but authentication federates to an external identity provider — a
   `configure_oauth(...)` call builds the config-rung client resource, the
@@ -1155,39 +1162,47 @@ lifecycle (e.g. `MongoResource.ensure_indexes()`) still runs; register the
 **view**, not the inner (registering both double-enters the inner and mounts
 duplicate routes). The layer ranks gain `view` at the backend rank.
 
-### `filestore` — pre-signed-URL files (issue #117)
+### `filestore` — pre-signed-URL files (issues #117, #158)
 
 `src/resourcey/filestore/` adds **file bytes** as a first-class resource
-without putting the bytes on a request path. The *metadata* (name, size, MIME
-type, checksum, the medium's ETag, status, opaque storage key) is an ordinary
-model-first `SqlResource`, so it gets the standard surface plus cache headers;
-the *bytes* live in a pluggable medium behind `FileStore`. The client transfers
-directly against a short-lived capability URL and the API only mints it — so
-authorization stays in the API while the storage medium (which cannot see the
-API's auth) moves the bytes.
+without putting the bytes on a request path. There is **no metadata table**:
+"does the medium have the bytes" is the only source of truth for a file's
+existence, so the `files` resource is served directly over the pluggable
+medium behind `FileStore`. The client transfers directly against a
+short-lived capability URL and the API only mints it — so authorization stays
+in the API while the storage medium (which cannot see the API's auth) moves
+the bytes.
 
 * `file_store.py` — `FileStore` (a `DiscriminatedUnionMixin`, `kind` = class
-  name) is the medium seam: `put` / `get` / `head` / `delete` (async, the
-  server-side fallback) plus `presign_put` / `presign_get` (sync: a native SigV4
-  computation for S3, a local JWE mint for SQL / local, neither blocking the
-  event loop). `StoredObject` is a `head` result (`key`, `size`, `content_type`,
-  `etag`, `updated_at`); `PresignedUrl` is the identical-shape handshake result
-  (`url`, `method`, `expires_at`, `headers`). A store is its own async context
-  manager, entered through the manifest's `managers=` slot exactly like a
-  `SqlSessionManager` / `MongoClientManager`, so its client lifecycle is tied to
-  the app.
-* `file_metadata.py` — the metadata model + `file_resource(store, ...)`. Two
-  guarantees are built in: **`updated_at`** is an ordinary column with
-  `default` / `onupdate`, so the DTO conventions make it framework-owned and it
-  appears in every response shape; **MIME type** (`content_type`) is a
-  first-class column. The cache policy is overridden to a strong **ETag** over
-  the projected bytes (the default last-modified would otherwise win, since the
-  read model carries `updated_at`). `key` and `status` are server-owned (absent
-  from every create / update request and, for `key`, every response); `etag` is
-  server-owned. `FileMetadataService` assigns the opaque key + `pending` status
-  on create, enforces the optional `max_size` cap (defaulted from
-  `FileStoreConfig.max_size`), and on delete removes the row *and* the object so
-  no orphan remains.
+  name) is the medium seam: `put` / `get` / `head` / `delete` /
+  `list_objects` / `count_objects` (async) plus `presign_upload` /
+  `presign_get` (sync: a native SigV4 computation for S3, a local JWE mint for
+  SQL / local, neither blocking the event loop). `StoredObject` is a `head` /
+  `list` result (`key`, `size`, `name`, `content_type`, `checksum`, `etag`,
+  `updated_at` — `name` / `content_type` / `checksum` are `None` from a listing
+  call that cannot report them cheaply, e.g. S3's `ListObjectsV2`; `head`
+  always reports them); `PresignedUrl` / `UploadCapability` are the
+  identical-shape handshake results. `verify_upload` rejects (`ConflictError`
+  → `409`) uploaded bytes whose size / checksum does not match the
+  capability's signed claims, **before** the write commits — there is no
+  `failed` status to track; the client simply retries against the same
+  (still-valid) capability. A store is its own async context manager, entered
+  through the manifest's `managers=` slot exactly like a `SqlSessionManager` /
+  `MongoClientManager`, so its client lifecycle is tied to the app.
+* `file_resource.py` — `FileDTO` (`id`, `name`, `content_type`, `size`,
+  `checksum`, `etag`, `updated_at`, `upload`) and `FileResource` /
+  `FileService`, the medium-native existence record: `create` only allocates a
+  key + mints an upload capability (no row persisted); `read` / `search` /
+  `count` / `batch_read` resolve directly against the medium's `head` /
+  `list_objects` / `count_objects`, so a key is "the file" exactly when the
+  medium holds bytes for it. There is **no `update` action** — a file's bytes
+  are immutable once uploaded; "changing" one means delete the old id and
+  create a new one. `search` / `count` have no filter or sort surface (a
+  medium's listing call cannot filter or sort by declared metadata — S3's
+  `ListObjectsV2` is the limiting case) and `search` omits `name` /
+  `content_type` / `checksum` for the same reason. `FileResource` mixes in
+  `DefaultCacheStrategyMixin`; `files` advertises writes (`create` / `delete`),
+  so it resolves to `LastModifiedCacheStrategy` over `updated_at`.
 * `local_file_store.py` — the default medium (single instance, dev, tests):
   bytes under `root`, MIME type in a `.meta` sidecar (the filesystem records
   none), ETag an MD5 of the bytes. Keys are opaque server-assigned hex, never
@@ -1195,17 +1210,19 @@ API's auth) moves the bytes.
   the resolved path is re-checked to live under `root`.
 * `sql_file_store.py` — bytes in a dedicated `file_blobs` table (no second
   system). The blob table is **storage, not a resource**: never registered and
-  never DTO-derived, so bytes cannot leak through a read model. The app owns the
-  schema (`create_blob_tables` for `create_all`, or Alembic against
-  `FileBlobBase`). The session source mirrors `SqlResource` (explicit
-  `session_factory=` wins; else resolve from `session_manager=` by
-  `connection_name`, defaulting to the process-wide manager).
+  never DTO-derived, so bytes cannot leak through a read model;
+  `sql_file_blob_view` is an optional, read-only, `data`-hiding `ResourceView`
+  over it for admin / debugging. The app owns the schema
+  (`create_blob_tables` for `create_all`, or Alembic against `FileBlobBase`).
+  The session source mirrors `SqlResource` (explicit `session_factory=` wins;
+  else resolve from `session_manager=` by `connection_name`, defaulting to the
+  process-wide manager).
 * `s3_file_store.py` — the production medium: native SigV4 pre-signed URLs
-  (`presign_*` is local, no network round trip) and client put/get/head/delete.
-  `boto3` is imported **lazily**, only when a real client is built (an explicit
-  `client=` is the escape hatch), so `filestore` imports without the extra;
-  the optional dependency is `s3` (`resourcey[s3]`), and a single-`PUT` cap
-  applies (`S3_MAX_PUT_BYTES`; multipart is out of scope).
+  (`presign_*` is local, no network round trip) and client put/get/head/delete
+  /list/count. `boto3` is imported **lazily**, only when a real client is
+  built (an explicit `client=` is the escape hatch), so `filestore` imports
+  without the extra; the optional dependency is `s3` (`resourcey[s3]`), and a
+  single-`PUT` cap applies (`S3_MAX_PUT_BYTES`; multipart is out of scope).
 * `signed_url.py` — the framework-signed capability for the SQL / local
   mediums: `mint_signed_url` produces a JWE over `encryption` carrying
   `{"k": key, "op": "put"|"get"}` plus `iat` / `exp`, and `verify_signed_url`
@@ -1224,21 +1241,38 @@ API's auth) moves the bytes.
   (the `*_seconds` spelling keeps them env-parseable; `*_ttl` properties expose
   `timedelta`).
 * `file_routes.py` — `register_file_routes(app, store, resource=files, ...)`,
-  called after `create_app`. It adds **no** standard `Action` member — a presign
-  handshake is genuinely not one of the eight — and mounts the capability
-  transfer endpoints (`PUT` / `GET` `/_files/{key}`, hidden from the schema) plus
-  the metadata handshake: `POST {resource}/{id}/upload-url` mints a `put`,
-  `POST {resource}/{id}/complete` heads + verifies + flips to `ready` (and
-  records the ETag), `GET {resource}/{id}/download` mints a `get` for a `ready`
-  file. Minting is authorized through the resource's normal
-  `DependencyBuilder` seam, so a caller must be permitted to act on the file
-  before receiving a URL.
+  called after `create_app`. `files` is an ordinary resource, so
+  `register_routes` already mounts `read` / `delete` / `search` / `count` /
+  `batch_read` / `batch_edit` correctly; this function additionally **swaps**
+  the generated `POST {resource}` route (hardcoded `201`) for a hand-written
+  one answering `202 Accepted` (nothing exists until the upload lands) — the
+  "a developer's own route wins" escape hatch, applied after registration so
+  exactly one route exists for the path in both dispatch and the OpenAPI
+  schema — and mounts two routes outside the eight standard actions:
+  `GET {resource}/{id}/download` (mints a `get` capability, the JSON shape,
+  unchanged from #117) and `GET {resource}/{id}/content` (issue #158 — the
+  bytes themselves: a `307` redirect to a fresh presigned `GET` for S3, or
+  streamed directly for Local / SQL, since a plain `<a href>` / `<img src>`
+  cannot carry an `Authorization` header — only a cookie authenticator makes
+  it ergonomic to embed in markup). Both gate on the resource's own `read`
+  first, so a missing / forbidden file is a `404` before any capability is
+  minted or any bytes move. The framework-signed `PUT` / `GET` `/_files/{key}`
+  transfer endpoints are mounted here too, for a `SignedFileStore` medium
+  (Local / SQL); S3 mints native URLs and never reaches them. Because this
+  function is the **sole** place `files`'s routes are mounted, the resource
+  must **not** also appear in the `Manifest(resources=...)` passed to
+  `create_app` (that would register the generated `201` route a second time,
+  on its own router, which runs first and shadows the swap) — only its medium
+  goes in `managers=`.
 
-`specs/filestore.qnt` pins the handshake: `create → upload → complete → ready`,
-the completion guards (object present, size matches, not already ready),
-`download` requires `ready`, `delete` removes the object, capability binding,
-distinct keys, and the `ready`-implies-uploaded / ETag-matches-medium /
-`pending`-has-no-ETag invariants. It is part of `make specs` and CI.
+`specs/filestore.qnt` pins the medium-native model: `create` allocates a key
+with no object yet; `upload` commits only when the byte count matches the
+capability's declared-size claim, otherwise the medium is left unchanged (so a
+retry against the same capability can still succeed) — there is no
+one-shot / `pending` → `ready` transition, an already-uploaded key can be
+uploaded again; `delete` removes the object; capability binding to exactly one
+`(key, op)` pair; and distinct keys per allocation. It is part of `make specs`
+and CI.
 
 ### `tasks` — background tasks (issue #15)
 

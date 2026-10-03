@@ -1,10 +1,12 @@
 """Alembic environment for the file-store example.
 
 The ORM models are the schema of record, so autogeneration diffs against
-``file_store_example.models.Base.metadata`` directly (no resource manifest). The
-``files`` table comes straight from the framework's conventional
-:class:`~resourcey.filestore.file_metadata.FileMetadata` model, so the migration
-matches what :func:`~resourcey.filestore.file_metadata.file_resource` serves.
+``file_store_example.models.Base.metadata`` directly (no resource manifest).
+``file_blobs`` is the framework's conventional
+:class:`~resourcey.filestore.sql_file_store.FileBlob` table -- only relevant
+when ``.env`` selects the SQL medium (``MEDIUM_CLASS=...SqlFileStore``); the
+default Local medium needs no database at all, so running this migration is
+optional for most deployments of this example.
 
 The database URL comes from the same ``APP_SQL_CONNECTIONS_0_URL`` the app reads,
 converted to its *synchronous* counterpart because Alembic drives a sync engine.

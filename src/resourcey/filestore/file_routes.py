@@ -1,55 +1,77 @@
-"""The file-transfer handshake routes (issue #117).
+"""The file-transfer routes (issue #117, #158).
 
-File metadata is a standard DTO-backed resource; the byte *transfer* is a small
-handshake of **dedicated routes**, not the eight standard actions, because a
-capability URL is computed per request, expiring, and never stored -- it is not
-a DTO field, and keeping it off the read model keeps that model static and
-cacheable::
+``files`` is an ordinary resource (:mod:`resourcey.filestore.file_resource`),
+so :func:`~resourcey.http.routes.register_routes` already mounts its standard
+surface -- ``read`` / ``delete`` / ``search`` / ``count`` / ``batch_read`` /
+``batch_edit`` -- correctly. Two things still need hand-written routes:
 
-    POST {resource}/{id}/upload-url   mint a ``put`` URL
-    POST {resource}/{id}/complete     head the object, verify, flip to ready
-    GET  {resource}/{id}/download     mint a ``get`` URL (ready files only)
-    DELETE {resource}/{id}            the standard delete (also removes the object)
+* ``create`` must mint the upload capability and answer **``202 Accepted``**
+  (nothing exists yet), not the generated builder's hardcoded ``201``. The
+  generated route is still what makes ``batch_edit``'s ``Create`` kind and the
+  create defaults resolve correctly (both read the one
+  ``get_supported_actions()`` declaration), so :func:`register_file_routes`
+  lets ``register_routes`` build everything first and then **swaps** the one
+  generated ``POST {resource}`` route for a hand-written one -- the same
+  "a developer's own route wins" escape hatch, applied after the fact rather
+  than before it, so there is exactly one route for the path in both the
+  runtime dispatch *and* the OpenAPI schema (no shadowed duplicate operation).
+* ``download`` (the JSON capability, unchanged from #117) and the new
+  ``content`` (bytes) routes are not among the eight standard actions at all.
 
-The framework-signed ``put`` / ``get`` transfer endpoints (``PUT`` / ``GET``
-``/_files/{key}``) are mounted here too; S3 mints native URLs instead and never
-reaches them.
+::
 
-Minting is **authorized**: the handlers resolve the metadata through the
-resource's normal :class:`~resourcey.http.dependency_builder.DependencyBuilder`
-seam, so a caller must be allowed to act on the file to obtain a URL. The URL is
-then a *capability* for its short life, which is the whole point -- an external
-object store cannot see the API's auth.
+    POST   {resource}            mint an upload capability (202)
+    GET    {resource}/{id}/download   mint a ``get`` capability (the JSON shape)
+    GET    {resource}/{id}/content    the bytes: a redirect for S3, streamed
+                                       directly for Local / SQL
 
-:func:`register_file_routes` is the explicit helper an app calls after
-:func:`~resourcey.http.app.create_app`::
+The framework-signed ``PUT`` / ``GET`` ``/_files/{key}`` transfer endpoints are
+mounted here too, for a :class:`~resourcey.filestore.signed_url.SignedFileStore`
+medium (Local / SQL); S3 mints native URLs and never reaches them. The ``PUT``
+handler verifies the uploaded bytes against the capability's signed claims
+(:func:`~resourcey.filestore.file_store.verify_upload`, via the medium's
+``put``) before they become visible.
 
+:func:`register_file_routes` is called **after**
+:func:`~resourcey.http.app.create_app`, exactly like every other after-the-fact
+mount in this framework (``register_oauth_routes``, the earlier
+``register_file_routes``), and is the **sole** place ``files``'s routes are
+mounted -- it calls ``register_routes`` itself (to get the swap-then-replace
+right), so the resource must **not** also be listed in the
+``Manifest(resources=...)`` passed to ``create_app`` (that would register the
+generated ``201`` route a second time, on its own router, which runs first and
+shadows the swap below). The medium still goes in the manifest's ``managers``
+slot exactly as before::
+
+    manifest = Manifest(resources=[], managers=[store])  # files is not a manifest resource
     app = create_app(manifest, dependency_builder=builder)
     register_file_routes(app, store, resource=files, dependency_builder=builder)
-
-It adds no :class:`~resourcey.core.service.Action` member and touches no core
-code -- a presign handshake is genuinely not one of the eight standard actions.
 
 This module imports no code outside the framework.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
-from resourcey.core.errors import ConflictError, InvalidInputError
+from resourcey.core.dto import request_to_dto
+from resourcey.core.errors import InvalidInputError, ResourceyConfigError
 from resourcey.core.resource import Resource
 from resourcey.core.service import NotFoundError, Service
 from resourcey.filestore.file_config import FileStoreConfig
-from resourcey.filestore.file_metadata import READY
 from resourcey.filestore.file_store import GET_OPERATION, PUT_OPERATION, FileStore
 from resourcey.filestore.signed_url import DEFAULT_SIGNED_URL_PATH, SignedFileStore
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
-from resourcey.http.routes import _dump, _project
+from resourcey.http.routes import (
+    _dump,
+    _project,
+    _resource_display_name,
+    _service_dependency,
+    register_routes,
+)
 
 
 def register_file_routes(
@@ -61,138 +83,174 @@ def register_file_routes(
     config: FileStoreConfig | None = None,
     prefix: str = "",
 ) -> APIRouter:
-    """Mount the handshake + framework-signed transfer routes.
+    """Mount the ``files`` surface: the standard actions plus the hand-written ones.
 
     Args:
         app_or_router: A ``FastAPI`` app / ``APIRouter`` (duck-typed).
         store: The medium the bytes move against.
-        resource: The file-metadata resource the handshake authorizes through.
-        dependency_builder: The seam the minting routes authorize through
-            (default :class:`~resourcey.http.dependency_builder.OpenDependencyBuilder`).
+        resource: The ``files`` resource (see :mod:`~resourcey.filestore.file_resource`).
+        dependency_builder: The seam every route authorizes through (default
+            :class:`~resourcey.http.dependency_builder.OpenDependencyBuilder`).
         config: TTLs / size cap (default ``FileStoreConfig.get_instance()``).
         prefix: An optional mount prefix.
     """
+    if resource.get_manifest() is not None:
+        raise ResourceyConfigError(
+            "The files resource is already registered on a Manifest; register_file_routes "
+            "mounts its routes itself and must be the only caller of register_routes for it "
+            "-- pass resources=[] (or omit it) for this resource and keep only its medium in "
+            "managers=[...]."
+        )
     exposed = resource.get_exposed_resource() or resource
     resolved_config = config if config is not None else FileStoreConfig.get_instance()
     builder = dependency_builder if dependency_builder is not None else OpenDependencyBuilder()
-    service_dep = _service_dependency(exposed, builder)
-    dto_type = exposed.get_dto_type()
-    read_model = exposed.get_rest_models().read_response
-    id_type = _id_type(exposed)
+
+    router = register_routes(
+        app_or_router, resource, prefix=prefix, dependency_builder=dependency_builder
+    )
     path = "/" + exposed.get_resource_path().lstrip("/")
 
-    router = APIRouter(tags=[type(exposed).__name__])
-
-    _add_upload_url_route(
-        router, path, store, service_dep, id_type, dto_type, read_model, resolved_config
-    )
-    _add_complete_route(router, path, store, service_dep, id_type, dto_type, read_model)
-    _add_download_route(
-        router, path, store, service_dep, id_type, dto_type, read_model, resolved_config
-    )
+    _replace_create_route(router, exposed, builder, path)
+    _add_download_route(router, exposed, store, builder, path, resolved_config)
+    _add_content_route(router, exposed, store, builder, path, resolved_config)
     _add_signed_transfer_routes(router, store)
-
-    app_or_router.include_router(router, prefix="" if prefix == "/" else prefix)
     return router
 
 
 # ---------------------------------------------------------------------------
-# Handshake routes
+# create -- swap the generated 201 route for a hand-written 202 one
 # ---------------------------------------------------------------------------
 
 
-def _add_upload_url_route(
+def _replace_create_route(
     router: APIRouter,
+    exposed: Resource[Any, Any],
+    builder: DependencyBuilder,
     path: str,
-    store: FileStore,
-    service_dep: Any,
-    id_type: Any,
-    dto_type: type[Any],
-    read_model: type[Any],
-    config: FileStoreConfig,
 ) -> None:
-    async def handler(id, request: Request, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008, A002
-        record = await service.read(id)
-        key = _key_of(record)
-        url = store.presign_put(
-            key,
-            content_type=getattr(record, "content_type", None),
-            expires_in_seconds=config.upload_url_ttl_seconds,
-        )
-        return _url_response(url)
+    """Drop the generated ``POST {path}`` route and mount our own (202).
 
-    handler.__annotations__ = {"id": id_type, "request": Request, "service": Service}
-    _route(
-        router,
-        f"{path}/{{id}}/upload-url",
-        ["POST"],
-        handler,
-        summary="Mint an upload URL",
-        description="Mint a short-lived capability URL the client PUTs the file bytes against.",
-    )
+    ``register_routes`` already built it (from the same ``get_supported_actions()``
+    declaration ``batch_edit``'s ``Create`` kind needs), so it is removed --
+    not left to be shadowed -- so exactly one route exists for the path, in
+    both the live dispatch *and* the generated OpenAPI schema.
+    """
+    router.routes = [
+        r
+        for r in router.routes
+        if not (getattr(r, "path", None) == path and "POST" in (getattr(r, "methods", None) or ()))
+    ]
+    service_dep = _service_dependency(exposed, builder)
+    models = exposed.get_rest_models()
+    dto_model = exposed.get_dto_type()
+    resource_name = _resource_display_name(exposed)
+    auth_dep = builder.get_principal_dependency()
+    route_deps = [Depends(auth_dep)] if auth_dep is not None else None
 
-
-def _add_complete_route(
-    router: APIRouter,
-    path: str,
-    store: FileStore,
-    service_dep: Any,
-    id_type: Any,
-    dto_type: type[Any],
-    read_model: type[Any],
-) -> None:
-    async def handler(id, request: Request, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008, A002
-        record = await service.read(id)
-        if getattr(record, "status", None) == READY:
-            raise ConflictError("File is already complete")
-        key = _key_of(record)
-        stored = await store.head(key)
-        if stored is None:
-            raise ConflictError("No object was uploaded for this file")
-        _verify_upload(record, stored)
-        dto = dto_type(id=id, status=READY, etag=stored.etag)
-        updated = await service.update(dto)
+    async def handler(payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
+        created = await service.create(request_to_dto(dto_model, payload))
         context = service.serialization_context()
-        projected = _project(updated, read_model, context)
-        return JSONResponse(content=_dump(projected, context))
+        projected = _project(created, models.create_response, context)
+        return JSONResponse(content=_dump(projected, context), status_code=status.HTTP_202_ACCEPTED)
 
-    handler.__annotations__ = {"id": id_type, "request": Request, "service": Service}
-    _route(
-        router,
-        f"{path}/{{id}}/complete",
-        ["POST"],
+    handler.__annotations__ = {"payload": models.create_request, "service": Service}
+    router.add_api_route(
+        path,
         handler,
-        summary="Complete an upload",
-        description="Verify the uploaded object and transition the file to ready.",
+        methods=["POST"],
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=route_deps,
+        response_model=None,
+        summary=f"Create {resource_name}",
+        description=(
+            f"Allocate a storage key and mint an upload capability for a new {resource_name}. "
+            "Nothing is persisted until the upload lands."
+        ),
     )
+
+
+# ---------------------------------------------------------------------------
+# download / content
+# ---------------------------------------------------------------------------
 
 
 def _add_download_route(
     router: APIRouter,
-    path: str,
+    exposed: Resource[Any, Any],
     store: FileStore,
-    service_dep: Any,
-    id_type: Any,
-    dto_type: type[Any],
-    read_model: type[Any],
+    builder: DependencyBuilder,
+    path: str,
     config: FileStoreConfig,
 ) -> None:
-    async def handler(id, request: Request, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008, A002
-        record = await service.read(id)
-        if getattr(record, "status", None) != READY:
-            raise ConflictError("File is not ready for download")
-        key = _key_of(record)
-        url = store.presign_get(key, expires_in_seconds=config.download_url_ttl_seconds)
+    """``GET {path}/{id}/download`` -- the JSON capability, unchanged from #117."""
+    service_dep = _service_dependency(exposed, builder)
+    auth_dep = builder.get_principal_dependency()
+    route_deps = [Depends(auth_dep)] if auth_dep is not None else None
+
+    async def handler(id: str, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+        await service.read(id)
+        url = store.presign_get(id, expires_in_seconds=config.download_url_ttl_seconds)
         return _url_response(url)
 
-    handler.__annotations__ = {"id": id_type, "request": Request, "service": Service}
-    _route(
-        router,
+    router.add_api_route(
         f"{path}/{{id}}/download",
-        ["GET"],
         handler,
+        methods=["GET"],
+        dependencies=route_deps,
+        response_model=None,
         summary="Mint a download URL",
-        description="Mint a short-lived capability URL for a ready file's bytes.",
+        description="Mint a short-lived capability URL for this file's bytes.",
+    )
+
+
+def _add_content_route(
+    router: APIRouter,
+    exposed: Resource[Any, Any],
+    store: FileStore,
+    builder: DependencyBuilder,
+    path: str,
+    config: FileStoreConfig,
+) -> None:
+    """``GET {path}/{id}/content`` -- the bytes.
+
+    A ``307`` redirect to a fresh presigned ``GET`` for S3 (the only sane
+    option for a non-browser client -- a native presigned URL is the thing
+    that tells it when the capability expires); streamed directly for Local /
+    SQL, where a redirect to ``/_files/{key}`` would buy nothing since the
+    request never leaves this process anyway.
+    """
+    service_dep = _service_dependency(exposed, builder)
+    auth_dep = builder.get_principal_dependency()
+    route_deps = [Depends(auth_dep)] if auth_dep is not None else None
+    streams_directly = isinstance(store, SignedFileStore)
+
+    async def handler(id: str, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+        found = await service.read(id)
+        if streams_directly:
+            data = await store.get(id)
+            if data is None:
+                raise NotFoundError(id)
+            media_type = getattr(found, "content_type", None) or "application/octet-stream"
+            headers = {}
+            etag = getattr(found, "etag", None)
+            if etag:
+                headers["ETag"] = etag
+            return Response(content=data, media_type=media_type, headers=headers)
+        url = store.presign_get(id, expires_in_seconds=config.download_url_ttl_seconds)
+        return RedirectResponse(url=url.url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    router.add_api_route(
+        f"{path}/{{id}}/content",
+        handler,
+        methods=["GET"],
+        dependencies=route_deps,
+        response_model=None,
+        summary="Fetch this file's bytes",
+        description=(
+            "Redirects to a presigned URL (S3) or streams the bytes directly (Local / SQL). "
+            "A plain `<a href>` / `<img src>` cannot carry an `Authorization` header, so this "
+            "route is only ergonomic unauthenticated or behind a cookie authenticator."
+        ),
     )
 
 
@@ -211,17 +269,24 @@ def _add_signed_transfer_routes(router: APIRouter, store: FileStore) -> None:
         return
 
     async def put_handler(key: str, request: Request) -> Response:
-        signed = _authorize(store, request, key, PUT_OPERATION)
+        capability = _verify(store, request, key, PUT_OPERATION)
         data = await request.body()
-        stored = await signed.put(key, data, content_type=request.headers.get("content-type"))
+        stored = await store.put(
+            key,
+            data,
+            content_type=capability.content_type,
+            name=capability.name,
+            checksum=capability.checksum,
+            declared_size=capability.size,
+        )
         return JSONResponse(content=stored.model_dump(mode="json"))
 
     async def get_handler(key: str, request: Request) -> Response:
-        signed = _authorize(store, request, key, GET_OPERATION)
-        data = await signed.get(key)
+        _verify(store, request, key, GET_OPERATION)
+        data = await store.get(key)
         if data is None:
             raise NotFoundError(key)
-        reported = await signed.head(key)
+        reported = await store.head(key)
         headers: dict[str, str] = {}
         media_type = "application/octet-stream"
         if reported is not None:
@@ -231,80 +296,47 @@ def _add_signed_transfer_routes(router: APIRouter, store: FileStore) -> None:
                 headers["ETag"] = reported.etag
         return Response(content=data, media_type=media_type, headers=headers)
 
-    _route(
-        router,
-        DEFAULT_SIGNED_URL_PATH,
-        ["PUT"],
-        put_handler,
-        summary="Signed object upload",
-        include_in_schema=False,
-    )
-    _route(
-        router,
-        DEFAULT_SIGNED_URL_PATH,
-        ["GET"],
-        get_handler,
-        summary="Signed object download",
-        include_in_schema=False,
+    if not _existing_route(router, DEFAULT_SIGNED_URL_PATH, "PUT"):
+        router.add_api_route(
+            DEFAULT_SIGNED_URL_PATH,
+            put_handler,
+            methods=["PUT"],
+            response_model=None,
+            summary="Signed object upload",
+            include_in_schema=False,
+        )
+    if not _existing_route(router, DEFAULT_SIGNED_URL_PATH, "GET"):
+        router.add_api_route(
+            DEFAULT_SIGNED_URL_PATH,
+            get_handler,
+            methods=["GET"],
+            response_model=None,
+            summary="Signed object download",
+            include_in_schema=False,
+        )
+
+
+def _existing_route(router: APIRouter, path: str, method: str) -> bool:
+    return any(
+        getattr(r, "path", None) == path and method in (getattr(r, "methods", None) or ())
+        for r in router.routes
     )
 
 
-def _authorize(
-    store: SignedFileStore, request: Request, key: str, operation: str
-) -> SignedFileStore:
+def _verify(store: SignedFileStore, request: Request, key: str, operation: str) -> Any:
     """Verify the capability token and that it is bound to the route's key."""
     token = request.query_params.get("token")
     if not token:
         raise InvalidInputError("Missing signed-URL token")
-    authorized = store.verify(token, expected_operation=operation)
-    if authorized != key:
+    capability = store.verify(token, expected_operation=operation)
+    if capability.key != key:
         raise InvalidInputError("Signed URL is for a different object")
-    return store
+    return capability
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _service_dependency(resource: Resource[Any, Any], builder: DependencyBuilder) -> Any:
-    dependency = builder.get_service_dependency(resource)
-    if not callable(dependency):
-        raise TypeError(
-            f"{type(builder).__name__}.get_service_dependency() returned a non-callable "
-            f"{dependency!r}; a builder must return a FastAPI dependency."
-        )
-    return dependency
-
-
-def _route(
-    router: APIRouter,
-    path: str,
-    methods: list[str],
-    handler: Callable[..., Any],
-    *,
-    summary: str,
-    description: str | None = None,
-    include_in_schema: bool = True,
-) -> None:
-    """Add a route unless one already exists at that path + method (escape hatch)."""
-    existing = {
-        (getattr(route, "path", None), m)
-        for route in router.routes
-        for m in getattr(route, "methods", set())
-    }
-    for method in methods:
-        if (path, method) in existing:
-            continue
-        router.add_api_route(
-            path,
-            handler,
-            methods=[method],
-            summary=summary,
-            description=description,
-            include_in_schema=include_in_schema,
-            status_code=status.HTTP_200_OK,
-        )
 
 
 def _url_response(url: Any) -> JSONResponse:
@@ -316,38 +348,3 @@ def _url_response(url: Any) -> JSONResponse:
             "headers": url.headers,
         }
     )
-
-
-def _key_of(record: Any) -> str:
-    key = getattr(record, "key", None)
-    if not isinstance(key, str) or not key:
-        raise InvalidInputError("File has no storage key")
-    return key
-
-
-def _verify_upload(record: Any, stored: Any) -> None:
-    """Verify the uploaded object against the metadata before flipping to ready.
-
-    The object must exist (checked by the caller via ``head``); its size must
-    match the row's declared size, and when both the row and the medium record a
-    content type they must agree.
-    """
-    declared_size = getattr(record, "size", None)
-    if declared_size is not None and stored.size != declared_size:
-        raise ConflictError(f"Uploaded object is {stored.size} bytes, expected {declared_size}")
-    declared_type = getattr(record, "content_type", None)
-    if (
-        declared_type is not None
-        and stored.content_type is not None
-        and stored.content_type != declared_type
-    ):
-        raise ConflictError(
-            f"Uploaded object has content type {stored.content_type!r}, expected {declared_type!r}"
-        )
-
-
-def _id_type(resource: Resource[Any, Any]) -> Any:
-    annotation = (
-        resource.get_rest_models().read_response.model_fields[resource.get_id_field()].annotation
-    )
-    return annotation if isinstance(annotation, type) else str

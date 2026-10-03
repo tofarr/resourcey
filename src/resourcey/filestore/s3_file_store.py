@@ -1,16 +1,30 @@
-"""``S3FileStore`` -- file bytes in an S3 bucket with native pre-signed URLs (issue #117).
+"""``S3FileStore`` -- file bytes in an S3 bucket with native pre-signed URLs (issue #117, #158).
 
-The production medium. Put / get / head / delete use the S3 client (the
-server-side fallback), while ``presign_put`` / ``presign_get`` are a purely
+The production medium. Put / get / head / delete / list use the S3 client (the
+server-side fallback), while ``presign_upload`` / ``presign_get`` are a purely
 local SigV4 computation -- no network round trip and no blocking of the event
 loop -- so the client transfers directly against S3 and the API only mints the
 capability.
+
+``presign_upload`` mints a **presigned ``POST``** (not a ``PUT``), with policy
+conditions enforcing the exact key, the declared ``content-length-range``, and
+the content type -- so S3 itself enforces the upload matches the client's
+declaration atomically, the same guarantee :func:`~resourcey.filestore.file_store.verify_upload`
+gives the local / SQL media. ``name`` / ``checksum`` ride along as extra
+presigned-POST form fields, stored as S3 object **user metadata**
+(``x-amz-meta-*``) -- readable only via ``HeadObject`` (i.e. only through
+``head``), never through ``ListObjectsV2`` (``list_objects``), which is why
+``list_objects`` below reports ``name`` / ``content_type`` / ``checksum`` as
+``None``: it is the cheapest common contract across the three media, made
+explicit rather than letting this medium be incidentally richer than it can
+actually list.
 
 ``boto3`` (and the ``s3`` extra, ``resourcey[s3]``) is imported **lazily**,
 only when a real client is built, so ``filestore`` imports cleanly without
 it. An explicit ``client=`` is the escape hatch: tests and callers may inject a
 stub exposing ``put_object`` / ``get_object`` / ``head_object`` /
-``delete_object`` / ``generate_presigned_url``.
+``delete_object`` / ``list_objects_v2`` / ``generate_presigned_url`` /
+``generate_presigned_post``.
 
 This module imports no code outside the framework.
 """
@@ -25,7 +39,7 @@ from pydantic import PrivateAttr
 
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.encryption.encryption_service import utc_now
-from resourcey.filestore.file_store import FileStore, PresignedUrl, StoredObject
+from resourcey.filestore.file_store import FileStore, PresignedUrl, StoredObject, UploadCapability
 
 # The action names boto3 generates pre-signed URLs for.
 _PUT_ACTION = "put_object"
@@ -33,6 +47,10 @@ _GET_ACTION = "get_object"
 
 # S3's single-``PUT`` object cap; multipart uploads are out of scope.
 S3_MAX_PUT_BYTES = 5 * 1024 * 1024 * 1024
+
+# The ``x-amz-meta-*`` keys ``name`` / ``checksum`` are carried under.
+_META_NAME = "name"
+_META_CHECKSUM = "checksum"
 
 
 class S3FileStore(FileStore):
@@ -67,7 +85,16 @@ class S3FileStore(FileStore):
 
     # -- medium operations ---------------------------------------------
 
-    async def put(self, key: str, data: bytes, *, content_type: str | None = None) -> StoredObject:
+    async def put(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str | None = None,
+        name: str | None = None,
+        checksum: str | None = None,
+        declared_size: int | None = None,
+    ) -> StoredObject:
         if len(data) > S3_MAX_PUT_BYTES:
             raise ResourceyConfigError(
                 f"{len(data)} bytes exceeds S3's single-PUT cap of {S3_MAX_PUT_BYTES} "
@@ -77,8 +104,11 @@ class S3FileStore(FileStore):
         kwargs: dict[str, Any] = {"Bucket": self.bucket, "Key": self._object_key(key), "Body": data}
         if content_type is not None:
             kwargs["ContentType"] = content_type
+        metadata = _metadata_fields(name, checksum)
+        if metadata:
+            kwargs["Metadata"] = metadata
         await asyncio.to_thread(client.put_object, **kwargs)
-        return await self._stored_after_write(key, len(data), content_type)
+        return await self._stored_after_write(key, len(data), name, content_type, checksum)
 
     async def get(self, key: str) -> bytes | None:
         client = self._get_client()
@@ -99,10 +129,13 @@ class S3FileStore(FileStore):
             )
         except client.exceptions.ClientError:
             return None
+        metadata = response.get("Metadata") or {}
         return StoredObject(
             key=key,
             size=response.get("ContentLength", 0),
+            name=metadata.get(_META_NAME),
             content_type=response.get("ContentType"),
+            checksum=metadata.get(_META_CHECKSUM),
             etag=response.get("ETag"),
             updated_at=response.get("LastModified"),
         )
@@ -111,24 +144,97 @@ class S3FileStore(FileStore):
         client = self._get_client()
         await asyncio.to_thread(client.delete_object, Bucket=self.bucket, Key=self._object_key(key))
 
+    async def list_objects(self, *, after: str | None = None, limit: int) -> list[StoredObject]:
+        """List via ``ListObjectsV2``, ascending by key (S3's native order).
+
+        ``name`` / ``content_type`` / ``checksum`` are reported as ``None``:
+        ``ListObjectsV2`` genuinely cannot return per-object user metadata (only
+        ``HeadObject`` can, at one call per key), so a list result here matches
+        every other medium's *cheapest common contract* rather than this one
+        being incidentally richer.
+        """
+        client = self._get_client()
+        kwargs: dict[str, Any] = {"Bucket": self.bucket, "MaxKeys": limit}
+        if self.prefix:
+            kwargs["Prefix"] = f"{self.prefix.strip('/')}/"
+        if after is not None:
+            kwargs["StartAfter"] = self._object_key(after)
+        response = await asyncio.to_thread(client.list_objects_v2, **kwargs)
+        results = []
+        for obj in response.get("Contents", []):
+            object_key = obj["Key"]
+            key = object_key[len(kwargs.get("Prefix", "")) :] if self.prefix else object_key
+            results.append(
+                StoredObject(
+                    key=key,
+                    size=obj.get("Size", 0),
+                    etag=obj.get("ETag"),
+                    updated_at=obj.get("LastModified"),
+                )
+            )
+        return results
+
+    async def count_objects(self) -> int:
+        client = self._get_client()
+        kwargs: dict[str, Any] = {"Bucket": self.bucket}
+        if self.prefix:
+            kwargs["Prefix"] = f"{self.prefix.strip('/')}/"
+        total = 0
+        continuation: str | None = None
+        while True:
+            if continuation is not None:
+                kwargs["ContinuationToken"] = continuation
+            response = await asyncio.to_thread(client.list_objects_v2, **kwargs)
+            total += int(response.get("KeyCount", len(response.get("Contents", []))))
+            if not response.get("IsTruncated"):
+                return total
+            continuation = response.get("NextContinuationToken")
+
     # -- native pre-signed capabilities --------------------------------
 
-    def presign_put(
-        self, key: str, *, content_type: str | None, expires_in_seconds: int
-    ) -> PresignedUrl:
-        params: dict[str, Any] = {"Bucket": self.bucket, "Key": self._object_key(key)}
-        headers: dict[str, str] = {}
+    def presign_upload(
+        self,
+        key: str,
+        *,
+        name: str | None,
+        content_type: str | None,
+        size: int | None,
+        checksum: str | None,
+        expires_in_seconds: int,
+    ) -> UploadCapability:
+        """Mint a presigned ``POST`` whose policy conditions pin the upload.
+
+        The exact key, a ``content-length-range`` from the declared ``size``
+        (falling back to ``S3_MAX_PUT_BYTES``), and the content type are all
+        policy conditions, so S3 itself rejects an upload that does not match
+        -- the client cannot widen its own declaration.
+        """
+        client = self._get_client()
+        object_key = self._object_key(key)
+        fields: dict[str, str] = {}
+        conditions: list[Any] = [{"key": object_key}]
         if content_type is not None:
-            # The content type is baked into the signature, so the client must
-            # echo it on the transfer.
-            params["ContentType"] = content_type
-            headers["Content-Type"] = content_type
-        url = self._presign(_PUT_ACTION, params, expires_in_seconds)
-        return PresignedUrl(
-            url=url,
-            method="PUT",
+            fields["Content-Type"] = content_type
+            conditions.append({"Content-Type": content_type})
+        metadata = _metadata_fields(name, checksum)
+        for meta_key, meta_value in metadata.items():
+            field_name = f"x-amz-meta-{meta_key}"
+            fields[field_name] = meta_value
+            conditions.append({field_name: meta_value})
+        max_bytes = size if size is not None else S3_MAX_PUT_BYTES
+        conditions.append(["content-length-range", 0, max_bytes])
+        presigned = client.generate_presigned_post(
+            Bucket=self.bucket,
+            Key=object_key,
+            Fields=fields,
+            Conditions=conditions,
+            ExpiresIn=expires_in_seconds,
+        )
+        return UploadCapability(
+            url=presigned["url"],
+            method="POST",
+            fields=dict(presigned["fields"]),
             expires_at=utc_now() + timedelta(seconds=expires_in_seconds),
-            headers=headers,
         )
 
     def presign_get(self, key: str, *, expires_in_seconds: int) -> PresignedUrl:
@@ -151,13 +257,25 @@ class S3FileStore(FileStore):
         return url
 
     async def _stored_after_write(
-        self, key: str, size: int, content_type: str | None
+        self,
+        key: str,
+        size: int,
+        name: str | None,
+        content_type: str | None,
+        checksum: str | None,
     ) -> StoredObject:
         """Describe the object just written, preferring S3's own head metadata."""
         reported = await self.head(key)
         if reported is not None:
             return reported
-        return StoredObject(key=key, size=size, content_type=content_type, updated_at=utc_now())
+        return StoredObject(
+            key=key,
+            size=size,
+            name=name,
+            content_type=content_type,
+            checksum=checksum,
+            updated_at=utc_now(),
+        )
 
     def _object_key(self, key: str) -> str:
         """The S3 object key: the store's ``prefix`` mounted over the opaque key."""
@@ -175,6 +293,16 @@ class S3FileStore(FileStore):
     def client(self) -> Any:
         """The underlying S3 client (the escape hatch), or ``None`` until built."""
         return self._client
+
+
+def _metadata_fields(name: str | None, checksum: str | None) -> dict[str, str]:
+    """The ``x-amz-meta-*`` fields for ``name`` / ``checksum`` (only the set ones)."""
+    fields: dict[str, str] = {}
+    if name is not None:
+        fields[_META_NAME] = name
+    if checksum is not None:
+        fields[_META_CHECKSUM] = checksum
+    return fields
 
 
 def _build_client(store: S3FileStore) -> Any:

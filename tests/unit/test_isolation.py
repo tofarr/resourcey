@@ -254,7 +254,7 @@ def test_the_filestore_files_exist_without_an_init():
     names = {p.name for p in sorted(filestore.glob("*.py"))}
     assert names == {
         "file_config.py",
-        "file_metadata.py",
+        "file_resource.py",
         "file_routes.py",
         "file_store.py",
         "local_file_store.py",
