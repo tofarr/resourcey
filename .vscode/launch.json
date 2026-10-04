@@ -111,6 +111,18 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "preLaunchTask": "examples: migrate 08_webhooks"
+        },
+        {
+            "name": "Debug 09 — Realtime (SQLite)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["realtime_example.app:app", "--env-file", ".env", "--port", "8089"],
+            "cwd": "${workspaceFolder}/examples/09_realtime",
+            "python": "${workspaceFolder}/examples/09_realtime/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 09_realtime"
         }
     ],
     "compounds": [
@@ -124,7 +136,8 @@
                 "Debug 05 — Full RBAC (SQLite)",
                 "Debug 06 — File Store (local medium, SQLite)",
                 "Debug 07 — OAuth (SQLite)",
-                "Debug 08 — Webhooks (SQLite)"
+                "Debug 08 — Webhooks (SQLite)",
+                "Debug 09 — Realtime (SQLite)"
             ],
             "stopAll": true
         }
