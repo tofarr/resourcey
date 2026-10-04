@@ -31,7 +31,7 @@ until the first release.
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
   `04_simple_roles`, `05_full_rbac`, `06_filestore`, `07_oauth`,
-  `08_webhooks` — standalone
+  `08_webhooks`, `09_realtime` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **reference app** (issue
@@ -130,11 +130,38 @@ until the first release.
   at it — a genuine delivery, not a simulation, proving fire-once-per-write /
   success-only / per-trigger-isolated / background-by-default end to end with
   no second server and no mocking.
+  `09_realtime` is the **realtime-channel app** (issue #17, built on
+  `resourcey.realtime` and the `resourcey.triggers.redis_trigger.RedisTrigger`
+  from the same `resourcey.triggers` rung as 08): the same `Thread` /
+  `Message` board, with **both** resources wrapped in
+  `TriggeredResource(..., on_edit=[RedisTrigger(channel=channel)])` — wired
+  identically (unlike 08's deliberate direct/config-driven split), because the
+  realtime channel has a real constraint the webhook trigger does not: the
+  *same* `Channel` instance must reach every publishing trigger and
+  `add_realtime` itself, or (for the default `InMemoryChannel`) they fan out
+  into separate, mutually invisible processes-of-one. `realtime_example/app.py`
+  builds that one channel from `RealtimeConfig.get_instance().channel` (a
+  `CHANNEL_CLASS`-selected `LazyField`, mirroring `FileStoreConfig`'s
+  `MEDIUM_CLASS` — unset selects `InMemoryChannel`, no new dependency; set to
+  `resourcey.realtime.realtime_redis_channel.RedisChannel` to bridge real
+  processes over Redis pub/sub) and threads it through every trigger, through
+  `add_realtime(app, manifest, channel=...)` (the WebSocket subscription
+  socket, `/ws`), and through `Manifest(managers=[channel])` so a
+  `RedisChannel`'s real client shares the app's lifecycle.
+  `add_asyncapi(app, manifest)` mounts the channel's generated AsyncAPI 2.6.0
+  document (`/asyncapi.json`) and an HTML viewer (`/asyncapi`) — the realtime
+  equivalent of `/docs`. It runs with the default, no-authentication
+  `OpenDependencyBuilder` (zero setup), but documents — in its own README, not
+  in code it ships — that `add_realtime`'s `dependency_builder=` is the
+  *same* seam `create_app` takes, so composing with `03_api_key_auth` /
+  `04_simple_roles` / `05_full_rbac`'s builders re-filters every event per
+  subscriber through the identical `Policy.to_search_filter` reduction REST
+  already uses, with no realtime-specific authorization code.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
   8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06), 8087 (07),
-  8088 (08).
+  8088 (08), 8089 (09).
 
 ## Core design principles
 
@@ -1448,13 +1475,151 @@ changes whether any other configured trigger ran (per-trigger isolation);
 (`Pending` -> `Cancelled`, idempotent), never leaving one `Pending`.
 `examples/08_webhooks` is the runnable app (issue #18).
 
+### `realtime` — the WebSocket subscription channel (issue #17)
+
+`src/resourcey/realtime/` is a backend-agnostic rung over `core`'s `Resource`
+(the `view` / `filestore` / `tasks` / `triggers` layer rank), giving a
+deployment a push channel alongside REST: a subscriber opens one WebSocket,
+names the resources (and optional filters) it wants, and receives a typed
+event every time a matching row is created, updated, or deleted — live,
+instead of polling `search`. Publishing itself is **not** a new mechanism; it
+rides `resourcey.triggers` (`RedisTrigger`, in that package, not this one —
+see below), so a resource gains realtime for free by attaching a trigger, the
+same way it gains a webhook. Six modules, all importing only lower framework
+layers (and `redis` lazily):
+
+* `realtime_event.py` — **`ResourceEvent`** (`resource`, `kind`, `id`,
+  `timestamp`, `item`) and **`EventKind`** (`CREATED` / `UPDATED` / `DELETED`,
+  mirroring the singular `Action` members). It is write-only — a `read` emits
+  nothing, because the publishing `Trigger` is itself only ever invoked after
+  a successful write — and `item` is the resource's **read-model projection**,
+  never the raw DTO, so a field a `ResourceView` hides from REST cannot leak
+  onto the event stream either. A frozen Pydantic model, since it is
+  serialized to JSON for both the Redis bridge and the WebSocket wire.
+* `realtime_channel.py` — **`Channel`** (a `DiscriminatedUnionMixin`, `kind` =
+  class name, selected with no code change like every other pluggable seam)
+  is the publish/fan-out seam: `publish(event)` and `subscribe() ->
+  AsyncIterator[ResourceEvent]`, both async so a channel may own a network
+  client, and the channel is its own async context manager (entered through
+  `Manifest(managers=[channel])`) so that client's lifetime ties to the app.
+  **`InMemoryChannel`** is the single-process default — each `subscribe()`
+  call hands back a fresh, bounded `asyncio.Queue` (`DEFAULT_QUEUE_MAXSIZE`,
+  drop-**oldest** on overflow, so one slow subscriber cannot grow an unbounded
+  server-side buffer; the dropped event is exactly what a client reconciles
+  with a REST `search` anyway). Delivery is **at-most-once, unordered, no
+  replay** by design — pub/sub drops an event for a subscriber that is down or
+  briefly disconnected, and the reconnect reconcile is the ordinary REST
+  `search` (a cursor / `updated_at__gt=`), which the framework already serves;
+  the push channel is a latency optimisation, never the source of truth.
+* `realtime_redis_channel.py` — **`RedisChannel`**, the clustered rung over
+  `redis.asyncio` pub/sub: every app instance publishes to one Redis channel
+  name (`DEFAULT_REDIS_CHANNEL`, one name is enough since the event itself
+  carries its resource and each instance filters locally) and every instance
+  re-delivers to *its own* local subscribers — the correct fan-out behind a
+  load balancer, where a subscriber is usually on a different process from the
+  one that handled the write. **Policy filtering is local and never
+  serialized** — a published event carries no principal and no filter; each
+  instance re-applies its own subscribers' policies before send, so one
+  process never trusts another's filtering. `redis` is imported **lazily**
+  (`_require_redis()`, behind the `resourcey[redis]` extra), exactly as
+  `filestore` imports `boto3`, so `realtime` imports without the driver and a
+  missing one fails with an actionable `ImportError`; an injected `client=` is
+  the escape hatch (held in a `PrivateAttr`, mirroring `S3FileStore`) and is
+  never closed on exit — only a self-built client is.
+* `realtime_routes.py` — **`add_realtime(app_or_router, manifest, *,
+  channel, dependency_builder=None, config=None, path="/ws")`**, mounted
+  **after** `create_app` (the `06_filestore` / `08_webhooks` pattern) since a
+  subscription socket is genuinely not one of the eight standard actions. The
+  socket is an **authorization boundary, not a dumb pipe**, and reuses
+  REST's own seams rather than inventing parallel ones: the handshake is
+  authenticated with the *same* `Authenticator` the passed `dependency_builder`
+  carries (default `OpenDependencyBuilder` — authenticates nobody); a
+  `subscribe` message names a resource and is validated against its
+  **exposed actions** (a client cannot subscribe to a resource it cannot
+  `read` over REST) with an optional filter parsed through the identical
+  `<field>__<op>` vocabulary REST search uses (`_build_subscription_filter`,
+  reusing `http/routes.py`'s `_filter_surface`); and the subscriber's
+  `PolicyResolver` policies are resolved **once at subscribe time**
+  (`_read_filter`, the OR-combination of every policy's `READ` reduction, a
+  `NoMatchFilter` when empty — fail-closed, mirroring `AuthorizedService`'s
+  union model) and **every candidate event is re-filtered per subscriber**
+  before send (`_deliverable`) — an out-of-scope row is never delivered. A
+  `deleted` event carries no row, so it is delivered only when the
+  subscriber's policy *and* its own filter are both unscoped (`AllFilter`) —
+  a row-scoped subscriber cannot be verified against a row that no longer
+  exists, so it is fail-closed there too and reconciles with a REST `search`
+  instead. The in-band protocol (client → server: `subscribe` / `unsubscribe`
+  / `ping`; server → client: `ack` / `error` / `event` / `ping`) keeps the
+  filter tree off the URL and lets the protocol grow; `RealtimeHub` is the
+  per-app state (the resource set, the channel, the auth seam), and
+  `RealtimeRejectionError` is a handshake/subscription the server refuses.
+  Each connection runs two tasks — `_deliver` (forwarding matching channel
+  events) and `_heartbeat` (a keepalive `ping` every `heartbeat_seconds`, so
+  an idle connection is not reaped by an intermediary) — both cancelled on
+  disconnect.
+* `realtime_config.py` — **`RealtimeConfig`** (a `BaseConfig`): `channel` is a
+  `CHANNEL_CLASS`-selected `LazyField` (the exact mechanism
+  `FileStoreConfig` uses for its medium — unprefixed, unset selects
+  `InMemoryChannel`, no new dependency; the selected channel's own fields then
+  parse under the `CHANNEL_` prefix, e.g. `CHANNEL_URL` for a `RedisChannel`),
+  plus `heartbeat_seconds` (`DEFAULT_HEARTBEAT_SECONDS = 30`).
+* `realtime_asyncapi.py` — **`add_asyncapi(app_or_router, manifest, ...)`**
+  documents the WebSocket the same generative way OpenAPI documents REST,
+  since nothing else describes an in-band message protocol:
+  `generate_asyncapi_document` builds a spec-compliant **AsyncAPI 2.6.0**
+  document (once, at registration time, from the manifest — a read model does
+  not change per request) naming the six static protocol messages plus one
+  `<resource>Event` message per **subscribable** resource (the same
+  `Action.READ`-in-exposed-actions gate `RealtimeHub.subscribe` enforces, so
+  the document never promises a subscription the hub would reject), whose
+  `item` schema is the resource's own read model — the same model REST
+  already uses, and the same projection `RedisTrigger` publishes under.
+  `add_asyncapi` mounts it at `GET /asyncapi.json` plus a second `GET
+  /asyncapi` serving `get_asyncapi_html()` — a small static page loading the
+  AsyncAPI React Component's CDN bundle, the same "CDN script + link to the
+  JSON this app already serves" shape `fastapi.openapi.docs.get_swagger_ui_html`
+  uses for Swagger UI, so there is no bundler step. Both routes are
+  `include_in_schema=False`.
+
+The publisher is `resourcey.triggers.redis_trigger.RedisTrigger` (despite the
+name, its `channel=` defaults to `InMemoryChannel` — "Redis" names the
+production case the trigger exists for, not a hard requirement): attached via
+`TriggeredResource(..., on_edit=[RedisTrigger(channel=channel)])` exactly like
+a `WebhookTrigger`, it publishes one `ResourceEvent` per `(edit, result)` pair
+after a successful write (a `batch_edit` of five publishes five discrete
+events, matching what a subscriber filters and delivers one row at a time).
+The **same channel instance** must reach every publishing trigger and
+`add_realtime`, entered via `Manifest(managers=[channel])`, so a write in one
+process reaches that process's (or, over `RedisChannel`, every process's)
+subscribers. `examples/09_realtime` is the runnable app (issue #17): the same
+`Thread` / `Message` board, both resources wired identically (unlike 08's
+deliberate direct/config-driven split — the shared-channel-instance constraint
+above makes splitting them pointless here), `CHANNEL_CLASS` switching between
+`InMemoryChannel` and `RedisChannel` with no code change, and `add_asyncapi`
+mounted alongside `add_realtime`.
+
+`specs/realtime.qnt` pins the one genuinely new state machine here — the
+per-connection subscription/delivery policy `realtime_routes.py` adds (the
+`RedisTrigger` publish side is already governed by `specs/triggers.qnt`'s
+execution policy and is not restated): the `Action.READ`-in-exposed-actions
+subscription gate; the posture-gated handshake outcome (an invalid credential
+rejected under every posture, an absent one rejected only under `Required`);
+and, central to `_deliverable`, that a subscription's own filter can only
+*narrow* what the resolved policy already allows (AND, never OR, so it can
+never grant visibility beyond the caller's own scope), that a `deleted` event
+is delivered only to a subscriber whose combined scope is fully unscoped (a
+row-scoped policy or subscription filter cannot be verified against a row
+that no longer exists, so it fails closed rather than guessing), and that a
+`NoMatchF` (fail-closed / no policy) subscriber receives nothing for any
+event kind. It is part of `make specs` and CI.
+
 ### Framework isolation
 
 `core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `tasks`,
-`triggers`, `encryption`, `util`, `config`, `cache`, and `http` are the
-framework, and the earlier packages/modules have been removed. A test pins the
-**layer ranks**
-`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, triggers}`:
+`triggers`, `realtime`, `encryption`, `util`, `config`, `cache`, and `http` are
+the framework, and the earlier packages/modules have been removed. A test pins
+the **layer ranks**
+`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, triggers, realtime}`:
 no module imports a strictly-higher project layer at runtime (a static AST walk
 covering every layer in one rule), `if TYPE_CHECKING:` imports still allowed.
 `sql`, `mongo`, and `list` implement whatever small helpers they need locally
@@ -1472,7 +1637,7 @@ keyset cursor codec, extracted from `sql` by issue #116) and the shared
 `util` imports **no project package** at all (not even `core`),
 so the layer ranks are a clean
 
-    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, triggers}
+    util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, triggers, realtime}
 
 and `core` may import `util` — the dependency runs one way.
 

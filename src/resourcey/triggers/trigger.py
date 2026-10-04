@@ -51,10 +51,13 @@ layers (``core`` / ``util``).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 
 from resourcey.core.service import Create, Delete, Update
 from resourcey.util.models import DiscriminatedUnionMixin
+
+if TYPE_CHECKING:
+    from resourcey.core.resource import Resource
 
 T = TypeVar("T")
 K = TypeVar("K")
@@ -96,3 +99,27 @@ class Trigger(DiscriminatedUnionMixin, ABC, Generic[T, K]):
         isolates each trigger's invocation in its own catch and logs it, so
         one trigger raising never stops the rest from running.
         """
+
+
+@runtime_checkable
+class ResourceBoundTrigger(Protocol):
+    """Optional protocol: a trigger that wants the resource it is attached to.
+
+    The base :class:`Trigger` contract does not require this -- a generic
+    trigger (e.g. :class:`~resourcey.triggers.webhook_trigger.WebhookTrigger`)
+    needs no resource context. :class:`~resourcey.triggers.redis_trigger.RedisTrigger`
+    is the first consumer: it needs the resource's path and read-model type to
+    tag and project a row before publishing, so a field a
+    :class:`~resourcey.view.resource_view.ResourceView` hides from the REST
+    read surface does not leak onto the realtime channel either.
+
+    :class:`~resourcey.triggers.triggered_resource.TriggeredResource` and
+    :class:`~resourcey.triggers.triggered_dependency_builder.TriggeredDependencyBuilder`
+    call :meth:`bind_resource` once -- at construction / registration time, not
+    per request -- for any configured trigger that implements it (checked with
+    ``isinstance(trigger, ResourceBoundTrigger)``, which ``@runtime_checkable``
+    makes a plain method-presence test).
+    """
+
+    def bind_resource(self, resource: Resource[Any, Any]) -> None:
+        """Receive the resource this trigger is attached to."""

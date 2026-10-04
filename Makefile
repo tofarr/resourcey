@@ -52,6 +52,8 @@ specs:
 	quint test specs/background_tasks.qnt --main=background_tasks --match "^(matchesIsFieldConjunction|domDowOrRule|matchIsUnrestrictedWhenNeitherDayFieldIsSet|scheduleNoneNeverTicks|onlyEnabledTasksTick|selectionIsPerTask|aRaisingTaskDoesNotStopTheLoop|invariantsHold)$$"
 	quint typecheck specs/triggers.qnt
 	quint test specs/triggers.qnt --main=triggers --match "^(editsOnlyFire|successOnly|alignmentTest|perOperationNotPerItemTest|perTriggerIsolationTest|backgroundNeverBlocksTest|exitSettlesEveryRunTest|invariantsHold)$$"
+	quint typecheck specs/realtime.qnt
+	quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$$"
 
 clean:
 	rm -rf .mypy_cache .ruff_cache .pytest_cache .coverage htmlcov coverage.xml

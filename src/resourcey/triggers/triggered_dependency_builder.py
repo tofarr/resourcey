@@ -57,7 +57,7 @@ from pydantic import Field, PrivateAttr, SkipValidation, field_validator
 from resourcey.core.resource import Resource
 from resourcey.core.service import Service
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
-from resourcey.triggers.trigger import Trigger
+from resourcey.triggers.trigger import ResourceBoundTrigger, Trigger
 from resourcey.triggers.trigger_config import TriggerConfig
 from resourcey.triggers.trigger_runner import TriggerRunner
 from resourcey.triggers.triggered_resource import TriggeredResource
@@ -148,6 +148,14 @@ class TriggeredDependencyBuilder(DependencyBuilder):
         triggers = self.resource_triggers.get(resource.get_resource_path())
         if not triggers:
             return inner_dependency
+
+        # Mirrors TriggeredResource's constructor hook (see trigger.py's
+        # ResourceBoundTrigger docstring): this builder is the config-driven
+        # path's equivalent construction point, called once per resource at
+        # registration -- not per request.
+        for trigger in triggers:
+            if isinstance(trigger, ResourceBoundTrigger):
+                trigger.bind_resource(resource)
 
         background = self.background
         # Created once, here (get_service_dependency runs once per resource,
