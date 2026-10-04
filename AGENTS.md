@@ -1725,12 +1725,14 @@ all classes share one flat namespace, `BaseConfig.__init_subclass__` rejects —
 with a `TypeError` at class creation — a field name declared by two classes
 with **different** types, while a same-name/same-type redeclaration is allowed;
 `ClassVar` entries (`LazyField`) are not fields.
-`ResourceyConfigError` (with `ResourceyError`) lives in `core/errors.py` and
-covers build/parse failures only; `ServiceError` / `NotFoundError` stay in
-`core/service.py`. `InvalidInputError` / `UnsupportedFilterError` /
-`ConflictError` also live there — the storage-neutral errors a backend raises and
-the transport maps (`ConflictError` is what a backend's duplicate-key failure
-becomes, so the 409 mapping needs no driver import).
+`ResourceyError` is the framework error base, living in `core/errors.py`;
+`ResourceyConfigError`, `InvalidInputError` / `UnsupportedFilterError` /
+`ConflictError` also live there — the storage-neutral errors a backend raises
+and the transport maps (`ConflictError` is what a backend's duplicate-key failure
+becomes, so the 409 mapping needs no driver import). The service-level errors
+(`ServiceError` / `NotFoundError` / `ForbiddenError` stay in `core/service.py`,
+each deriving from `ResourceyError`, so a single `except ResourceyError` catches
+every framework failure.
 
 The isolation test covers **all** of `resourcey/`'s layers: it asserts the layer
 ranks, the core file set is exactly `{dto, errors, manifest, resource,

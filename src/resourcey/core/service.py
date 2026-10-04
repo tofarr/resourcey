@@ -25,8 +25,9 @@ a request object. ``batch_edit`` takes a list of :class:`Edit` nodes so a single
 batch can create, update, *and* delete.
 
 This module is part of the ``core`` layer: besides the standard library it
-imports only ``util`` (the filter / sort / discriminated-union leaves) —
-``core`` imports no other project package.
+imports only ``util`` (the filter / sort / discriminated-union leaves) and
+its sibling ``core.errors`` (the framework error base) — ``core`` imports
+no other project package.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from abc import ABC
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 
+from resourcey.core.errors import ResourceyError
 from resourcey.util.models import DiscriminatedUnionMixin
 from resourcey.util.search_filter import SearchFilter
 from resourcey.util.sort_order import SortOrder
@@ -76,11 +78,11 @@ class Action(enum.StrEnum):
 STORAGE_KEY: Any = object()
 
 
-class ServiceError(Exception):
+class ServiceError(ResourceyError):
     """A service is misconfigured (e.g. used before it was entered)."""
 
 
-class NotFoundError(Exception):
+class NotFoundError(ResourceyError):
     """A requested entity does not exist (the transport layer maps it to 404)."""
 
     def __init__(self, id: Any) -> None:  # noqa: A002
@@ -88,7 +90,7 @@ class NotFoundError(Exception):
         self.id = id
 
 
-class ForbiddenError(Exception):
+class ForbiddenError(ResourceyError):
     """An attempted action is not permitted (the transport layer maps it to 403).
 
     Authorization raises this for an action with no permitted scope — a denied

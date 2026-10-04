@@ -9,11 +9,10 @@ import path in a *list* lazy field. The single-class lazy field
 surfaces the underlying ``ModuleNotFoundError`` / ``AttributeError`` directly
 rather than being mapped here.
 
-This module holds the framework-level classes only: ``ResourceyError`` (the
-base), ``ResourceyConfigError``, and the request-shape errors
-``InvalidInputError`` / ``UnsupportedFilterError``. The broader service-level
-error hierarchy (``ServiceError``, ``NotFoundError``, …) is tracked separately
-and stays with the code that raises it (see ``core/service.py``).
+The service-level classes (``ServiceError``, ``NotFoundError``,
+``ForbiddenError``) also derive from ``ResourceyError`` but stay with the code
+that raises them (see ``core/service.py``), so every framework error roots in
+the one base.
 
 This module is part of the ``core`` bottom layer: it imports no other
 ``resourcey`` module.
