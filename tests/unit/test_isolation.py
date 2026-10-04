@@ -3,7 +3,8 @@
 The framework lives directly under ``resourcey/`` (the old version prefix was folded
 away in #144). This test pins the **layer ranks** inside it:
 
-    util < core < {sql, mongo, list, http, config, cache, encryption, auth, view, tasks, triggers}
+    util < core < {sql, mongo, list, http, config, cache, encryption, auth,
+                   view, filestore, tasks, triggers, realtime}
 
 no module may import a strictly-higher project layer at runtime. This subsumes
 both "``util`` imports nothing project-level" (it is the bottom layer) and
@@ -46,6 +47,7 @@ _LAYER_RANK = {
     "filestore": 2,
     "tasks": 2,
     "triggers": 2,
+    "realtime": 2,
 }
 
 
@@ -293,6 +295,7 @@ def test_the_triggers_files_exist_without_an_init():
     triggers = FRAMEWORK_DIR / "triggers"
     names = {p.name for p in sorted(triggers.glob("*.py"))}
     assert names == {
+        "redis_trigger.py",
         "trigger.py",
         "trigger_config.py",
         "trigger_runner.py",
@@ -310,6 +313,30 @@ def test_triggers_never_imports_httpx_at_module_scope():
         str(p.relative_to(FRAMEWORK_DIR))
         for p in sorted((FRAMEWORK_DIR / "triggers").rglob("*.py"))
         if _module_scope_import(p, "httpx")
+    ]
+    assert offenders == []
+
+
+def test_the_realtime_files_exist_without_an_init():
+    realtime = FRAMEWORK_DIR / "realtime"
+    names = {p.name for p in sorted(realtime.glob("*.py"))}
+    assert names == {
+        "realtime_asyncapi.py",
+        "realtime_channel.py",
+        "realtime_config.py",
+        "realtime_event.py",
+        "realtime_redis_channel.py",
+        "realtime_routes.py",
+    }
+    assert not (realtime / "__init__.py").exists()
+
+
+def test_realtime_never_imports_redis_at_module_scope():
+    """``RedisChannel`` imports its optional driver lazily, behind the ``redis`` extra."""
+    offenders = [
+        str(p.relative_to(FRAMEWORK_DIR))
+        for p in sorted((FRAMEWORK_DIR / "realtime").rglob("*.py"))
+        if _module_scope_import(p, "redis")
     ]
     assert offenders == []
 

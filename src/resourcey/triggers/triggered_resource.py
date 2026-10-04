@@ -18,6 +18,16 @@ the wrapper is what must be registered so its (triggering) service is what the
 transport mounts — registering the inner instead would reach a service with no
 triggers attached.
 
+At construction, every configured trigger that implements the optional
+:class:`~resourcey.triggers.trigger.ResourceBoundTrigger` protocol has its
+:meth:`~resourcey.triggers.trigger.ResourceBoundTrigger.bind_resource` called
+with the **inner** resource (so a trigger that projects onto the read model --
+e.g. :class:`~resourcey.triggers.redis_trigger.RedisTrigger` -- sees exactly
+the ``ResourceView``-narrowed surface this ``TriggeredResource`` wraps, not a
+wider one). A plain :class:`~resourcey.triggers.trigger.Trigger` that does not
+implement the protocol (e.g.
+:class:`~resourcey.triggers.webhook_trigger.WebhookTrigger`) is unaffected.
+
 This module is part of ``resourcey.triggers``; it imports only lower framework
 layers (``core`` / ``util``).
 """
@@ -33,7 +43,7 @@ from resourcey.core.dto import RestModels
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action, CacheStrategy, Service, ServiceError
-from resourcey.triggers.trigger import Trigger
+from resourcey.triggers.trigger import ResourceBoundTrigger, Trigger
 from resourcey.triggers.trigger_runner import TriggerRunner
 from resourcey.triggers.triggered_service import TriggeredService
 from resourcey.util.search_filter import SearchFilter
@@ -93,6 +103,9 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
         self._inner = resource
         self._triggers = list(on_edit)
         self._background = background
+        for trigger in self._triggers:
+            if isinstance(trigger, ResourceBoundTrigger):
+                trigger.bind_resource(resource)
         # Shared across every per-request TriggeredService this resource
         # hands out via get_service(); only closed by this resource's own
         # __aexit__ (app shutdown), never by a per-request service's exit --
