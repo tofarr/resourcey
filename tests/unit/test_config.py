@@ -446,16 +446,21 @@ class TestErrors:
     def test_config_error_is_resourcey_error(self):
         assert issubclass(ResourceyConfigError, ResourceyError)
 
-    def test_core_service_errors_stay_separate(self):
-        """``errors.py`` is exactly the framework-level classes.
+    def test_core_service_errors_are_resourcey_errors(self):
+        """The service-level hierarchy roots in the framework base.
 
-        The service-level hierarchy (``ServiceError`` / ``NotFoundError``) is
-        tracked separately and must stay where it is raised.
+
+
+        ``ServiceError`` / ``NotFoundError`` / ``ForbiddenError`` live where they
+        are raised (``core/service.py``) but derive from ``ResourceyError`` so a
+        single ``except ResourceyError`` catches every framework failure.
+
         """
         from resourcey.core import errors, service
 
-        assert not issubclass(service.ServiceError, errors.ResourceyError)
-        assert not issubclass(service.NotFoundError, errors.ResourceyError)
+        assert issubclass(service.ServiceError, errors.ResourceyError)
+        assert issubclass(service.NotFoundError, errors.ResourceyError)
+        assert issubclass(service.ForbiddenError, errors.ResourceyError)
 
     def test_errors_module_defines_only_the_framework_classes(self):
         from resourcey.core import errors
