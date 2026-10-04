@@ -1598,6 +1598,21 @@ above makes splitting them pointless here), `CHANNEL_CLASS` switching between
 `InMemoryChannel` and `RedisChannel` with no code change, and `add_asyncapi`
 mounted alongside `add_realtime`.
 
+`specs/realtime.qnt` pins the one genuinely new state machine here — the
+per-connection subscription/delivery policy `realtime_routes.py` adds (the
+`RedisTrigger` publish side is already governed by `specs/triggers.qnt`'s
+execution policy and is not restated): the `Action.READ`-in-exposed-actions
+subscription gate; the posture-gated handshake outcome (an invalid credential
+rejected under every posture, an absent one rejected only under `Required`);
+and, central to `_deliverable`, that a subscription's own filter can only
+*narrow* what the resolved policy already allows (AND, never OR, so it can
+never grant visibility beyond the caller's own scope), that a `deleted` event
+is delivered only to a subscriber whose combined scope is fully unscoped (a
+row-scoped policy or subscription filter cannot be verified against a row
+that no longer exists, so it fails closed rather than guessing), and that a
+`NoMatchF` (fail-closed / no policy) subscriber receives nothing for any
+event kind. It is part of `make specs` and CI.
+
 ### Framework isolation
 
 `core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `tasks`,

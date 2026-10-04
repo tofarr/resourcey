@@ -70,6 +70,10 @@ jobs:
         run: quint test specs/background_tasks.qnt --main=background_tasks --match "^(matchesIsFieldConjunction|domDowOrRule|matchIsUnrestrictedWhenNeitherDayFieldIsSet|scheduleNoneNeverTicks|onlyEnabledTasksTick|selectionIsPerTask|aRaisingTaskDoesNotStopTheLoop|invariantsHold)$"
       - name: Run oauth spec tests
         run: quint test specs/oauth.qnt --main=oauth --match "^(failClosedOnNoClientTest|aValidTokenAuthenticates|issuerAndAudienceAreChecked|expiryIsChecked|algorithmIsPinnedNoConfusion|identityIsFailClosed|localUserStoreIsAuthoritativeTest|absentIsNotInvalidTest|refreshSerializesAcrossCallers|invariantsHold)$"
+      - name: Run triggers spec tests
+        run: quint test specs/triggers.qnt --main=triggers --match "^(editsOnlyFire|successOnly|alignmentTest|perOperationNotPerItemTest|perTriggerIsolationTest|backgroundNeverBlocksTest|exitSettlesEveryRunTest|invariantsHold)$"
+      - name: Run realtime spec tests
+        run: quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$"
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
@@ -96,6 +100,8 @@ jobs:
             name: oauth (OIDC federation + BFF session)
           - example: examples/08_webhooks
             name: webhooks (edit-event triggers)
+          - example: examples/09_realtime
+            name: realtime (WebSocket channel over a Trigger)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4
