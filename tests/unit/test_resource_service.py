@@ -395,6 +395,37 @@ def test_manifest_accepts_a_narrowed_real_action_set():
     assert manifest.resource_names() == ("threads",)
 
 
+async def test_manifest_rejects_a_fk_reference_without_a_served_target():
+    from sqlalchemy import ForeignKey
+
+    class RefMessage(CoreBase):
+        __tablename__ = "ref_messages"
+        id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+        thread_id: Mapped[int] = mapped_column(ForeignKey("threads.id"))
+
+    with pytest.raises(ResourceyConfigError, match="no resource"):
+        manifest = Manifest(resources=[SqlResource(RefMessage, session_factory=_dummy_factory())])
+        await manifest.__aenter__()
+
+
+async def test_manifest_accepts_a_fk_reference_when_the_target_is_served():
+    from sqlalchemy import ForeignKey
+
+    class ServedRefMessage(CoreBase):
+        __tablename__ = "served_ref_messages"
+        id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+        thread_id: Mapped[int] = mapped_column(ForeignKey("threads.id"))
+
+    manifest = Manifest(
+        resources=[
+            SqlResource(Thread, session_factory=_dummy_factory()),
+            SqlResource(ServedRefMessage, session_factory=_dummy_factory()),
+        ]
+    )
+    async with manifest:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------

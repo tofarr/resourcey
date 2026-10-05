@@ -97,9 +97,20 @@ class DtoField:
     update default (the "always overwrite" case).
 
     ``metadata`` is free-form: a general-purpose store for extra data a
-    downstream layer wants to attach to the field (a UI label, a column hint,
+    downstream layer wants to attach to the field (a UI label,a column hint,
     a validation rule). ``core`` never reads it; it is there so extensions
     do not need a new ``DtoField`` attribute each.
+
+    ``references`` names the resource this field points at — the **singular resource
+    name** (e.g. ``"thread"``, never the plural REST path ``"threads"``).
+    It is a **tri-state** value: ``_UNSET`` (the default) means the field is a
+    *candidate* for auto-derivation — an FK column's target table name,
+    singularised (SQL only; DTO-first backends have no automatic source, so
+    ``_UNSET`` simply means "no reference" there); an explicit string is used
+    verbatim (never overridden or derived); and ``None`` *suppresses* derivation
+    for an FK column whose target is not exposed as a resource. It is **not** a
+    REST wire field — it exists so the manifest can fail fast when a reference
+    does not resolve to a served resource. ``core`` never reads it.
     """
 
     in_create_request: bool = True
@@ -112,6 +123,7 @@ class DtoField:
     default_factory_for_create: Callable[[], Any] | None = None
     default_for_update: Any = _UNSET
     default_factory_for_update: Callable[[], Any] | None = None
+    references: str | Any | None = _UNSET
     metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
     def __post_init__(self) -> None:

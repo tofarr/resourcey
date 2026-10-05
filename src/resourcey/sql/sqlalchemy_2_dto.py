@@ -19,6 +19,14 @@ A column may override the inferred projection by placing a
 When no ``dto_field`` is supplied the projection is inferred from the column's
 generation behaviour (see :func:`_dto_field_for_column`).
 
+A foreign-key column additionally declares ``DtoField.references``:the
+singularised name of the referenced table (``thread_id`` -> ``"thread"``) is
+attached (when the field's ``references`` is still ``_UNSET``, so a layer
+downstream can validate that a referenced table is served by the same
+manifest. An explicit string is honoured verbatimand a ``None``
+*suppresses* derivation for a column whose target is not exposed as a
+resource.
+
 **Scope: plain columns only.** Every column projects as an ordinary scalar
 field (a foreign-key column such as ``thread_id`` becomes a plain ``int`` field
 and round-trips as a value). SQLAlchemy ``relationship()``s are **not**
@@ -32,7 +40,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time
 from decimal import Decimal
-from typing import Any, get_args, get_origin, get_type_hints
+from typing import Any, cast, get_args, get_origin, get_type_hints
 from uuid import UUID
 
 from pydantic import SecretStr
@@ -55,7 +63,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapper
 
-from resourcey.core.dto import DTO, DtoField, _apply_conventions
+from resourcey.core.dto import _UNSET, DTO, DtoField, _apply_conventions
+from resourcey.util.naming import singularise
 
 # The ``Column.info`` key under which a developer supplies an explicit
 # ``DtoField`` for a column; absent it, the projection is inferred.
@@ -111,9 +120,14 @@ def _field_declarations(mapper: Mapper[Any]) -> dict[str, tuple[Any, DtoField]]:
         annotation = _annotation_for_column(column, hints.get(attr.key))
         explicit = column.info.get(DTO_FIELD_INFO_KEY)
         if isinstance(explicit, DtoField):
-            config, is_explicit = explicit, True
+            config = explicit
+            is_explicit = True
         else:
-            config, is_explicit = _dto_field_for_column(column, mapper), False
+            config = _dto_field_for_column(column, mapper)
+            is_explicit = False
+        target = _fk_target_table(column)
+        if target is not None and config.references is _UNSET:
+            config = config.with_overrides(references=singularise(target))
         declarations[attr.key] = (
             annotation,
             _apply_conventions(
@@ -131,6 +145,22 @@ def _field_declarations(mapper: Mapper[Any]) -> dict[str, tuple[Any, DtoField]]:
 def _column_generates_id(column: Any, mapper: Mapper[Any]) -> bool:
     """Whether the database, not the application, supplies this column's value."""
     return column.server_default is not None or _is_auto_increment(column, mapper)
+
+
+def _fk_target_table(column: Any) -> str | None:
+    """The referenced table's name for ``column``'s first foreign key, if any.
+
+    A column carries at most a few foreign keys; the first is a fine proxy for
+    the referenced table. ``target_fullname`` is ``"<table>.<column>"`` (or
+    ``"<schema>.<table>.<column>"``), so the table is the second-to-last part.
+    """
+    fk = next(iter(column.foreign_keys), None)
+    if fk is None:
+        return None
+    parts = fk.target_fullname.split(".")
+    if len(parts) < 2:
+        return parts[0] if parts else None
+    return cast(str, parts[-2])
 
 
 def _dto_field_for_column(column: Any, mapper: Mapper[Any]) -> DtoField:

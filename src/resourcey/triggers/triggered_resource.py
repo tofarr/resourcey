@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 from pydantic import BaseModel
 
-from resourcey.core.dto import RestModels
+from resourcey.core.dto import DTO, RestModels
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action, CacheStrategy, Service, ServiceError
@@ -122,6 +122,10 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
 
     def get_rest_models(self) -> RestModels:
         return self._inner.get_rest_models()
+
+    def get_dto_declaration(self) -> type[DTO]:
+        """The inner's DTO declaration, so the manifest can validate FK references."""
+        return self._inner.get_dto_declaration()  # type: ignore[attr-defined, no-any-return]  # duck-typed over the backends
 
     def get_id_field(self) -> str:
         return self._inner.get_id_field()
