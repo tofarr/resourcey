@@ -15,10 +15,10 @@ thread's messages and ``?text__contains=`` does a substring search on the body.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from resourcey.core.dto import DTO
+from resourcey.core.dto import DTO, DtoField
 from resourcey.mongo.mongo_resource import MongoResource
 
 
@@ -27,14 +27,16 @@ class MessageDTO(DTO):
 
     Fields:
         id: Client-supplied UUID primary key (stored under Mongo's ``_id``).
-        thread_id: UUID of the parent thread (required, application-level FK).
+        thread_id: UUID of the parent thread (required, application-level FK);
+            carries ``DtoField.references="thread"`` so the manifest verifies a
+            ``threads`` resource is served alongside ``messages``.
         text: The message body (required).
         created_at: Framework-owned; set once on create.
         updated_at: Framework-owned; refreshed on every update.
     """
 
     id: UUID
-    thread_id: UUID
+    thread_id: Annotated[UUID, DtoField(references="thread")]
     text: str
     created_at: datetime
     updated_at: datetime
