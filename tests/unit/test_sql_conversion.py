@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import date, datetime, time
 from enum import StrEnum
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
 import pytest_asyncio
@@ -267,6 +267,99 @@ def test_relationships_are_not_projected():
     dto = sqlalchemy_2_dto(Child)
     # The FK column is a plain int field; the relationship is left out.
     assert list(dto.get_fields()) == ["id", "parent_id"]
+
+
+def test_foreign_key_column_declares_its_referenced_resource():
+    from sqlalchemy import ForeignKey
+
+    class RefParent(AdoptedBase):
+        __tablename__ = "ref_parents"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    class RefChild(AdoptedBase):
+        __tablename__ = "ref_children"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        parent_id: Mapped[int] = mapped_column(ForeignKey("ref_parents.id"))
+
+    dto = sqlalchemy_2_dto(RefChild)
+    fields = dto.get_fields()
+    assert fields["parent_id"].references == "ref_parent"
+    assert not isinstance(fields["id"].references, str)
+
+
+def test_fk_reference_is_derived_even_for_an_explicit_dto_field():
+    from sqlalchemy import ForeignKey
+
+    class ExplicitParent(AdoptedBase):
+        __tablename__ = "explicit_parents"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    class ExplicitChild(AdoptedBase):
+        __tablename__ = "explicit_children"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        parent_id: Mapped[int] = mapped_column(
+            ForeignKey("explicit_parents.id"), info={"dto_field": DtoField(in_read_response=False)}
+        )
+
+    dto = sqlalchemy_2_dto(ExplicitChild)
+    field = dto.get_fields()["parent_id"]
+    assert field.references == "explicit_parent"
+    assert field.in_read_response is False
+
+
+def test_explicit_references_none_suppresses_fk_derivation():
+    from sqlalchemy import ForeignKey
+
+    class HiddenParent(AdoptedBase):
+        __tablename__ = "hidden_parents"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    class HiddenChild(AdoptedBase):
+        __tablename__ = "hidden_children"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        parent_id: Mapped[int] = mapped_column(
+            ForeignKey("hidden_parents.id"), info={"dto_field": DtoField(references=None)}
+        )
+
+    dto = sqlalchemy_2_dto(HiddenChild)
+    assert dto.get_fields()["parent_id"].references is None
+
+
+def test_explicit_references_string_wins_unchallenged():
+    from sqlalchemy import ForeignKey
+
+    class CustomParent(AdoptedBase):
+        __tablename__ = "custom_parents"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    class CustomChild(AdoptedBase):
+        __tablename__ = "custom_children"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        parent_id: Mapped[int] = mapped_column(
+            ForeignKey("custom_parents.id"), info={"dto_field": DtoField(references="board")}
+        )
+
+    assert sqlalchemy_2_dto(CustomChild).get_fields()["parent_id"].references == "board"
+
+
+def test_foreign_key_column_references_a_column_in_another_schema():
+    from sqlalchemy import ForeignKey, MetaData
+
+    class SchemaBase(DeclarativeBase):
+        metadata: ClassVar[MetaData] = MetaData()
+
+    class SchemaParent(SchemaBase):
+        __tablename__ = "schema_parents"
+        __table_args__: ClassVar[dict[str, str]] = {"schema": "public"}
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    class SchemaChild(SchemaBase):
+        __tablename__ = "schema_children"
+        __table_args__: ClassVar[dict[str, str]] = {"schema": "public"}
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        parent_id: Mapped[int] = mapped_column(ForeignKey("public.schema_parents.id"))
+
+    assert sqlalchemy_2_dto(SchemaChild).get_fields()["parent_id"].references == "schema_parent"
 
 
 def test_enum_column_maps_to_its_python_enum():

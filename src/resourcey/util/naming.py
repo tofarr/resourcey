@@ -10,7 +10,9 @@ available to callers that need it.
 ``pluralize`` appends ``"s"`` — or ``"es"`` when the name ends in ``"s"``,
 ``"x"``, ``"z"``, ``"ch"``, or ``"sh"`` — a small, predictable rule that covers
 the common cases without a full English pluralization table. The ending check is
-case-insensitive but the input case is preserved.
+case-insensitive but the input case is preserved. ``singularise`` strips one trailing
+``"s"`` (or ``"es"`` to nominate the plural that matches :func:`pluralize`'s rule),
+so an FK's target table name can be matched back to a resource path.
 
 ``humanize`` renders an identifier as Title Case words (``"api-keys"`` ->
 ``"Api Keys"``, ``"ConfigApiKeyView"`` -> ``"Config Api Key View"``), for a
@@ -58,10 +60,35 @@ def pluralize(name: str) -> str:
     otherwise appends ``s``. The ending check is case-insensitive but the input
     case is preserved — lowercasing is the caller's responsibility. Not a full
     pluralization engine — override ``get_resource_path`` for irregular cases.
+
+    This is the inverse of :func:`singularise`: ``singularise(pluralize(x)) == x``
+    when ``x`` does not end in a plural suffix itself.
+
     """
     if name.lower().endswith(("s", "x", "z", "ch", "sh")):
         return name + "es"
     return name + "s"
+
+
+def singularise(name: str) -> str:
+    """Strip one trailing ``s`` (or ``es`` to nominate the plural rule's form).
+
+    The direct inverse of :func:`pluralize`: singularising a plural restores the
+    unpluralized name; calling it on a name that does not end in a plural suffix
+    returns it unchanged. The ending/normalisation checks are case-insensitive,
+    but the result preserves the input's casing (so ``"Threads"`` -> ``"Thread"``).
+    ``"es"`` takes precedence over a bare ``"s"`` so ``"statuses"`` -> ``"status"``,
+    and the plural suffix must be a *complete* trailing segment (``"bus"`` -> ``"bu"``,
+    not ``"b"``; a word like ``"alias"`` ends in ``"s"`` and is singularised).
+    Not a full English singularization engine — used to map an FK's target table
+    name back to a resource path.
+    """
+    lowered = name.lower()
+    if lowered.endswith("es"):
+        return name[:-2]
+    if lowered.endswith("s"):
+        return name[:-1]
+    return name
 
 
 def humanize(name: str) -> str:

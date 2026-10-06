@@ -17,6 +17,8 @@ contract.
 
 This module is part of the ``core`` bottom layer: it imports no other
 ``resourcey`` module.
+
+Refer to the ``DtoField.references`` docstring for the fail-fast reference check.
 """
 
 from __future__ import annotations
@@ -25,8 +27,42 @@ from contextlib import AbstractAsyncContextManager
 from types import TracebackType
 from typing import Any
 
+from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.resource import Resource
 from resourcey.core.service import ServiceError, assert_real_actions
+from resourcey.util.naming import singularise
+
+
+def _validate_references(resources: tuple[Resource[Any, Any], ...]) -> None:
+    """Fail loudly when a DTO field's ``references`` names an unserved resource.
+
+
+
+    A DTO field may declare ``DtoField.references`` — the **singular resource name**
+    the field points at (e.g. ``"thread"``, never the plural REST path
+    ``"threads"``). Runs when the manifest starts (see :meth:`Manifest.__aenter__`)
+    so an unknown target — a resource forgotten from the manifest, or a wrong
+    derived singularisation — fails loudly instead of surfacing as a confusing
+    runtime error when the FK is enforced. Resources without a DTO declaration
+    (e.g. a hand-written ``Resource``) are simply skipped: there is nothing
+    to validate. An unset or ``None`` reference carries no constraint.
+    """
+    served = {singularise(resource.get_resource_path()) for resource in resources}
+    for resource in resources:
+        getter = getattr(resource, "get_dto_declaration", None)
+        if getter is None:
+            continue
+        for name, config in getter().get_fields().items():
+            target = config.references
+            if not isinstance(target, str):
+                continue
+            if target not in served:
+                raise ResourceyConfigError(
+                    f"{resource.get_resource_path()}: DTO field {name!r} references "
+                    f"{target!r}, but no resource in the manifest serves the resource "
+                    f"name {target!r} (served: {sorted(served)}); declare the referenced "
+                    "resource or set the DtoField references explicitly."
+                )
 
 
 class Manifest:
@@ -75,6 +111,8 @@ class Manifest:
         if self._entered:
             raise ServiceError("Manifest already entered")
         self._entered = True
+        _validate_references(self.resources)
+
         for manager in self.managers:
             await manager.__aenter__()
         for resource in self.resources:
