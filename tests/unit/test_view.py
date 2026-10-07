@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -145,6 +145,16 @@ class TestConstruction:
         with pytest.raises(ResourceyConfigError, match="get_dto_declaration"):
             ResourceView(Plain())  # type: ignore[arg-type]
 
+    def test_request_type_override_for_an_unknown_field_is_rejected(self) -> None:
+        inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
+        with pytest.raises(ResourceyConfigError, match="unknown field"):
+            ResourceView(inner, exposed_request_type_overrides={"nope": Literal["a"]})
+
+    def test_request_type_override_of_the_identifier_is_rejected(self) -> None:
+        inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
+        with pytest.raises(ResourceyConfigError, match="identifier"):
+            ResourceView(inner, exposed_request_type_overrides={"id": Literal["a"]})
+
 
 # ---------------------------------------------------------------------------
 # Field projection
@@ -192,6 +202,37 @@ class TestFieldProjection:
         view = ResourceView(inner)
         assert view.get_rest_models() is inner.get_rest_models()
         assert view.get_dto_declaration() is inner.get_dto_declaration()
+
+    def test_a_request_type_override_narrows_the_request_models_only(self) -> None:
+        inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
+        view = ResourceView(inner, exposed_request_type_overrides={"value": Literal["only"]})
+        models = view.get_rest_models()
+        # The request models take the narrowed type...
+        assert models.create_request.model_fields["value"].annotation == Literal["only"]
+        assert models.update_request.model_fields["value"].annotation == Literal["only"]
+        # ...while the response models keep the declaration's own type.
+        assert models.read_response.model_fields["value"].annotation is str
+        assert models.create_response.model_fields["value"].annotation is str
+        # The inner is untouched.
+        assert inner.get_rest_models().create_request.model_fields["value"].annotation is str
+
+    def test_a_request_type_override_via_field_overrides_works(self) -> None:
+        # ``request_type`` is an ordinary ``DtoField`` attribute, so the general
+        # field-override form expresses the same narrowing as the sugar.
+        inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
+        view = ResourceView(
+            inner, exposed_field_overrides={"value": {"request_type": Literal["only"]}}
+        )
+        models = view.get_rest_models()
+        assert models.create_request.model_fields["value"].annotation == Literal["only"]
+        assert models.update_request.model_fields["value"].annotation == Literal["only"]
+        assert models.read_response.model_fields["value"].annotation is str
+
+    def test_a_request_type_override_alone_marks_the_view_as_narrowing(self) -> None:
+        inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
+        view = ResourceView(inner, exposed_request_type_overrides={"value": Literal["only"]})
+        # A narrowing view recomputes its cache policy rather than inheriting.
+        assert view.get_cache_strategy() is not inner.get_cache_strategy()
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +285,34 @@ class TestAnnotatedDeclarations:
     def test_derive_dto_carries_class_metadata(self) -> None:
         derived = derive_dto(AnnotatedDTO, field_overrides={"value": {"in_read_response": False}})
         assert derived.metadata == {"collection": "annotated"}
+
+    def test_derive_dto_request_type_override_keeps_the_projection_flags(self) -> None:
+        derived = derive_dto(
+            AnnotatedDTO, field_overrides={"value": {"request_type": Literal["only"]}}
+        )
+        # The type narrows on the request models only; the flags are unchanged,
+        # so the response models still carry the full type.
+        assert derived.get_fields()["value"].in_read_response is True
+        assert (
+            derived.get_rest_models().create_request.model_fields["value"].annotation
+            == Literal["only"]
+        )
+        assert derived.get_rest_models().read_response.model_fields["value"].annotation is str
+
+    def test_derive_dto_override_of_an_unknown_field_is_rejected(self) -> None:
+        with pytest.raises(KeyError, match="nope"):
+            derive_dto(AnnotatedDTO, field_overrides={"nope": {"request_type": Literal["a"]}})
+
+    def test_a_declaration_can_carry_request_type_directly(self) -> None:
+        # ``request_type`` on the field itself (not just via a view) narrows the
+        # request models at declaration time.
+        class StatusDTO(DTO):
+            id: Annotated[UUID, DtoField(in_create_request=False, in_update_request=False)]
+            status: Annotated[str, DtoField(request_type=Literal["only"])]
+
+        models = StatusDTO.get_rest_models()
+        assert models.create_request.model_fields["status"].annotation == Literal["only"]
+        assert models.read_response.model_fields["status"].annotation is str
 
     def test_an_annotated_view_narrows_the_query_surface(self) -> None:
         inner = MongoResource(AnnotatedDTO, client=AsyncEmbeddedClient(), path="annotated")

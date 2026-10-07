@@ -31,7 +31,7 @@ until the first release.
 * `src/resourcey/` — the framework.
 * `examples/01_message_board`, `02_mongodb`, `03_api_key_auth`,
   `04_simple_roles`, `05_full_rbac`, `06_filestore`, `07_oauth`,
-  `08_webhooks`, `09_realtime` — standalone
+  `08_webhooks`, `09_realtime`, `10_jobs` — standalone
   `uv` projects, each with its own `pyproject.toml`, `.venv`, and committed
   `.env`. They are excluded from the root ruff/mypy config and linted as
   standalone projects. `01_message_board` is the **reference app** (issue
@@ -157,11 +157,25 @@ until the first release.
   `04_simple_roles` / `05_full_rbac`'s builders re-filters every event per
   subscriber through the identical `Policy.to_search_filter` reduction REST
   already uses, with no realtime-specific authorization code.
+  `10_jobs` is the **durable-job app** (issue #16, built on `resourcey.jobs`):
+  unlike the in-process `09`-style task scheduler, a unit of work here is a
+  **governed row** in a `jobs` table, so it is durable, claimed exactly once,
+  retried, and recovered after a crash. A request (`POST /jobs`) or a scheduled
+  `resourcey.tasks` task **enqueues** a job; a `JobRunner` (a `Manifest` manager)
+  claims it with a single conditional write and runs the body with **no database
+  session held open**, then completes it with another conditional write
+  (`status == RUNNING AND claimed_by == this runner`). The app exposes the
+  framework's `jobs_view` (the runner-managed fields hidden, `status` narrowed to
+  the client-writable set) under the example-04 role wiring, so a `USER` sees
+  only its own jobs (`Owner` on `creator_id`) and an `ADMIN` sees all. The
+  example's three kinds (`Echo` / `Slow` / `Boom`) demonstrate success,
+  concurrency, and the retry-then-terminal-`ERROR` path; `EnqueueEchoTask` is the
+  `resourcey.tasks` → `resourcey.jobs` bridge.
 * `.vscode/launch.json` + `tasks.json` — debug configs for the examples. Each
   launches `uvicorn <app>:app` with `cwd` set to the example directory (so its
   `.env` applies) and `python` pointing at that example's `.venv`. Ports:
   8081 (01), 8082 (02), 8083 (03), 8084 (04), 8085 (05), 8086 (06), 8087 (07),
-  8088 (08), 8089 (09).
+  8088 (08), 8089 (09), 8090 (10).
 
 ## Core design principles
 
@@ -589,7 +603,15 @@ Four files, no `__init__.py`:
   carry ordinary Pydantic annotations plus a `DtoField` describing how each
   projects into the six REST shapes via six `in_*` flags; tag a field with
   `Annotated[T, DtoField(...)]` (the assignment form is a `mypy --strict`
-  error). `DtoField` carries **operation-scoped** defaults
+  error). A field whose *accepted input set* is narrower than its
+  *representable output set* declares `request_type` — a wire type used by the
+  create / update *request* models only, while the response models keep the
+  declaration's own type (e.g. a job's `status` accepts only `PENDING` /
+  `SCHEDULED` / `CANCELLED` on the wire but a read still reports the runner-set
+  `RUNNING` / `COMPLETED` / `ERROR`); `_UNSET` (the default) means no override,
+  and `ResourceView`'s `exposed_request_type_overrides=` is sugar lowering into
+  the general `exposed_field_overrides[name]["request_type"]` form.
+  `DtoField` carries **operation-scoped** defaults
   (`default_for_create` / `default_factory_for_create` and
   `default_for_update` / `default_factory_for_update`) with precedence
   *client value → default for that operation → `MISSING`*; an omitted update
@@ -1229,7 +1251,11 @@ REST models and the action set:
   attached, so the `Annotated[T, DtoField(...)]` (DTO-first) form overrides
   identically to the class-attribute (SQL) form. An unknown field, an override
   of the identifier, or an override that turns an inner-`False` projection flag
-  back on is rejected at construction.
+  back on is rejected at construction. A `request_type` override travels the
+  same merge path as any flag — `exposed_field_overrides[name]["request_type"]`
+  directly, or the `exposed_request_type_overrides=` sugar that lowers into it —
+  narrowing the field's *request* wire type (the response models keep the
+  inner's type).
 * **Query / sort surface** — `get_queryable_fields`, `get_filter_operators`,
   `get_sortable_fields`, and `resolve_sort_order` are recomputed from the view's
   read model. Load-bearing, not cosmetic: delegating them to the inner would let
@@ -1672,13 +1698,95 @@ that no longer exists, so it fails closed rather than guessing), and that a
 `NoMatchF` (fail-closed / no policy) subscriber receives nothing for any
 event kind. It is part of `make specs` and CI.
 
+### `jobs` — durable, claimable background jobs (issue #16)
+
+`src/resourcey/jobs/` is the **durable** rung the in-process
+:mod:`resourcey.tasks` scheduler stops short of: a unit of work is a **governed
+row**, so it survives a restart, is claimed by exactly one worker, is retried,
+and is recovered after a crash. Four modules, all importing only lower framework
+layers (`core` / `sql` / `config` / `auth` for the principal key / `util`):
+
+* `jobs_details.py` — **`JobDetails`**, the polymorphic, stored job body: a
+  `DiscriminatedUnionMixin` async callable (mirroring `BackgroundTask` /
+  `Trigger`) whose concrete kind carries its own pydantic fields (serialized to
+  the `jobs.job_details` JSON column) and implements
+  `async def __call__(self) -> JobRun`. A stored job is **data that names its own
+  behavior**: the row keeps the discriminator (`job_details_kind`, the class
+  name) and the details, and the runner deserializes them back before invoking —
+  no app import list, since the `DiscriminatedUnionMixin` routes on `kind`. The
+  framework ships one trivial reference kind, **`LogJobDetails`**. `JobRun`
+  (`status` `COMPLETED` / `ERROR`, optional `detail`) is the terminal outcome a
+  body reports; a body that raises is mapped to `ERROR` by the runner.
+* `jobs_model.py` — the **`Job`** ORM model + `JobsBase` + the resources.
+  Columns: `id` (`uuid4`), `job_details_kind` (the discriminator), `job_details`
+  (JSON), `status` (`JobStatus` = `PENDING` / `SCHEDULED` / `RUNNING` /
+  `COMPLETED` / `ERROR` / `CANCELLED`), `detail`, `run_at`, `claimed_by` /
+  `claimed_at` (the claim), `attempts` / `max_attempts` / `max_seconds_for_run`
+  (the retry / recovery bound), `creator_id` (the `Owner` field), and the
+  framework timestamps. The runner-managed fields (`job_details_kind`,
+  `claimed_by`, `claimed_at`, `attempts`, `creator_id`) are marked with
+  `RUNNER_FIELD` (`in_create_request=False, in_update_request=False`), so a
+  client cannot write them. `jobs_resource(...)` is the **inner** resource the
+  runner writes through; `jobs_view(inner)` is the public `ResourceView` that
+  hides the runner-managed fields and narrows `status`'s *request* type to
+  `CLIENT_STATUS_TYPE` (`PENDING` / `SCHEDULED` / `CANCELLED`) while the read
+  model keeps the full `JobStatus`, so a job the runner took to `RUNNING` /
+  `COMPLETED` / `ERROR` still reads back. **`JobsService`** (`SqlService`)
+  enforces two rules: `create` derives `job_details_kind` from the body's `kind`
+  and stamps `creator_id` from the authenticated principal (`PRINCIPAL_CTX_KEY`
+  — the `Owner` policy leaves `create` unscoped, so a new row has no owner until
+  here); `update` folds a **not-terminal** condition into every client write, so
+  a terminal job (`COMPLETED` / `ERROR` / `CANCELLED`) never transitions — an
+  update of one is a no-op returning `None` (the absent-row result), never an
+  error.
+* `jobs_runner.py` — **`JobRunner`**, an ordinary `Manifest` **manager** (the
+  `BackgroundTaskScheduler` shape), so `core` stays unaware and the feature lives
+  in its own package. On construction it generates a **process-unique**
+  `runner_id` (a fresh `uuid4`, never reused across restarts, so a stale claim is
+  never mistaken for a live one). On a sweep interval it **recovers** stale
+  claims and promotes due `SCHEDULED` jobs, **claims** up to its free capacity of
+  `PENDING` jobs, **runs** each as a background task with **no database session
+  held open**, and **completes** each run conditionally. Coordination is the
+  #164 **conditional write**: both the claim (`status == PENDING`) and the
+  completion (`status == RUNNING AND claimed_by == this runner`) are ordinary
+  `Service.update(payload, condition=...)` calls whose `None` result is the
+  verdict — check and write are one atomic operation, so of any number of racing
+  runners at most one wins and a loser cannot distinguish a claim miss from an
+  absent row (no `SELECT … FOR UPDATE SKIP LOCKED`). A *failed* run requeues to
+  `PENDING` while `attempts < max_attempts`, else goes terminal `ERROR`; a
+  success is terminal `COMPLETED`. A stale `RUNNING` claim older than the job's
+  own `max_seconds_for_run` (falling back to the config default, fail-closed) is
+  recovered to `PENDING` under the cap or terminal `ERROR` at it, so no job is
+  ever stuck. Entering is gated by `jobs_runner_enabled`, so a web replica runs
+  the manifest without claiming jobs; a graceful exit releases each in-flight
+  job's claim back to `PENDING`. `enqueue(details, ...)` is the **producer**
+  surface (the REST `POST /jobs` is the same create through the view); `sweep`
+  is public and deterministic so a test drives it with a chosen `now` instead of
+  waiting on the loop; `runner_from_manifest` finds the runner among a manifest's
+  managers.
+* `jobs_config.py` — **`JobsConfig`** (`BaseConfig`, `APP_JOBS_*`):
+  `jobs_sweep_interval_seconds`, `jobs_default_max_seconds_for_run`,
+  `jobs_max_concurrent_jobs`, `jobs_default_max_attempts`, and
+  `jobs_runner_enabled`. Fields are prefixed so they do not collide in the shared
+  flat config namespace.
+
+`specs/jobs.qnt` pins the coordination laws (in `make specs` and CI):
+single-winner claim under any number of racing runners (at most one; a
+non-`PENDING` job is claimed by nobody), only a `PENDING` job is runnable,
+terminal-status stickiness (a terminal status is a fixed point of every
+transition rule), completion only while the runner still owns a `RUNNING` claim
+(a recovered / re-claimed job refuses a late completion), the attempt cap
+(requeue under the cap, terminal `ERROR` at it), stale-claim recovery never
+leaving a job `RUNNING`, and the `run_at` / runner-enabled gates.
+`examples/10_jobs` is the runnable app (issue #16).
+
 ### Framework isolation
 
-`core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `tasks`,
+`core`, `sql`, `mongo`, `list`, `view`, `filestore`, `auth`, `jobs`, `tasks`,
 `triggers`, `realtime`, `encryption`, `util`, `config`, `cache`, and `http` are
 the framework, and the earlier packages/modules have been removed. A test pins
 the **layer ranks**
-`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, tasks, triggers, realtime}`:
+`util < core < {sql, mongo, list, view, filestore, http, config, cache, encryption, auth, jobs, tasks, triggers, realtime}`:
 no module imports a strictly-higher project layer at runtime (a static AST walk
 covering every layer in one rule), `if TYPE_CHECKING:` imports still allowed.
 `sql`, `mongo`, and `list` implement whatever small helpers they need locally

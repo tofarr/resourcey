@@ -123,6 +123,18 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "preLaunchTask": "examples: migrate 09_realtime"
+        },
+        {
+            "name": "Debug 10 — Jobs (SQLite)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "uvicorn",
+            "args": ["jobs_example.app:app", "--env-file", ".env", "--port", "8090"],
+            "cwd": "${workspaceFolder}/examples/10_jobs",
+            "python": "${workspaceFolder}/examples/10_jobs/.venv/bin/python",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "preLaunchTask": "examples: migrate 10_jobs"
         }
     ],
     "compounds": [
@@ -137,7 +149,8 @@
                 "Debug 06 — File Store (local medium, SQLite)",
                 "Debug 07 — OAuth (SQLite)",
                 "Debug 08 — Webhooks (SQLite)",
-                "Debug 09 — Realtime (SQLite)"
+                "Debug 09 — Realtime (SQLite)",
+                "Debug 10 — Jobs (SQLite)"
             ],
             "stopAll": true
         }

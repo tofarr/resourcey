@@ -131,6 +131,21 @@
             "options": { "cwd": "${workspaceFolder}/examples/09_realtime" },
             "dependsOn": "examples: sync 09_realtime",
             "problemMatcher": []
+        },
+        {
+            "label": "examples: sync 10_jobs",
+            "type": "shell",
+            "command": "uv sync",
+            "options": { "cwd": "${workspaceFolder}/examples/10_jobs" },
+            "problemMatcher": []
+        },
+        {
+            "label": "examples: migrate 10_jobs",
+            "type": "shell",
+            "command": "uv run --env-file .env alembic upgrade head",
+            "options": { "cwd": "${workspaceFolder}/examples/10_jobs" },
+            "dependsOn": "examples: sync 10_jobs",
+            "problemMatcher": []
         }
     ]
 }

@@ -74,6 +74,8 @@ jobs:
         run: quint test specs/oauth.qnt --main=oauth --match "^(failClosedOnNoClientTest|aValidTokenAuthenticates|issuerAndAudienceAreChecked|expiryIsChecked|algorithmIsPinnedNoConfusion|identityIsFailClosed|localUserStoreIsAuthoritativeTest|absentIsNotInvalidTest|refreshSerializesAcrossCallers|invariantsHold)$"
       - name: Run triggers spec tests
         run: quint test specs/triggers.qnt --main=triggers --match "^(editsOnlyFire|successOnly|alignmentTest|perOperationNotPerItemTest|perTriggerIsolationTest|backgroundNeverBlocksTest|exitSettlesEveryRunTest|invariantsHold)$"
+      - name: Run jobs spec tests
+        run: quint test specs/jobs.qnt --main=jobs --match "^(claimSingleWinner|claimNeedsRunnable|terminalSticky|completionOnlyIfOwner|attemptCap|staleRecoverable|scheduleAndRunnerGates)$"
       - name: Run realtime spec tests
         run: quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$"
       - name: Check invariants
@@ -104,6 +106,8 @@ jobs:
             name: webhooks (edit-event triggers)
           - example: examples/09_realtime
             name: realtime (WebSocket channel over a Trigger)
+          - example: examples/10_jobs
+            name: jobs (durable, claimable background jobs)
     name: E2E — ${{ matrix.name }}
     steps:
       - uses: actions/checkout@v4

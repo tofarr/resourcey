@@ -96,6 +96,16 @@ class DtoField:
     ``in_update_request=False`` field is always omitted and so always takes its
     update default (the "always overwrite" case).
 
+    ``request_type`` replaces the field's wire type in the **request** REST
+    models only (create / update request); the response models keep the
+    declaration's own type. It is how a field whose *accepted input set* is
+    narrower than its *representable output set* is declared — e.g. a job's
+    ``status`` accepts only ``PENDING`` / ``SCHEDULED`` / ``CANCELLED`` on the
+    wire while a read still reports the runner-set ``RUNNING`` /
+    ``COMPLETED`` / ``ERROR``. ``_UNSET`` (the default) means "no override, use
+    the declaration's type". A narrowing projection (``ResourceView``) sets it
+    through a field override; ``core`` never interprets the value.
+
     ``metadata`` is free-form: a general-purpose store for extra data a
     downstream layer wants to attach to the field (a UI label,a column hint,
     a validation rule). ``core`` never reads it; it is there so extensions
@@ -123,6 +133,7 @@ class DtoField:
     default_factory_for_create: Callable[[], Any] | None = None
     default_for_update: Any = _UNSET
     default_factory_for_update: Callable[[], Any] | None = None
+    request_type: Any = _UNSET
     references: str | Any | None = _UNSET
     metadata: dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -611,7 +622,12 @@ def _build_dto_model(name: str, fields: Mapping[str, tuple[Any, DtoField]]) -> t
 
 
 def _build_rest_models(name: str, fields: Mapping[str, tuple[Any, DtoField]]) -> RestModels:
-    """Build the six REST models as field-selection views of the DTO."""
+    """Build the six REST models as field-selection views of the DTO.
+
+    A field's ``request_type`` override (a narrowing projection's per-field type
+    replacement) applies to the create / update *request* models only; the
+    response models keep the declaration's own types.
+    """
     return RestModels(
         create_request=_build_create_request_model(f"{name}CreateRequest", fields),
         create_response=_build_response_model(
@@ -645,7 +661,8 @@ def _build_response_model(
 
 
 def _build_create_request_model(
-    name: str, fields: Mapping[str, tuple[Any, DtoField]]
+    name: str,
+    fields: Mapping[str, tuple[Any, DtoField]],
 ) -> type[BaseModel]:
     """A create request: the ``in_create_request`` fields with their create defaults.
 
@@ -654,13 +671,18 @@ def _build_create_request_model(
     annotation with no create default is required, so a PATCH can always tell
     "not specified" from "set to ``null``". A factory default becomes Pydantic's
     ``default_factory`` (so it is actually used) rather than a concrete ``None``.
+
+    A field's ``request_type`` replaces its wire type here only (see
+    :attr:`DtoField.request_type`).
     """
     model_fields: dict[str, Any] = {}
     secret_names: set[str] = set()
     for field_name, (annotation, config) in fields.items():
         if not config.in_create_request:
             continue
-        concrete = _strip_annotated(annotation)
+        concrete = _strip_annotated(
+            annotation if config.request_type is _UNSET else config.request_type
+        )
         if config.default_factory_for_create is not None:
             model_fields[field_name] = (
                 concrete,
@@ -676,7 +698,8 @@ def _build_create_request_model(
 
 
 def _build_update_request_model(
-    name: str, fields: Mapping[str, tuple[Any, DtoField]]
+    name: str,
+    fields: Mapping[str, tuple[Any, DtoField]],
 ) -> type[BaseModel]:
     """An update request: the ``in_update_request`` fields, every one optional.
 
@@ -685,9 +708,15 @@ def _build_update_request_model(
     lives on the wire boundary here, unlike the create request's concrete
     defaults. A non-nullable field still rejects ``null``. Defaults for update
     are applied by the service (operation-scoped), not materialised here.
+
+    A field's ``request_type`` replaces its wire type here only (see
+    :attr:`DtoField.request_type`).
     """
     model_fields: dict[str, Any] = {
-        field_name: (_strip_annotated(annotation), _missing_field())
+        field_name: (
+            _strip_annotated(annotation if config.request_type is _UNSET else config.request_type),
+            _missing_field(),
+        )
         for field_name, (annotation, config) in fields.items()
         if config.in_update_request
     }
@@ -729,7 +758,8 @@ def derive_dto(
             mapping: unmentioned attributes keep the source field's value, so an
             override cannot *silently* re-widen a flag the source had turned off
             (a full ``DtoField(...)`` replacement would reset the rest to their
-            ``True`` defaults). An unknown field name raises ``KeyError``.
+            ``True`` defaults). A ``request_type`` override is expressed here
+            like any other attribute. An unknown field name raises ``KeyError``.
         name: The derived class name (defaults to ``<dto name>View``).
 
     The identifier (``id_field_name``) and class ``metadata`` are carried across
