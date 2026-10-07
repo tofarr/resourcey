@@ -178,6 +178,78 @@ async def test_batch_read_and_batch_edit_over_http(client: AsyncClient):
     assert body[3] is None
 
 
+async def test_batch_edit_honours_a_condition(client: AsyncClient):
+    """A batch item's optional ``condition`` gates the write; a miss is ``None``."""
+    created = (await client.post("/threads", json={"title": "t"})).json()
+    holds = {
+        "kind": "AttrFilter",
+        "attribute": "title",
+        "filter": {"kind": "EqFilter", "value": "t"},
+    }
+    fails = {
+        "kind": "AttrFilter",
+        "attribute": "title",
+        "filter": {"kind": "EqFilter", "value": "x"},
+    }
+
+    edited = await client.post(
+        "/threads/batch-edit",
+        json=[
+            # Condition holds -> applies.
+            {
+                "kind": "Update",
+                "item": {"id": created["id"], "title": "edited"},
+                "condition": holds,
+            },
+            # Condition fails -> None, row untouched.
+            {
+                "kind": "Update",
+                "item": {"id": created["id"], "title": "hacked"},
+                "condition": fails,
+            },
+            # Delete condition fails -> None.
+            {"kind": "Delete", "id": created["id"], "condition": fails},
+        ],
+    )
+    assert edited.status_code == 200
+    body = edited.json()
+    assert body[0] == {"id": created["id"], "title": "edited"}
+    assert body[1] is None
+    assert body[2] is None
+
+    # The condition-failed update did not touch the row.
+    assert (await client.get(f"/threads/{created['id']}")).json()["title"] == "edited"
+
+    # A delete whose condition now holds removes it.
+    deleted = await client.post(
+        "/threads/batch-edit",
+        json=[
+            {
+                "kind": "Delete",
+                "id": created["id"],
+                "condition": {
+                    "kind": "AttrFilter",
+                    "attribute": "title",
+                    "filter": {"kind": "EqFilter", "value": "edited"},
+                },
+            }
+        ],
+    )
+    assert deleted.status_code == 200
+    assert deleted.json() == [None]
+    assert (await client.get(f"/threads/{created['id']}")).status_code == 404
+
+
+async def test_openapi_schema_builds_with_a_condition_field(client: AsyncClient):
+    """The condition field's JSON-schema override keeps OpenAPI generation working."""
+    schema = (await client.get("/openapi.json")).json()
+    assert schema["paths"]["/threads/batch-edit"]["post"] is not None
+    body_ref = schema["paths"]["/threads/batch-edit"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert body_ref  # a concrete schema was produced
+
+
 async def test_batch_edit_rejects_an_unknown_kind(client: AsyncClient):
     rejected = await client.post(
         "/threads/batch-edit",

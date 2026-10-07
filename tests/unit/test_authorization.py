@@ -62,6 +62,7 @@ from resourcey.util.search_filter import (
     AllFilter,
     EqFilter,
     NoMatchFilter,
+    SearchFilter,
     and_,
     attr,
 )
@@ -76,6 +77,22 @@ class Item(AuthzBase):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     label: Mapped[str] = mapped_column(String(100))
+
+
+class LabelPolicy(Policy):
+    """A policy that scopes rows to a fixed ``label`` — a stand-in for ``Owner``.
+
+    Its reduction is a narrowing ``AttrFilter`` (not ``All`` / ``NoMatch``), which
+    is the case that proves the policy filter is folded into the write's own
+    condition rather than merely checked before it.
+    """
+
+    label: str
+
+    async def to_search_filter(self, user_id: Any, action: Action) -> SearchFilter[Any]:
+        if action is Action.CREATE:
+            return AllFilter()
+        return attr("label", EqFilter(value=self.label))
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +314,78 @@ async def test_batch_edit_with_an_absent_or_idless_target_is_none(sql_resource):
             ]
         )
         assert edits == [None, None]
+
+
+async def test_update_folds_a_row_scoping_policy_into_the_write(sql_resource):
+    """A narrowing policy makes an out-of-scope update miss (404), in scope applies."""
+    _maker, resource = sql_resource
+    mine, theirs = await _seed(resource, "mine", "theirs")
+    async with _authorized(
+        await resource.get_service({}), LabelPolicy(label="mine"), resource
+    ) as service:
+        # In scope: the policy filter holds, so the write applies.
+        updated = await service.update(_dto(resource)(id=mine.id, label="mine!"))
+        assert updated.label == "mine!"
+        # Out of scope: the policy filter fails the condition, so it is a 404
+        # (indistinguishable from an absent row) and the row is untouched.
+        with pytest.raises(NotFoundError):
+            await service.update(_dto(resource)(id=theirs.id, label="hacked"))
+    async with await resource.get_service({}) as raw:
+        assert (await raw.read(theirs.id)).label == "theirs"
+
+
+async def test_delete_folds_a_row_scoping_policy_into_the_write(sql_resource):
+    _maker, resource = sql_resource
+    mine, theirs = await _seed(resource, "mine", "theirs")
+    async with _authorized(
+        await resource.get_service({}), LabelPolicy(label="mine"), resource
+    ) as service:
+        with pytest.raises(NotFoundError):
+            await service.delete(theirs.id)
+        assert await service.delete(mine.id) is True
+    async with await resource.get_service({}) as raw:
+        assert [i.label for i in (await raw.search(limit=10)).items] == ["theirs"]
+
+
+async def test_update_combines_the_policy_filter_with_the_caller_condition(sql_resource):
+    """Both the policy scope and the caller's condition must hold for a write."""
+    _maker, resource = sql_resource
+    (mine,) = await _seed(resource, "mine")
+    async with _authorized(
+        await resource.get_service({}), LabelPolicy(label="mine"), resource
+    ) as service:
+        # Caller condition holds and policy holds -> applies.
+        updated = await service.update(
+            _dto(resource)(id=mine.id, label="mine!"),
+            condition=attr("label", EqFilter(value="mine")),
+        )
+        assert updated.label == "mine!"
+        # Caller condition fails (though the policy would hold) -> 404.
+        with pytest.raises(NotFoundError):
+            await service.update(
+                _dto(resource)(id=mine.id, label="mine?"),
+                condition=attr("label", EqFilter(value="nope")),
+            )
+    async with await resource.get_service({}) as raw:
+        assert (await raw.read(mine.id)).label == "mine!"
+
+
+async def test_batch_edit_folds_the_policy_into_each_update(sql_resource):
+    _maker, resource = sql_resource
+    mine, theirs = await _seed(resource, "mine", "theirs")
+    async with _authorized(
+        await resource.get_service({}), LabelPolicy(label="mine"), resource
+    ) as service:
+        results = await service.batch_edit(
+            [
+                Update(item=_dto(resource)(id=mine.id, label="mine!")),
+                Update(item=_dto(resource)(id=theirs.id, label="hacked")),
+            ]
+        )
+        assert results[0] is not None and results[0].label == "mine!"
+        assert results[1] is None
+    async with await resource.get_service({}) as raw:
+        assert (await raw.read(theirs.id)).label == "theirs"
 
 
 # ---------------------------------------------------------------------------

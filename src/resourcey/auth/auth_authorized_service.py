@@ -17,8 +17,10 @@ Per-action enforcement (ported verbatim from v1's ``SecuredService``):
 * **read** — the row is fetched; an out-of-scope row raises
   :class:`~resourcey.core.service.NotFoundError` (404) rather than 403, so a
   non-permitted id does not leak its existence.
-* **update** / **delete** — like read: the existing row must be in scope or a
-  404 is raised.
+* **update** / **delete** — the policy filter is folded into the write's own
+  ``condition`` (AND) and pushed to the backend, so scope is enforced atomically
+  with the write (no read-then-write race); an absent / out-of-scope / condition
+  -failed row is a 404, so a denied row is indistinguishable from an absent one.
 * **search** / **count** — the policy's filter is ``and_``-combined with the
   caller's request filter and pushed down to the inner service, so a denied
   policy yields an empty page / a count of 0 rather than an error (a collection
@@ -26,8 +28,9 @@ Per-action enforcement (ported verbatim from v1's ``SecuredService``):
   query rather than by scanning.
 * **batch_read** — positions whose row is absent or out of scope are ``None``,
   positionally aligned with the input.
-* **batch_edit** — only edits whose target is in scope (and a create only when
-  creating is permitted) are applied; every other position is ``None``.
+* **batch_edit** — the policy filter is folded into each update / delete node's
+  ``condition`` (a create is applied only when creating is permitted); every
+  denied / absent / condition-failed position writes nothing and is ``None``.
 
 The wrapper enters its inner service (like ``ViewService``), honouring "whoever
 opens the storage owns its commit and close", and delegates
@@ -187,13 +190,32 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
             raise NotFoundError(id)
         return result
 
-    async def update(self, payload: T) -> T:
-        await self._require_existing_in_scope(self._payload_id(payload), Action.UPDATE)
-        return await self._inner.update(payload)
+    async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
+        """Apply an in-scope update, folding the policy filter into the write.
 
-    async def delete(self, id: K) -> None:  # noqa: A002
-        await self._require_existing_in_scope(id, Action.DELETE)
-        await self._inner.delete(id)
+        The ``UPDATE`` policy filter is combined with the caller's ``condition``
+        and pushed into the backend's write, so authorization is decided
+        atomically with the write (no read-then-write race). A miss — absent,
+        out of scope, or a failed caller condition — is a 404, so a denied row
+        is indistinguishable from an absent one.
+        """
+        filt = await self._permission_filter(Action.UPDATE)
+        result = await self._inner.update(payload, condition=_combine(filt, condition))
+        if result is None:
+            raise NotFoundError(self._payload_id(payload))
+        return result
+
+    async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
+        """Delete an in-scope row, folding the policy filter into the write.
+
+        As :meth:`update`: the ``DELETE`` policy filter rides along as the
+        write's condition, so a denied row (and an absent one) is a 404.
+        """
+        filt = await self._permission_filter(Action.DELETE)
+        deleted = await self._inner.delete(id, condition=_combine(filt, condition))
+        if not deleted:
+            raise NotFoundError(id)
+        return deleted
 
     async def search(
         self,
@@ -219,56 +241,55 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
     async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply only in-scope edits; other positions are ``None``.
 
-        A create is applied when creating is permitted; an update / delete is
-        applied only when its target row exists and is in scope. The denied
-        positions are ``None`` (no write), positionally aligned with ``edits``.
+        A create is applied when creating is permitted. An update / delete has
+        the ``BATCH_EDIT`` policy filter folded into its own condition, so the
+        backend enforces scope **atomically with the write** (no read-then-write
+        race): an out-of-scope / absent / condition-failed edit writes nothing
+        and yields ``None``. The denied positions are ``None`` (no write),
+        positionally aligned with ``edits``.
         """
         filt = await self._permission_filter(Action.BATCH_EDIT)
         flags: list[bool] = []
         permitted: list[Create[T] | Update[T] | Delete[K]] = []
         for edit in edits:
-            allowed = await self._edit_is_in_scope(edit, filt)
-            flags.append(allowed)
-            if allowed:
-                permitted.append(edit)
+            if isinstance(edit, Create):
+                allowed = not isinstance(filt, NoMatchFilter)
+                flags.append(allowed)
+                if allowed:
+                    permitted.append(edit)
+                continue
+            # An update / delete with no identifier cannot be scoped, so it is a
+            # miss (None) rather than being handed to the backend to raise.
+            target = edit.id if isinstance(edit, Delete) else self._payload_id(edit.item)
+            if target is MISSING or target is None:
+                flags.append(False)
+                continue
+            flags.append(True)
+            if isinstance(edit, Update):
+                permitted.append(Update(item=edit.item, condition=_combine(filt, edit.condition)))
+            else:
+                permitted.append(Delete(id=edit.id, condition=_combine(filt, edit.condition)))
         if not permitted:
             return [None] * len(edits)
         edited = iter(await self._inner.batch_edit(permitted))
         return [next(edited) if allowed else None for allowed in flags]
 
-    # ------------------------------------------------------------------
-    # Scope helpers
-    # ------------------------------------------------------------------
-
-    async def _require_existing_in_scope(self, id_value: Any, action: Action) -> None:
-        """Raise 404 unless a row with ``id_value`` exists and is in scope.
-
-        An absent id and an out-of-scope id are answered identically (404), so
-        existence does not leak. A payload with no identifier is left to the
-        inner service, which raises its own configuration error.
-        """
-        if id_value is MISSING or id_value is None:
-            return
-        existing = await self._inner.read(id_value)
-        filt = await self._permission_filter(action)
-        if not filt.matches(existing):
-            raise NotFoundError(id_value)
-
-    async def _edit_is_in_scope(
-        self, edit: Create[T] | Update[T] | Delete[K], filt: SearchFilter[Any]
-    ) -> bool:
-        """Whether a batch edit may be applied under ``filt``."""
-        if isinstance(edit, Create):
-            return not isinstance(filt, NoMatchFilter)
-        target = edit.id if isinstance(edit, Delete) else self._payload_id(edit.item)
-        if target is MISSING or target is None:
-            return False
-        try:
-            existing = await self._inner.read(target)
-        except NotFoundError:
-            return False
-        return filt.matches(existing)
-
     def _payload_id(self, payload: T) -> Any:
         """The identifier carried on an update payload (``MISSING`` if absent)."""
         return getattr(payload, self._id_field, MISSING)
+
+
+def _combine(
+    policy_filter: SearchFilter[Any], condition: SearchFilter[Any] | None
+) -> SearchFilter[Any]:
+    """Fold the caller's ``condition`` under ``policy_filter`` (AND).
+
+    Both must hold for the write to apply. ``and_`` normalisation means an
+    ``AllFilter`` policy (``AllowAll``) drops out and a ``NoMatchFilter`` policy
+    (``DenyAll``, or an un-roled / anonymous fail-closed default) annihilates
+    the condition — so a denied write misses (``None`` / ``False``) rather than
+    raising a distinguishable error, and existence never leaks.
+    """
+    if condition is None:
+        return policy_filter
+    return and_(policy_filter, condition)

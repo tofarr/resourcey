@@ -600,9 +600,8 @@ class TestFileService:
         with pytest.raises(NotFoundError):
             await file_service.read(created.id)
 
-    async def test_delete_of_absent_raises_not_found(self, file_service: Any) -> None:
-        with pytest.raises(NotFoundError):
-            await file_service.delete("ghost")
+    async def test_delete_of_absent_returns_false(self, file_service: Any) -> None:
+        assert await file_service.delete("ghost") is False
 
     async def test_max_size_cap_rejects_an_oversize_upload(self, tmp_path: Any) -> None:
         store = LocalFileStore(root=tmp_path / "blobs")

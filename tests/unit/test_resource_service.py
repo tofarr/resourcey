@@ -27,7 +27,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.cache.cache_strategy import ETagCacheStrategy
 from resourcey.config.config_base import _reset_config_prefix
-from resourcey.core.errors import InvalidInputError, ResourceyConfigError
+from resourcey.core.errors import (
+    InvalidInputError,
+    ResourceyConfigError,
+    UnsupportedFilterError,
+)
 from resourcey.core.manifest import Manifest
 from resourcey.core.resource import Resource
 from resourcey.core.service import (
@@ -51,7 +55,7 @@ from resourcey.sql.session_manager import (
 )
 from resourcey.sql.sql_config import SqlConfig
 from resourcey.sql.sql_resource import SqlResource
-from resourcey.util.search_filter import build_filter
+from resourcey.util.search_filter import AttrFilter, EqFilter, build_filter
 
 
 class CoreBase(DeclarativeBase):
@@ -182,13 +186,169 @@ async def test_read_absent_raises(resources):
             await service.read(999)
 
 
-async def test_update_and_delete_absent_raise(resources):
+async def test_update_and_delete_absent_yield_no_row(resources):
+    """An absent id is a miss: ``update`` returns ``None``, ``delete`` returns ``False``.
+
+    The unified contract makes an absent row indistinguishable from a failed
+    condition, so neither raises (existence must not leak).
+    """
     _maker, threads, _messages = resources
     async with await threads.get_service() as service:
-        with pytest.raises(NotFoundError):
-            await service.update(_dto_type(Thread)(id=999, title="x"))
-        with pytest.raises(NotFoundError):
-            await service.delete(999)
+        assert await service.update(_dto_type(Thread)(id=999, title="x")) is None
+        assert await service.delete(999) is False
+
+
+async def test_update_with_holding_condition_applies(resources):
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        condition = build_filter([("title", "eq", "hello")])
+        updated = await service.update(
+            _dto_type(Thread)(id=created.id, title="bye"), condition=condition
+        )
+        assert updated is not None and updated.title == "bye"
+
+
+async def test_update_with_failed_condition_returns_none_and_leaves_row(resources):
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        condition = build_filter([("title", "eq", "not-the-title")])
+        result = await service.update(
+            _dto_type(Thread)(id=created.id, title="bye"), condition=condition
+        )
+        assert result is None
+        assert (await service.read(created.id)).title == "hello"  # unchanged
+
+
+async def test_update_condition_miss_is_indistinguishable_from_absent(resources):
+    """A failed condition and an absent id both yield ``None`` (no existence leak)."""
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        failed_condition = await service.update(
+            _dto_type(Thread)(id=created.id, title="bye"),
+            condition=build_filter([("title", "eq", "wrong")]),
+        )
+        absent = await service.update(_dto_type(Thread)(id=999999, title="bye"))
+        assert failed_condition is None
+        assert absent is None
+
+
+async def test_update_noop_with_holding_condition_returns_the_row(resources):
+    """A matched update whose values are unchanged is still a hit, not a miss."""
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        condition = build_filter([("title", "eq", "hello")])
+        # Same title: the SET is a no-op, but the condition holds.
+        result = await service.update(
+            _dto_type(Thread)(id=created.id, title="hello"), condition=condition
+        )
+        assert result is not None and result.title == "hello"
+
+
+async def test_empty_patch_honours_the_condition(resources):
+    """A payload with nothing to write still honours the condition (a SELECT, not an UPDATE)."""
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        assert (
+            await service.update(
+                _dto_type(Thread)(id=created.id),
+                condition=build_filter([("title", "eq", "wrong")]),
+            )
+            is None
+        )
+        held = await service.update(
+            _dto_type(Thread)(id=created.id),
+            condition=build_filter([("title", "eq", "hello")]),
+        )
+        assert held is not None and held.title == "hello"
+
+
+async def test_delete_with_holding_condition_removes(resources):
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        deleted = await service.delete(
+            created.id, condition=build_filter([("title", "eq", "hello")])
+        )
+        assert deleted is True
+        assert await service.count() == 0
+
+
+async def test_delete_with_failed_condition_returns_false_and_keeps_row(resources):
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        deleted = await service.delete(
+            created.id, condition=build_filter([("title", "eq", "wrong")])
+        )
+        assert deleted is False
+        assert await service.count() == 1
+
+
+async def test_condition_on_an_unknown_field_fails_closed(resources):
+    """A condition on a non-queryable attribute raises, never silently skips."""
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        with pytest.raises(UnsupportedFilterError):
+            await service.update(
+                _dto_type(Thread)(id=created.id, title="bye"),
+                condition=build_filter([("secret", "eq", "x")]),
+            )
+        with pytest.raises(UnsupportedFilterError):
+            await service.delete(created.id, condition=build_filter([("secret", "eq", "x")]))
+
+
+async def test_batch_edit_applies_conditions_positionally(resources):
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        first = await service.create(_dto_type(Thread)(title="one"))
+        second = await service.create(_dto_type(Thread)(title="two"))
+        dto = _dto_type(Thread)
+        results = await service.batch_edit(
+            [
+                # holds -> applies
+                Update(
+                    item=dto(id=first.id, title="one!"),
+                    condition=build_filter([("title", "eq", "one")]),
+                ),
+                # fails -> None, row unchanged
+                Update(
+                    item=dto(id=second.id, title="two!"),
+                    condition=build_filter([("title", "eq", "nope")]),
+                ),
+                # holds -> removes
+                Delete(id=first.id, condition=build_filter([("title", "eq", "one!")])),
+            ]
+        )
+        assert results[0] is not None and results[0].title == "one!"
+        assert results[1] is None
+        assert results[2] is None
+        assert [t.title for t in (await service.search(limit=10)).items] == ["two"]
+
+
+async def test_update_condition_accepts_a_wire_dict(resources):
+    """A JSON batch body carries the condition as a dict; it resolves to a filter.
+
+    The condition field is ``SkipValidation`` (so an already-built filter
+    instance is not re-validated), so a dict must be resolved explicitly by the
+    field's ``mode="before"`` validator -- this pins that path.
+    """
+    _maker, threads, _messages = resources
+    async with await threads.get_service() as service:
+        created = await service.create(_dto_type(Thread)(title="hello"))
+        wire = AttrFilter(attribute="title", filter=EqFilter(value="hello")).model_dump()
+        assert isinstance(wire, dict)
+        update = Update.model_validate(
+            {"item": _dto_type(Thread)(id=created.id, title="bye"), "condition": wire}
+        )
+        assert isinstance(update.condition, AttrFilter)
+        updated = await service.update(update.item, condition=update.condition)
+        assert updated is not None and updated.title == "bye"
 
 
 async def test_update_requires_an_id_on_the_payload(resources):

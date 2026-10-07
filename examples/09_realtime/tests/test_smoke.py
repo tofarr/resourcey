@@ -108,19 +108,26 @@ class TestCreateUpdateDelete:
             assert event["event"]["id"] == thread["id"]
             assert event["event"]["item"] is None
 
-    def test_a_failed_write_delivers_nothing(self, client: TestClient) -> None:
-        """A 404 update fires no trigger, so nothing is published either."""
+    def test_a_missed_update_delivers_nothing(self, client: TestClient) -> None:
+        """An update of an absent id is a *miss*, so nothing is published.
+
+        Under the unified contract a miss is a successful no-write (``200`` with
+        a ``null`` body), not a ``404``. The ``RedisTrigger`` publishes nothing
+        for an update whose result is ``None`` -- there is no row to report --
+        so the miss stays invisible on the channel.
+        """
         with client.websocket_connect("/ws") as ws:
             ws.send_json({"type": "subscribe", "resource": "threads"})
             ws.receive_json()  # ack
 
             resp = client.patch("/threads/9999", json={"title": "nope"})
-            assert resp.status_code == 404
+            assert resp.status_code == 200
 
-            # The next thing to arrive is a *real* event, not the 404 above --
-            # proving the failed write really published nothing.
+            # The next thing to arrive is the *create* below, not the miss above
+            # -- proving the missed write really published nothing.
             ok = client.post("/threads", json={"title": "the real one"}).json()
             event = ws.receive_json()
+            assert event["event"]["kind"] == "created"
             assert event["event"]["id"] == ok["id"]
 
 

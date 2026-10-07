@@ -178,15 +178,23 @@ async def test_batch_edit_fires_the_trigger_once(
     assert "third" in webhook_records[0].message
 
 
-async def test_failed_write_fires_nothing(
+async def test_a_missed_write_still_fires_the_trigger(
     client: AsyncClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A write that raises (here, a 404 update) delivers no webhook."""
+    """An update of an absent id is a successful *no-write*, and the trigger still fires.
+
+    Under the unified contract a miss is a ``200`` with a ``null`` body, not a
+    ``404`` -- it is not an *error*, so the trigger fires exactly as for any
+    other successful operation. ``WebhookTrigger`` reports the whole operation
+    (``result: null`` marks the miss); contrast ``RedisTrigger``, which publishes
+    nothing for a ``None`` update result because there is no row to report.
+    """
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=_RECEIVER_LOGGER):
         resp = await client.patch("/messages/9999", json={"text": "nope"})
-    assert resp.status_code == 404
-    assert caplog.text == ""
+    assert resp.status_code == 200
+    assert '"result": null' in caplog.text
+    assert '"id": 9999' in caplog.text
 
 
 async def test_reads_never_fire_the_trigger(

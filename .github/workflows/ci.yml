@@ -40,6 +40,8 @@ jobs:
           done
       - name: Run Quint tests
         run: quint test specs/resource_actions.qnt --main=resource_actions --match "^(createThenRead|createUpdateDelete|batchReadAndEdit|searchEmptyFilterMatchesAll|searchEqualityPredicate|searchInPredicate|searchEmptyInMatchesNothing|searchAndCombinesPredicates|searchNoFilterDeclaredRejectsNonEmptyFilter|readOnlyResourceExposesReadSubset|writableResourceExposesAllActions|readOnlyResourceServesReads|defensiveReadIsolated|nonDefensiveServesStore)$"
+      - name: Run conditional-write spec tests
+        run: quint test specs/conditional_write.qnt --main=conditional_write --match "^(updateWithHoldingConditionApplies|updateWithFailingConditionIsAbsentAndUnchanged|conditionMissMatchesAbsentTarget|deleteWithHoldingConditionRemoves|deleteWithFailingConditionIsFalseAndUnchanged|policyScopeGatesTheWrite|policyScopeNarrowsNeverWidens|neverConditionIsAlwaysAbsent|batchEditAlignsConditionalResults)$"
       - name: Run permissions spec tests
         run: quint test specs/permissions.qnt --main=permissions --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|enforcementMatrix|enforcementAllowsEverything|allowAllGrantsAccess|denyAllBlocksAccess|emptyPoliciesDenies|readOnlyGrantsReadNotCreate|denyDoesNotOverrideGrant|unionCombinesGrants|invariantsHold)$"
       - name: Run roles spec tests

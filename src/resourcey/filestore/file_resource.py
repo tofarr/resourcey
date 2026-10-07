@@ -359,12 +359,14 @@ class FileService(Service[T, K]):
             raise NotFoundError(id)
         return self._full_dto(found)
 
-    async def delete(self, id: K) -> None:  # noqa: A002
+    async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
         self._require_entered()
+        self._reject_condition(condition)
         found = await self._store.head(str(id))
         if found is None:
-            raise NotFoundError(id)
+            return False
         await self._store.delete(str(id))
+        return True
 
     async def search(
         self,
@@ -411,6 +413,7 @@ class FileService(Service[T, K]):
             else:
                 if Action.DELETE not in supported:
                     raise InvalidInputError("batch_edit cannot delete: delete is not supported")
+                self._reject_condition(edit.condition)
                 found = await self._store.head(str(edit.id))
                 if found is not None:
                     await self._store.delete(str(edit.id))
@@ -458,6 +461,20 @@ class FileService(Service[T, K]):
             raise UnsupportedFilterError(
                 f"{type(self._resource).__name__} has no filter surface: a medium's listing "
                 "call cannot filter by declared metadata"
+            )
+
+    def _reject_condition(self, condition: SearchFilter[Any] | None) -> None:
+        """Refuse a conditional delete: files have no query surface to condition on.
+
+        A condition names ``<field>__<op>`` predicates, but a medium's operations
+        cannot filter by declared metadata (S3's ``ListObjectsV2`` is the limiting
+        case), so the surface is empty -- the same reason ``search`` / ``count``
+        have no filter surface. Fail loudly rather than silently ignoring it.
+        """
+        if condition is not None:
+            raise UnsupportedFilterError(
+                f"{type(self._resource).__name__} has no filter surface: a conditional "
+                "delete cannot be expressed against a medium's metadata"
             )
 
     def _after_key(self, cursor: str | None) -> str | None:
