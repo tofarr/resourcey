@@ -107,6 +107,23 @@ def _dto_declaration(resource: Resource[Any, Any]) -> type[DTO]:
     return cast("type[DTO]", getter())
 
 
+def _merge_request_type_overrides(
+    field_overrides: Mapping[str, Mapping[str, Any]] | None,
+    request_type_overrides: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Fold the ``request_type`` sugar into the general field-override map.
+
+    A ``request_type`` is an ordinary :class:`~resourcey.core.dto.DtoField`
+    attribute, so it travels through the same merge path as every other flag;
+    this just lowers the sugar form. An explicit ``request_type`` in
+    ``field_overrides`` wins over the sugar for the same field.
+    """
+    merged = {name: dict(overrides) for name, overrides in (field_overrides or {}).items()}
+    for name, request_type in (request_type_overrides or {}).items():
+        merged.setdefault(name, {}).setdefault("request_type", request_type)
+    return merged
+
+
 class ResourceView(Resource[T, K], Generic[T, K]):
     """A configured wrapper exposing a narrowed view of ``resource``.
 
@@ -117,7 +134,14 @@ class ResourceView(Resource[T, K], Generic[T, K]):
             Each value is a *partial* mapping merged onto the inner field's
             resolved :class:`~resourcey.core.dto.DtoField`, so unmentioned
             flags keep the inner's value and an override can never silently
-            re-widen a field. The identifier may not be overridden.
+            re-widen a field. A ``request_type`` override (narrowing a field's
+            client-writable values) is expressed here like any other attribute.
+            The identifier may not be overridden.
+        exposed_request_type_overrides: ``{field_name: annotation}`` — sugar that
+            lowers into ``exposed_field_overrides[name]["request_type"]``. It
+            replaces the field's wire type in the view's create / update
+            *request* models only (the response models keep the inner's type),
+            e.g. restricting a status field's client-writable set.
         exposed_actions: The actions the view exposes. Defaults to the inner's
             (normalized). Must be a subset of the inner's - a view narrows,
             never widens - and is normalized so a batch action without its
@@ -133,32 +157,26 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         resource: Resource[T, K],
         *,
         exposed_field_overrides: Mapping[str, Mapping[str, Any]] | None = None,
-        exposed_type_overrides: Mapping[str, Any] | None = None,
+        exposed_request_type_overrides: Mapping[str, Any] | None = None,
         exposed_actions: frozenset[Action] | None = None,
         path: str | None = None,
         cache_strategy: CacheStrategy | None = None,
     ) -> None:
         self._inner = resource
         self._path = path
-        self._field_overrides = {
-            name: dict(overrides) for name, overrides in (exposed_field_overrides or {}).items()
-        }
-        self._type_overrides = dict(exposed_type_overrides or {})
+        self._field_overrides = _merge_request_type_overrides(
+            exposed_field_overrides, exposed_request_type_overrides
+        )
         self._explicit_cache_strategy = cache_strategy
         self._manifest: Manifest | None = None
         self._entered = False
 
         inner_dto = _dto_declaration(resource)
         self._validate_field_overrides(inner_dto)
-        self._validate_type_overrides(inner_dto)
         self._validate_no_rewidening(inner_dto)
         self._dto = (
-            derive_dto(
-                inner_dto,
-                field_overrides=self._field_overrides,
-                type_overrides=self._type_overrides,
-            )
-            if self._field_overrides or self._type_overrides
+            derive_dto(inner_dto, field_overrides=self._field_overrides)
+            if self._field_overrides
             else inner_dto
         )
         self._validate_declared_filter()
@@ -188,26 +206,6 @@ class ResourceView(Resource[T, K], Generic[T, K]):
                 f"DTO declares {sorted(inner_dto.get_fields())}"
             )
         if inner_dto.id_field_name in self._field_overrides:
-            raise ResourceyConfigError(
-                f"{type(self).__name__} cannot override the identifier field "
-                f"{inner_dto.id_field_name!r}: the transport needs a readable identifier."
-            )
-
-    def _validate_type_overrides(self, inner_dto: type[DTO]) -> None:
-        """Reject a type override for an unknown field or the identifier.
-
-        A type override replaces a field's accepted values on the *view's* REST
-        models (e.g. restricting a status field's client-writable set). The
-        identifier's type is left to the inner declaration — the transport needs
-        a stable, readable id — so overriding it is refused.
-        """
-        unknown = sorted(set(self._type_overrides) - set(inner_dto.get_fields()))
-        if unknown:
-            raise ResourceyConfigError(
-                f"{type(self).__name__} got type overrides for unknown field(s) {unknown}; the "
-                f"inner DTO declares {sorted(inner_dto.get_fields())}"
-            )
-        if inner_dto.id_field_name in self._type_overrides:
             raise ResourceyConfigError(
                 f"{type(self).__name__} cannot override the identifier field "
                 f"{inner_dto.id_field_name!r}: the transport needs a readable identifier."
@@ -370,9 +368,9 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         return self._inner.get_cache_strategy()
 
     def _narrows(self) -> bool:
-        """Whether the view changes fields, types, or actions relative to the inner."""
+        """Whether the view changes fields or actions relative to the inner."""
         actions_differ = self._actions != normalize_actions(self._inner.get_supported_actions())
-        return bool(self._field_overrides) or bool(self._type_overrides) or actions_differ
+        return bool(self._field_overrides) or actions_differ
 
     # ------------------------------------------------------------------
     # Service seam

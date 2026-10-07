@@ -273,5 +273,5 @@ def jobs_view(inner: Resource[Any, Any]) -> ResourceView[Any, Any]:
             "claimed_at": dict(hidden),
             "attempts": dict(hidden),
         },
-        exposed_type_overrides={"status": CLIENT_STATUS_TYPE},
+        exposed_request_type_overrides={"status": CLIENT_STATUS_TYPE},
     )

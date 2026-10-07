@@ -603,7 +603,15 @@ Four files, no `__init__.py`:
   carry ordinary Pydantic annotations plus a `DtoField` describing how each
   projects into the six REST shapes via six `in_*` flags; tag a field with
   `Annotated[T, DtoField(...)]` (the assignment form is a `mypy --strict`
-  error). `DtoField` carries **operation-scoped** defaults
+  error). A field whose *accepted input set* is narrower than its
+  *representable output set* declares `request_type` — a wire type used by the
+  create / update *request* models only, while the response models keep the
+  declaration's own type (e.g. a job's `status` accepts only `PENDING` /
+  `SCHEDULED` / `CANCELLED` on the wire but a read still reports the runner-set
+  `RUNNING` / `COMPLETED` / `ERROR`); `_UNSET` (the default) means no override,
+  and `ResourceView`'s `exposed_request_type_overrides=` is sugar lowering into
+  the general `exposed_field_overrides[name]["request_type"]` form.
+  `DtoField` carries **operation-scoped** defaults
   (`default_for_create` / `default_factory_for_create` and
   `default_for_update` / `default_factory_for_update`) with precedence
   *client value → default for that operation → `MISSING`*; an omitted update
@@ -1243,7 +1251,11 @@ REST models and the action set:
   attached, so the `Annotated[T, DtoField(...)]` (DTO-first) form overrides
   identically to the class-attribute (SQL) form. An unknown field, an override
   of the identifier, or an override that turns an inner-`False` projection flag
-  back on is rejected at construction.
+  back on is rejected at construction. A `request_type` override travels the
+  same merge path as any flag — `exposed_field_overrides[name]["request_type"]`
+  directly, or the `exposed_request_type_overrides=` sugar that lowers into it —
+  narrowing the field's *request* wire type (the response models keep the
+  inner's type).
 * **Query / sort surface** — `get_queryable_fields`, `get_filter_operators`,
   `get_sortable_fields`, and `resolve_sort_order` are recomputed from the view's
   read model. Load-bearing, not cosmetic: delegating them to the inner would let
