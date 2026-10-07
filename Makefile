@@ -54,6 +54,8 @@ specs:
 	quint test specs/background_tasks.qnt --main=background_tasks --match "^(matchesIsFieldConjunction|domDowOrRule|matchIsUnrestrictedWhenNeitherDayFieldIsSet|scheduleNoneNeverTicks|onlyEnabledTasksTick|selectionIsPerTask|aRaisingTaskDoesNotStopTheLoop|invariantsHold)$$"
 	quint typecheck specs/triggers.qnt
 	quint test specs/triggers.qnt --main=triggers --match "^(editsOnlyFire|successOnly|alignmentTest|perOperationNotPerItemTest|perTriggerIsolationTest|backgroundNeverBlocksTest|exitSettlesEveryRunTest|invariantsHold)$$"
+	quint typecheck specs/jobs.qnt
+	quint test specs/jobs.qnt --main=jobs --match "^(claimSingleWinner|claimNeedsRunnable|terminalSticky|completionOnlyIfOwner|attemptCap|staleRecoverable|scheduleAndRunnerGates)$$"
 	quint typecheck specs/realtime.qnt
 	quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$$"
 

@@ -4,7 +4,7 @@ The framework lives directly under ``resourcey/`` (the old version prefix was fo
 away in #144). This test pins the **layer ranks** inside it:
 
     util < core < {sql, mongo, list, http, config, cache, encryption, auth,
-                   view, filestore, tasks, triggers, realtime}
+                   view, filestore, jobs, tasks, triggers, realtime}
 
 no module may import a strictly-higher project layer at runtime. This subsumes
 both "``util`` imports nothing project-level" (it is the bottom layer) and
@@ -45,6 +45,7 @@ _LAYER_RANK = {
     "view": 2,
     "auth": 2,
     "filestore": 2,
+    "jobs": 2,
     "tasks": 2,
     "triggers": 2,
     "realtime": 2,
@@ -282,6 +283,18 @@ def test_the_view_files_exist_without_an_init():
     names = {p.name for p in sorted(view.glob("*.py"))}
     assert names == {"resource_view.py", "view_service.py"}
     assert not (view / "__init__.py").exists()
+
+
+def test_the_jobs_files_exist_without_an_init():
+    jobs = FRAMEWORK_DIR / "jobs"
+    names = {p.name for p in sorted(jobs.glob("*.py"))}
+    assert names == {
+        "jobs_config.py",
+        "jobs_details.py",
+        "jobs_model.py",
+        "jobs_runner.py",
+    }
+    assert not (jobs / "__init__.py").exists()
 
 
 def test_the_tasks_files_exist_without_an_init():
