@@ -145,12 +145,19 @@ class MongoService(Service[T, K]):
             raise NotFoundError(id)
         return self._from_document(document)
 
-    async def update(self, payload: T) -> T:
-        """Apply an update DTO (whose id field names the document); return the DTO.
+    async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
+        """Apply an update DTO (whose id field names the document); return the DTO or ``None``.
 
         Supplied (non-``MISSING``) fields are written; omitted fields with an
         update default take it, and an omitted field with no update default is
         left unchanged (PATCH semantics). The id is never written.
+
+        ``condition`` is an optional :class:`SearchFilter` tree the stored
+        document must satisfy for the write to apply. It is merged into the
+        update's query filter, so the check and the write are one atomic
+        document operation. ``None`` means no document was written — an absent
+        id or a failed condition — so the two are indistinguishable and a failed
+        condition never leaks that the document exists.
         """
         id_field = self._resource.get_id_field()
         values = _payload_values(payload)
@@ -160,23 +167,29 @@ class MongoService(Service[T, K]):
         data = {k: v for k, v in values.items() if k != id_field}
         data = apply_operation_defaults(self._resource.get_dto_declaration(), data, "update")
         updates = self._to_document(data)
+        query = await self._write_query(id_value, condition)
         if updates:
             document = await self._collection.find_one_and_update(
-                {"_id": _encode_value(id_value)},
-                {"$set": updates},
-                return_document=True,
+                query, {"$set": updates}, return_document=True
             )
         else:
-            document = await self._collection.find_one({"_id": _encode_value(id_value)})
+            document = await self._collection.find_one(query)
         if document is None:
-            raise NotFoundError(id_value)
+            return None
         return self._from_document(document)
 
-    async def delete(self, id: K) -> None:  # noqa: A002
-        """Delete by id; raise :class:`NotFoundError` if absent."""
-        result = await self._collection.delete_one({"_id": _encode_value(id)})
-        if result.deleted_count == 0:
-            raise NotFoundError(id)
+    async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
+        """Delete by id; return whether a document was deleted.
+
+        ``condition`` is an optional :class:`SearchFilter` tree the stored
+        document must satisfy for the delete to apply. ``False`` means no
+        document was deleted — an absent id or a failed condition — so the two
+        are indistinguishable and a failed condition never leaks that the
+        document exists.
+        """
+        query = await self._write_query(id, condition)
+        deleted = await self._collection.find_one_and_delete(query)
+        return deleted is not None
 
     async def search(
         self,
@@ -259,27 +272,13 @@ class MongoService(Service[T, K]):
             elif isinstance(edit, Update):
                 if Action.UPDATE not in supported:
                     raise InvalidInputError("batch_edit cannot update: update is not supported")
-                results.append(await self._update_or_none(edit.item))
+                results.append(await self.update(edit.item, condition=edit.condition))
             else:
                 if Action.DELETE not in supported:
                     raise InvalidInputError("batch_edit cannot delete: delete is not supported")
-                await self._delete_or_none(edit.id)
+                await self.delete(edit.id, condition=edit.condition)
                 results.append(None)
         return results
-
-    async def _update_or_none(self, payload: T) -> T | None:
-        """``update`` but an absent id yields ``None`` instead of raising."""
-        try:
-            return await self.update(payload)
-        except NotFoundError:
-            return None
-
-    async def _delete_or_none(self, id: K) -> None:  # noqa: A002
-        """``delete`` but an absent id is a no-op instead of raising."""
-        try:
-            await self.delete(id)
-        except NotFoundError:
-            return
 
     # ------------------------------------------------------------------
     # Filter pushdown
@@ -306,6 +305,27 @@ class MongoService(Service[T, K]):
             if not self._resource.allow_filter_iteration:
                 raise
             return _UNCONVERTIBLE
+
+    async def _write_query(self, id_value: Any, condition: SearchFilter[Any] | None) -> Query:
+        """The query for a conditional write: the id, ``$and``-merged with ``condition``.
+
+        The condition is part of the update / delete's own query filter, so the
+        check and the write are a single atomic document operation. The
+        in-memory iteration fallback is **refused** here even when the resource
+        opted into it: materialising matching ids and then writing would open a
+        TOCTOU window (and scan unboundedly), so an unconvertible condition
+        fails closed with :class:`UnsupportedFilterError`.
+        """
+        query: Query = {"_id": _encode_value(id_value)}
+        if condition is None:
+            return query
+        condition_query = await self._filter_query(condition)
+        if condition_query is _UNCONVERTIBLE:
+            raise UnsupportedFilterError(
+                "A conditional write cannot fall back to in-memory iteration; "
+                "the condition must be convertible to a Mongo query."
+            )
+        return _merge_query(query, cast("Query", condition_query))
 
     async def _iterated_documents(self, search_filter: SearchFilter[Any] | None) -> list[Any]:
         """The opt-in fallback: every document matching ``search_filter`` in memory."""

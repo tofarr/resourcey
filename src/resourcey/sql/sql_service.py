@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.core.dto import apply_operation_defaults
@@ -133,12 +134,17 @@ class SqlService(Service[T, K]):
             raise NotFoundError(id)
         return self._to_dto(found)
 
-    async def update(self, payload: T) -> T:
-        """Apply an update DTO (whose ``id`` field names the row); return the DTO.
+    async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
+        """Apply an update DTO (whose ``id`` field names the row); return the DTO or ``None``.
 
         Supplied (non-``MISSING``) fields are written; omitted fields with an
         update default take it, and an omitted field with no update default is
         left unchanged (PATCH semantics). The id is never written.
+
+        ``condition`` is an optional :class:`SearchFilter` tree the stored row
+        must satisfy for the write to apply. ``None`` means no row was written —
+        an absent id or a failed condition — so the two are indistinguishable
+        and a failed condition never leaks that the row exists.
         """
         session = self._active_session()
         table = self._resource.table
@@ -150,23 +156,38 @@ class SqlService(Service[T, K]):
             raise ServiceError("update requires the identifier on the payload")
         data = {k: v for k, v in values.items() if k != id_field}
         data = self._with_defaults(data, "update")
-        existing = (await session.execute(_by_id(id_column, id_value))).mappings().first()
-        if existing is None:
-            raise NotFoundError(id_value)
         if data:
-            columns = self._to_columns(data)
-            await session.execute(update(table).where(id_column == id_value).values(**columns))
-        return await self.read(id_value)
+            stmt = update(table).where(id_column == id_value).values(**self._to_columns(data))
+            if condition is not None:
+                stmt = await self._apply_condition(stmt, session, condition)
+            result = await session.execute(stmt)
+            if _rowcount(result) == 0:
+                return None
+            return await self.read(id_value)
+        # No columns to write (an empty PATCH): the row exists iff it satisfies
+        # the condition, so evaluate that with a SELECT rather than an UPDATE.
+        found_stmt = _by_id(id_column, id_value)
+        if condition is not None:
+            found_stmt = await self._apply_condition(found_stmt, session, condition)
+        found = (await session.execute(found_stmt)).mappings().first()
+        return None if found is None else self._to_dto(found)
 
-    async def delete(self, id: K) -> None:  # noqa: A002
-        """Delete by id; raise :class:`NotFoundError` if absent."""
+    async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
+        """Delete by id; return whether a row was deleted.
+
+        ``condition`` is an optional :class:`SearchFilter` tree the stored row
+        must satisfy for the delete to apply. ``False`` means no row was deleted
+        — an absent id or a failed condition — so the two are indistinguishable
+        and a failed condition never leaks that the row exists.
+        """
         session = self._active_session()
         table = self._resource.table
         id_column = self._resource.id_column
-        existing = (await session.execute(_by_id(id_column, id))).mappings().first()
-        if existing is None:
-            raise NotFoundError(id)
-        await session.execute(delete(table).where(id_column == id))
+        stmt = delete(table).where(id_column == id)
+        if condition is not None:
+            stmt = await self._apply_condition(stmt, session, condition)
+        result = await session.execute(stmt)
+        return _rowcount(result) > 0
 
     async def search(
         self,
@@ -259,6 +280,22 @@ class SqlService(Service[T, K]):
         ]
         return stmt.where(self._resource.id_column.in_(surviving))
 
+    async def _apply_condition(
+        self, stmt: Any, session: AsyncSession, condition: SearchFilter[Any]
+    ) -> Any:
+        """Push a write's ``condition`` into ``stmt``'s WHERE clause.
+
+        Unlike :meth:`_apply_filters`, the in-memory iteration fallback is
+        **refused** even when the resource opted into it: a write must decide
+        atomically, and materialising matching ids and then writing would open a
+        TOCTOU window (and scan unboundedly). An unconvertible condition raises
+        :class:`UnsupportedFilterError` so the caller fails closed.
+        """
+        standard = condition.create_standard_filter()
+        converter = self._resource.build_filter_converter(session)
+        await converter.resolve()
+        return converter.apply(stmt, standard)
+
     async def batch_read(self, ids: list[K]) -> list[T | None]:
         """Return DTOs positionally aligned with ``ids`` (``None`` for absent)."""
         session = self._active_session()
@@ -291,27 +328,13 @@ class SqlService(Service[T, K]):
             elif isinstance(edit, Update):
                 if Action.UPDATE not in supported:
                     raise InvalidInputError("batch_edit cannot update: update is not supported")
-                results.append(await self._update_or_none(edit.item))
+                results.append(await self.update(edit.item, condition=edit.condition))
             else:
                 if Action.DELETE not in supported:
                     raise InvalidInputError("batch_edit cannot delete: delete is not supported")
-                await self._delete_or_none(edit.id)
+                await self.delete(edit.id, condition=edit.condition)
                 results.append(None)
         return results
-
-    async def _update_or_none(self, payload: T) -> T | None:
-        """``update`` but an absent id yields ``None`` instead of raising."""
-        try:
-            return await self.update(payload)
-        except NotFoundError:
-            return None
-
-    async def _delete_or_none(self, id: K) -> None:  # noqa: A002
-        """``delete`` but an absent id is a no-op instead of raising."""
-        try:
-            await self.delete(id)
-        except NotFoundError:
-            return
 
     # ------------------------------------------------------------------
     # Cursor + sort helpers
@@ -445,3 +468,13 @@ def _payload_values(payload: Any) -> dict[str, Any]:
 def _by_id(id_column: Any, value: Any) -> Any:
     """A ``SELECT`` for the row whose id column equals ``value``."""
     return select(id_column.table).where(id_column == value)
+
+
+def _rowcount(result: Any) -> int:
+    """The affected-row count of an ``UPDATE`` / ``DELETE`` (typed via ``CursorResult``).
+
+    SQLAlchemy's generic ``Result`` does not declare ``rowcount``; only the
+    DML-returning ``CursorResult`` does. Narrowing here keeps the call sites
+    readable and mypy strict-clean.
+    """
+    return int(cast("CursorResult[Any]", result).rowcount)

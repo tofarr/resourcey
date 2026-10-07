@@ -35,7 +35,9 @@ from __future__ import annotations
 import enum
 from abc import ABC
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Annotated, Any, Generic, TypeVar
+
+from pydantic import SkipValidation, field_validator
 
 from resourcey.core.errors import ResourceyError
 from resourcey.util.models import DiscriminatedUnionMixin
@@ -164,16 +166,57 @@ class Create(Edit, Generic[T]):
     item: T
 
 
+# A condition is the *native* standard :class:`SearchFilter` tree, carried as a
+# ``SkipValidation`` field so an already-built instance (the service-caller path)
+# is not re-entered through the discriminated-union validator; a wire ``dict``
+# (the transport path) is resolved by each node's ``mode="before"`` validator.
+# A parameterised generic annotation (``SearchFilter[Any]``) would re-enter the
+# union validator on an instance, the same reason ``util.search_filter`` uses
+# ``NestedFilter`` for its nested fields. The ``| None`` union is accepted by
+# ``SkipValidation`` (the bare annotation is not).
+Condition = Annotated[SearchFilter[Any] | None, SkipValidation]
+
+
+def _resolve_condition(value: Any) -> Any:
+    """Resolve a wire ``dict`` condition into a filter instance, else pass through."""
+    if isinstance(value, dict):
+        return SearchFilter.model_validate(value)
+    return value
+
+
 class Update(Edit, Generic[T]):
-    """A ``batch_edit`` item that updates the entity identified by ``item``."""
+    """A ``batch_edit`` item that updates the entity identified by ``item``.
+
+    ``condition`` is an optional :class:`SearchFilter` tree the stored row must
+    satisfy for the update to apply; ``None`` means no condition. A failed
+    condition is indistinguishable from an absent row (the update writes
+    nothing and yields ``None``).
+    """
 
     item: T
+    condition: Condition = None
+
+    @field_validator("condition", mode="before")
+    @classmethod
+    def _resolve(cls, value: Any) -> Any:
+        return _resolve_condition(value)
 
 
 class Delete(Edit, Generic[K]):
-    """A ``batch_edit`` item that deletes the entity identified by ``id``."""
+    """A ``batch_edit`` item that deletes the entity identified by ``id``.
+
+    ``condition`` is an optional :class:`SearchFilter` tree the stored row must
+    satisfy for the delete to apply; ``None`` means no condition. A failed
+    condition is indistinguishable from an absent row (nothing is deleted).
+    """
 
     id: K
+    condition: Condition = None
+
+    @field_validator("condition", mode="before")
+    @classmethod
+    def _resolve(cls, value: Any) -> Any:
+        return _resolve_condition(value)
 
 
 class Service(Generic[T, K]):
@@ -282,12 +325,26 @@ class Service(Generic[T, K]):
         self._require_entered()
         raise NotImplementedError
 
-    async def update(self, payload: T) -> T:
-        """Apply an update DTO (which carries its own identifier); return the DTO."""
+    async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
+        """Apply an update DTO (which carries its own identifier); return the DTO.
+
+        ``condition`` is an optional :class:`SearchFilter` tree the stored row
+        must satisfy for the write to apply. The result is ``None`` whenever no
+        row was written — an absent id or a failed condition — so the two are
+        deliberately indistinguishable and a failed condition never leaks that
+        the row exists.
+        """
         self._require_entered()
         raise NotImplementedError
 
-    async def delete(self, id: K) -> None:  # noqa: A002
+    async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
+        """Delete by id; return whether a row was deleted.
+
+        ``condition`` is an optional :class:`SearchFilter` tree the stored row
+        must satisfy for the delete to apply. ``False`` means no row was deleted
+        — an absent id or a failed condition — so the two are deliberately
+        indistinguishable and a failed condition never leaks that the row exists.
+        """
         self._require_entered()
         raise NotImplementedError
 
@@ -319,9 +376,10 @@ class Service(Generic[T, K]):
     async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply a list of :class:`Edit` nodes; results align positionally with ``edits``.
 
-        An :class:`Update` / :class:`Create` yields the resulting DTO, a
-        :class:`Delete` yields ``None`` (nothing to return), and a miss (an
-        absent id on update / delete) also yields ``None``.
+        A :class:`Create` / :class:`Update` yields the resulting DTO, a
+        :class:`Delete` yields ``None`` (nothing to return), and a miss — an
+        absent id, or an :class:`Update` / :class:`Delete` whose ``condition``
+        the stored row no longer satisfies — also yields ``None``.
         """
         self._require_entered()
         raise NotImplementedError

@@ -181,16 +181,17 @@ class TriggeredService(Service[T, K], Generic[T, K]):
         await self._fire([Create(item=payload)], [result])
         return result
 
-    async def update(self, payload: T) -> T:
+    async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
         self._require_entered()
-        result = await self._inner.update(payload)
-        await self._fire([Update(item=payload)], [result])
+        result = await self._inner.update(payload, condition=condition)
+        await self._fire([Update(item=payload, condition=condition)], [result])
         return result
 
-    async def delete(self, id: K) -> None:  # noqa: A002
+    async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
         self._require_entered()
-        await self._inner.delete(id)
-        await self._fire([Delete(id=id)], [None])
+        deleted = await self._inner.delete(id, condition=condition)
+        await self._fire([Delete(id=id, condition=condition)], [None])
+        return deleted
 
     async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Forward ``batch_edit`` then fire each trigger once with the whole batch.

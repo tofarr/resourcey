@@ -594,23 +594,119 @@ class TestActions:
             with pytest.raises(ServiceError, match="requires the identifier"):
                 await service.update(widgets.get_dto_type()(label="x"))
 
-    async def test_update_missing_raises_not_found(self, widgets) -> None:
+    async def test_update_missing_returns_none(self, widgets) -> None:
         payload = widgets.get_dto_type()(id=uuid4(), label="x")
         async with await widgets.get_service() as service:
-            with pytest.raises(NotFoundError):
-                await service.update(payload)
+            assert await service.update(payload) is None
 
     async def test_delete_then_read_raises(self, widgets) -> None:
         created = await _seed(widgets, label="bye")
         async with await widgets.get_service() as service:
-            await service.delete(created.id)
+            assert await service.delete(created.id) is True
             with pytest.raises(NotFoundError):
                 await service.read(created.id)
 
-    async def test_delete_missing_raises(self, widgets) -> None:
+    async def test_delete_missing_returns_false(self, widgets) -> None:
         async with await widgets.get_service() as service:
-            with pytest.raises(NotFoundError):
-                await service.delete(uuid4())
+            assert await service.delete(uuid4()) is False
+
+    async def test_update_with_holding_condition_applies(self, widgets) -> None:
+        created = await _seed(widgets, label="hello")
+        condition = build_filter([("label", "eq", "hello")])
+        payload = widgets.get_dto_type()(id=created.id, label="bye")
+        async with await widgets.get_service() as service:
+            updated = await service.update(payload, condition=condition)
+        assert updated is not None and updated.label == "bye"
+
+    async def test_update_with_failed_condition_returns_none_and_leaves_row(self, widgets) -> None:
+        created = await _seed(widgets, label="hello")
+        condition = build_filter([("label", "eq", "wrong")])
+        payload = widgets.get_dto_type()(id=created.id, label="bye")
+        async with await widgets.get_service() as service:
+            result = await service.update(payload, condition=condition)
+            assert result is None
+            assert (await service.read(created.id)).label == "hello"
+
+    async def test_update_condition_miss_matches_absent(self, widgets) -> None:
+        """A failed condition and an absent id both yield ``None``."""
+        created = await _seed(widgets, label="hello")
+        async with await widgets.get_service() as service:
+            failed = await service.update(
+                widgets.get_dto_type()(id=created.id, label="bye"),
+                condition=build_filter([("label", "eq", "wrong")]),
+            )
+            absent = await service.update(widgets.get_dto_type()(id=uuid4(), label="bye"))
+        assert failed is None and absent is None
+
+    async def test_delete_with_holding_condition_removes(self, widgets) -> None:
+        created = await _seed(widgets, label="hello")
+        condition = build_filter([("label", "eq", "hello")])
+        async with await widgets.get_service() as service:
+            assert await service.delete(created.id, condition=condition) is True
+            assert await service.count() == 0
+
+    async def test_delete_with_failed_condition_returns_false(self, widgets) -> None:
+        created = await _seed(widgets, label="hello")
+        condition = build_filter([("label", "eq", "wrong")])
+        async with await widgets.get_service() as service:
+            assert await service.delete(created.id, condition=condition) is False
+            assert await service.count() == 1
+
+    async def test_condition_on_an_unknown_field_fails_closed(self, widgets) -> None:
+        created = await _seed(widgets, label="hello")
+        condition = build_filter([("secret", "eq", "x")])
+        async with await widgets.get_service() as service:
+            with pytest.raises(UnsupportedFilterError):
+                await service.update(
+                    widgets.get_dto_type()(id=created.id, label="bye"), condition=condition
+                )
+            with pytest.raises(UnsupportedFilterError):
+                await service.delete(created.id, condition=condition)
+
+    async def test_batch_edit_applies_conditions_positionally(self, widgets) -> None:
+        first = await _seed(widgets, label="one")
+        second = await _seed(widgets, label="two")
+        dto = widgets.get_dto_type()
+        async with await widgets.get_service() as service:
+            results = await service.batch_edit(
+                [
+                    Update(
+                        item=dto(id=first.id, label="one!"),
+                        condition=build_filter([("label", "eq", "one")]),
+                    ),
+                    Update(
+                        item=dto(id=second.id, label="two!"),
+                        condition=build_filter([("label", "eq", "nope")]),
+                    ),
+                    Delete(id=first.id, condition=build_filter([("label", "eq", "one!")])),
+                ]
+            )
+            assert results[0] is not None and results[0].label == "one!"
+            assert results[1] is None
+            assert results[2] is None
+            assert sorted(w.label for w in (await service.search(limit=10)).items) == ["two"]
+
+    async def test_conditional_write_refuses_the_iteration_fallback(self) -> None:
+        """A write never falls back to an in-memory scan, even with the opt-in.
+
+        Materialising matching ids and then writing would open a TOCTOU window,
+        so an unconvertible condition fails closed instead.
+        """
+
+        class CustomFilter(SearchFilter[Any]):
+            def matches(self, value: Any) -> bool:
+                return True
+
+        manager, resource = await _resource(WidgetDTO, IteratingResource)
+        async with manager, resource, await resource.get_service() as service:
+            created = await service.create(resource.get_dto_type()(label="alpha"))
+            with pytest.raises(UnsupportedFilterError):
+                await service.update(
+                    resource.get_dto_type()(id=created.id, label="bye"),
+                    condition=CustomFilter(),
+                )
+            with pytest.raises(UnsupportedFilterError):
+                await service.delete(created.id, condition=CustomFilter())
 
     async def test_batch_read_is_positionally_aligned(self, widgets) -> None:
         a = await _seed(widgets, label="a")

@@ -88,6 +88,10 @@ class _EmbeddedCollection:
         result = self._col.update_one(query, update)
         return UpdateResult(result.raw_result, acknowledged=True)
 
+    async def find_one_and_delete(self, query: dict[str, Any]) -> dict[str, Any] | None:
+        result: dict[str, Any] | None = self._col.find_one_and_delete(query)
+        return result if result is None else dict(result)
+
     async def delete_one(self, query: dict[str, Any]) -> DeleteResult:
         result = self._col.delete_one(query)
         return DeleteResult(result.raw_result, acknowledged=True)

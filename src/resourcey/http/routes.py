@@ -47,7 +47,15 @@ from typing import Annotated, Any, Literal, TypeVar, cast
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, TypeAdapter, ValidationError, create_model
+from pydantic import (
+    BaseModel,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    WithJsonSchema,
+    create_model,
+    field_validator,
+)
 from sqlalchemy.exc import IntegrityError
 
 from resourcey.cache.cache_header import CacheHeader
@@ -72,6 +80,23 @@ from resourcey.util.naming import humanize, pluralize
 from resourcey.util.search_filter import SEPARATOR, SearchFilter, build_filter
 
 T = TypeVar("T", bound=BaseModel)
+
+# The batch-edit ``condition`` wire field. It is typed ``Any`` rather than the
+# native ``SearchFilter`` union: FastAPI's ``generate_definitions`` re-generates
+# a JSON schema for the parameterised generic base and hits
+# ``DiscriminatedUnionMixin``'s "no subclasses" guard, even under a
+# ``WithJsonSchema`` override. ``Any`` sidesteps that, the explicit schema
+# documents the shape, and ``_resolve_wire_condition`` (below) turns the incoming
+# dict into a real filter before the node is built. A bare ``SearchFilter`` field
+# on core's ``Update`` / ``Delete`` resolves a dict the same way.
+_WireCondition = Annotated[Any, WithJsonSchema({"type": "object", "title": "SearchFilter"})]
+
+
+def _resolve_wire_condition(value: Any) -> Any:
+    """Resolve a JSON condition into a :class:`SearchFilter`, else pass through."""
+    if isinstance(value, dict):
+        return SearchFilter.model_validate(value)
+    return value
 
 
 def register_routes(
@@ -1074,6 +1099,12 @@ def _batch_edit_body(
                 f"{update_request.__name__}UpdateEdit",
                 kind=(Literal["Update"], ...),
                 item=(update_item, ...),
+                condition=(_WireCondition, None),  # optional; applied only if the row matches
+                __validators__={
+                    "resolve_condition": field_validator("condition", mode="before")(
+                        _resolve_wire_condition
+                    )
+                },
             )
         )
     if allow_delete:
@@ -1082,6 +1113,12 @@ def _batch_edit_body(
                 f"{create_request.__name__}DeleteEdit",
                 kind=(Literal["Delete"], ...),
                 **{id_field: (id_type, ...)},
+                condition=(_WireCondition, None),  # optional; applied only if the row matches
+                __validators__={
+                    "resolve_condition": field_validator("condition", mode="before")(
+                        _resolve_wire_condition
+                    )
+                },
             )
         )
     if not members:
@@ -1100,9 +1137,10 @@ def _batch_edit_node(item: BaseModel, dto_model: type[BaseModel], id_field: str)
     kind = item.kind  # type: ignore[attr-defined]
     if kind == "Create":
         return Create(item=request_to_dto(dto_model, item.item))  # type: ignore[attr-defined]
+    condition = getattr(item, "condition", None)
     if kind == "Update":
-        return Update(item=request_to_dto(dto_model, item.item))  # type: ignore[attr-defined]
-    return Delete(id=getattr(item, id_field))
+        return Update(item=request_to_dto(dto_model, item.item), condition=condition)  # type: ignore[attr-defined]
+    return Delete(id=getattr(item, id_field), condition=condition)
 
 
 def _project_edit_result(

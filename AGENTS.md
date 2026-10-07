@@ -244,7 +244,12 @@ lives beside the API-key code in **`src/resourcey/auth/`**:
   an out-of-scope **read** / **update** / **delete** raises `NotFoundError`
   (404) so existence is not leaked; a denied **search** / **count** `and_`-and-pushes
   the permission filter down and yields an empty page / `0` (never an error);
-  **batch_read** / **batch_edit** positions are `None`. It enters its inner
+  **batch_read** / **batch_edit** positions are `None`. For **update** /
+  **delete** (and each write node of a **batch_edit**) it folds the action's
+  permission filter into the write's own **condition** as an additional (AND)
+  constraint — so the scope is enforced by the *same* atomic write rather than
+  a read-then-write race, and a row the policy does not grant is a condition
+  miss (`None` / `False`, exactly the absent-row result). It enters its inner
   (honouring "whoever opens the storage owns its commit and close", and not
   double-closing an inner it was handed already entered, as the dependency
   opens it) and delegates `serialization_context()` so a one-time secret reveal
@@ -648,9 +653,19 @@ Four files, no `__init__.py`:
   `K`, declares the eight actions, and *is* the async context manager; a call
   before `__aenter__` raises. `search` / `count` take a standard `SearchFilter`
   tree (and `search` a `SortOrder`) as plain arguments, not a request object.
-  `batch_edit` takes a list of `Edit` nodes — a `kind`-discriminated union of
-  `Create[T]` / `Update[T]` / `Delete[K]` — so one batch can create, update,
-  *and* delete. It carries no storage: session-per-service and
+  `update` / `delete` take an optional native `SearchFilter` **condition**
+  (`update(payload, *, condition=...) -> T | None`,
+  `delete(id, *, condition=...) -> bool`): the write applies only when the
+  target row's pre-write value satisfies it, and a failed condition is
+  **indistinguishable from an absent row** — `None` / `False` — so existence is
+  not leaked. The `Edit` union's `Update` / `Delete` nodes carry the same
+  optional `condition`, so one `batch_edit` can gate each write node
+  independently. A condition is the *native* standard tree (a `SkipValidation`
+  field, so an already-built instance is not re-validated; a wire `dict` is
+  resolved by a `mode="before"` validator). `batch_edit` takes a list of `Edit`
+  nodes — a `kind`-discriminated union of `Create[T]` / `Update[T]` /
+  `Delete[K]` — so one batch can create, update, *and* delete. It carries no
+  storage: session-per-service and
   session-per-operation are both expressible and core privileges neither. The
   shared rule is *whoever opens the storage owns its commit and close; a
   resource that finds storage already in `ctx` reuses it and neither commits nor
@@ -701,9 +716,15 @@ a developer can drop straight back to SQLAlchemy.
   factory and implements the eight actions. `search` does keyset cursor
   pagination ordered by the identifier, or by a validated `sort` field (with
   the identifier as a stable tie-breaker) when one is requested; `search_filter`
-  is pushed into the `WHERE` clause before the page is taken. `batch_edit`
-  dispatches over the `Edit` union: a `Create` yields the new DTO, an `Update`
-  the updated one, and a `Delete` (or an absent id) yields `None`.
+  is pushed into the `WHERE` clause before the page is taken. A write's
+  `condition` is pushed into the same `WHERE` via `_apply_condition` (the
+  row's id plus the condition), so `update` / `delete` apply only on a match;
+  unlike `_apply_filters` it **refuses** the in-memory iteration fallback even
+  when the resource opted into it, because materialising ids then writing would
+  open a TOCTOU window — an unconvertible condition raises
+  `UnsupportedFilterError` (fail closed). `batch_edit` dispatches over the
+  `Edit` union: a `Create` yields the new DTO, an `Update` the updated one, and
+  a `Delete` (or an absent id, or a failed condition) yields `None`.
 * `sql_config.py` / `db_config.py` — `SqlConfig` (a `BaseConfig`) holds
   `sql_connections: list[DbConfig]`, parsed under the process-wide prefix as
   `APP_SQL_CONNECTIONS_<n>_NAME` / `_URL` / `_PASSWORD`. `DbConfig` is a plain
@@ -1005,6 +1026,38 @@ identifier (the tie-breaker never mirrors); and (4) a cursor is accepted only
 under the `(sort_field, ascending)` it was built for. The single-attribute model
 is unrolled over a finite row universe, as `filtering.qnt` unrolls its tree.
 
+### Conditional writes — `update` / `delete` with a `condition`
+
+`Service.update(payload, *, condition=None) -> T | None` and
+`Service.delete(id, *, condition=None) -> bool` (and the `Update` / `Delete`
+`Edit` nodes of a `batch_edit`) accept an optional native `SearchFilter`
+condition. The write applies only when the target row's **pre-write** value
+satisfies the condition; a failed condition behaves exactly like an absent row
+— `None` for update, `False` for delete — so a condition miss and a missing row
+are indistinguishable and existence does not leak. In SQL the condition is an
+extra `WHERE` clause on the write; in Mongo it is `$and`-merged into the write
+query's filter.
+
+The condition is the *native* standard tree carried as a `SkipValidation` field
+(so an already-built instance is not re-entered through the discriminated-union
+validator; a wire `dict` is resolved by the field's `mode="before"` validator).
+The authorization policy's row-scoping filter is folded in as an additional
+(AND) constraint on the same atomic write, so the scope is enforced without a
+read-then-write race and a row the policy does not grant is a condition miss.
+The transport's `batch-edit` body carries the condition as a wire field typed
+`Any` (with an explicit JSON-schema override and a `mode="before"` resolver):
+typing it as the parameterised `SearchFilter` generic breaks FastAPI's OpenAPI
+generation, which re-generates a schema for the generic base and hits
+`DiscriminatedUnionMixin`'s "no subclasses" guard.
+
+`specs/conditional_write.qnt` pins the behaviour (in `make specs` and CI): a
+holding condition applies the write; a failing one is a no-op returning the
+absent result and leaving the row unchanged; a condition miss matches an absent
+target; the policy scope is folded in (and can only *narrow*, never widen — an
+incompatible caller + policy scope is a miss); a never-satisfiable condition is
+always a miss; and a conditional `batch_edit` aligns results positionally per
+node.
+
 ### `cache` — the cache surface (issue #92)
 
 `src/resourcey/cache/` (no `__init__.py`):
@@ -1097,9 +1150,12 @@ framework-owned.
   translated to `ConflictError` — the storage-neutral 409 — so the transport
   maps it without importing the driver. `search` pushes the filter into `find`,
   appends `_id` ascending as the stable tie-breaker, and pages with the shared
-  keyset cursor (`limit + 1` to detect the next page). `batch_edit` dispatches
-  over the `Create` / `Update` / `Delete` union, refusing create / delete when
-  the resource does not declare them.
+  keyset cursor (`limit + 1` to detect the next page). A write's `condition` is
+  `$and`-merged with the `_id` match by `_write_query`, so `update` / `delete`
+  apply only on a match (`find_one_and_update` / `find_one_and_delete`); a
+  failed condition is a miss indistinguishable from an absent id. `batch_edit`
+  dispatches over the `Create` / `Update` / `Delete` union, refusing create /
+  delete when the resource does not declare them.
 * `mongo_filter_converter.py` / `mongo_sort_converter.py` — three registries
   (logical / attribute / operator) and a type-keyed sort registry, each with an
   import-time completeness assert, mirroring the SQL converters. Every operator
@@ -1247,7 +1303,10 @@ the bytes.
   create a new one. `search` / `count` have no filter or sort surface (a
   medium's listing call cannot filter or sort by declared metadata — S3's
   `ListObjectsV2` is the limiting case) and `search` omits `name` /
-  `content_type` / `checksum` for the same reason. `FileResource` mixes in
+  `content_type` / `checksum` for the same reason. `delete` accepts the shared
+  `condition` signature for service parity but **rejects** a non-`None`
+  condition (`_reject_condition`): the medium-native existence record has no
+  filterable metadata to evaluate one against. `FileResource` mixes in
   `DefaultCacheStrategyMixin`; `files` advertises writes (`create` / `delete`),
   so it resolves to `LastModifiedCacheStrategy` over `updated_at`.
 * `local_file_store.py` — the default medium (single instance, dev, tests):

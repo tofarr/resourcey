@@ -41,7 +41,6 @@ from resourcey.core.resource import Resource
 from resourcey.core.service import (
     Create,
     Delete,
-    NotFoundError,
     Service,
     ServiceError,
     Update,
@@ -380,15 +379,33 @@ class TestFiring:
             assert len(trigger.calls) == 1
 
     async def test_failed_edit_fires_nothing(self, inner: SqlResource[Any, Any]) -> None:
+        """A write that *raises* fires nothing; a miss (absent id) still fires.
+
+        Under the unified contract a miss is a successful no-write, so it is
+        passed through to the trigger (``specs/triggers.qnt``: "a delete / a miss
+        is a ``None`` result, never a missing slot"). Only a raising write fires
+        nothing.
+        """
         trigger = RecordingTrigger()
         wrapped = TriggeredResource(inner, on_edit=[trigger], background=False)
         async with await wrapped.get_service() as service:
             dto_type = wrapped.get_dto_type()
-            with pytest.raises(NotFoundError):
-                await service.update(dto_type.model_validate({"id": 99999, "title": "nope"}))
-            with pytest.raises(NotFoundError):
-                await service.delete(99999)
+            # A write that raises (an idless update is a configuration error).
+            with pytest.raises(ServiceError):
+                await service.update(dto_type.model_validate({"title": "nope"}))
         assert trigger.calls == []
+
+    async def test_a_miss_still_fires(self, inner: SqlResource[Any, Any]) -> None:
+        trigger = RecordingTrigger()
+        wrapped = TriggeredResource(inner, on_edit=[trigger], background=False)
+        async with await wrapped.get_service() as service:
+            dto_type = wrapped.get_dto_type()
+            assert (
+                await service.update(dto_type.model_validate({"id": 99999, "title": "x"})) is None
+            )
+            assert await service.delete(99999) is False
+        # One update + one delete, each fired once with a None result.
+        assert [results for _edits, results in trigger.calls] == [[None], [None]]
 
     async def test_per_trigger_isolation(
         self, inner: SqlResource[Any, Any], caplog: pytest.LogCaptureFixture

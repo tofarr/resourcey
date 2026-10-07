@@ -100,13 +100,13 @@ class ViewService(Service[T, K], Generic[T, K]):
         self._require_entered()
         return await self._inner.read(id)
 
-    async def update(self, payload: T) -> T:
+    async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
         self._require_entered()
-        return await self._inner.update(payload)
+        return await self._inner.update(payload, condition=condition)
 
-    async def delete(self, id: K) -> None:  # noqa: A002
+    async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
         self._require_entered()
-        await self._inner.delete(id)
+        return await self._inner.delete(id, condition=condition)
 
     async def search(
         self,
