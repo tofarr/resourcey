@@ -46,7 +46,7 @@ from types import UnionType
 from typing import Annotated, Any, Generic, TypeVar, Union, cast, get_args, get_origin
 from uuid import UUID
 
-from pydantic import ConfigDict, PrivateAttr, SkipValidation, field_validator
+from pydantic import BaseModel, ConfigDict, PrivateAttr, SkipValidation, field_validator
 
 from resourcey.util.models import DiscriminatedUnionMixin
 from resourcey.util.singleton import Singleton
@@ -522,14 +522,19 @@ def operators_for_annotation(annotation: Any) -> frozenset[str]:
     exposes it, and the operator set follows the field's type (equality for
     scalars, ordering for numbers and datetimes, substring for strings, and the
     ``in`` set test throughout). A non-scalar annotation (a JSON ``dict`` / list
-    column) yields **no** operators: it is not scalarly comparable, and a query
-    param of that type is not one FastAPI can wire.
+    column, or a model-typed column) yields **no** operators: it is not scalarly
+    comparable, and a query param of that type is not one FastAPI can wire.
     """
     base = _base_annotation(annotation)
     if isinstance(base, type):
         if issubclass(base, bool):
             return _EQ_ONLY
         if issubclass(base, _CONTAINER_TYPES):
+            return frozenset()
+        if issubclass(base, BaseModel):
+            # A structured payload (a model-typed column) is not scalarly
+            # comparable: there is no query-param syntax for it, so it is not
+            # filterable (matching the container case above).
             return frozenset()
         if issubclass(base, _ORDERABLE_TYPES):
             return _ORDERABLE_OPS

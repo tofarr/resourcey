@@ -351,15 +351,22 @@ class JobRunner:
         except Exception:
             logger.exception("Job %s failed unexpectedly.", job_id)
 
-    async def _invoke(self, kind: str, details: dict[str, Any]) -> JobRun:
-        """Deserialize the stored body to its concrete kind and run it.
+    async def _invoke(self, kind: str, details: Any) -> JobRun:
+        """Run the stored body — a ``JobDetails`` instance, or a legacy mapping.
 
-        A body that raises is caught and mapped to a terminal ``ERROR`` (rather
-        than crashing the runner task); an unresolvable kind (a class the process
-        has not imported) is likewise an ``ERROR``, never a silent no-op.
+        The ``job_details`` column round-trips the model, so ``details`` is
+        normally already the concrete kind. A raw mapping (an older row, or a
+        backend that stored plain JSON) is validated here. A body that raises is
+        caught and mapped to a terminal ``ERROR`` (rather than crashing the
+        runner task); an unresolvable kind (a class the process has not imported)
+        is likewise an ``ERROR``, never a silent no-op.
         """
         try:
-            body = JobDetails.model_validate({**details, "kind": kind})
+            body = (
+                details
+                if isinstance(details, JobDetails)
+                else JobDetails.model_validate({**details, "kind": kind})
+            )
         except Exception as exc:
             logger.exception("Job kind %r could not be resolved.", kind)
             return JobRun(status="ERROR", detail=f"unresolvable job kind {kind!r}: {exc}")
@@ -429,7 +436,7 @@ class JobRunner:
         payload = self._payload(
             None,
             job_details_kind=type(details).__name__,
-            job_details=details.model_dump(mode="json"),
+            job_details=details,
             status=JobStatus(status),
             run_at=run_at,
             max_attempts=(max_attempts if max_attempts is not None else self._default_max_attempts),

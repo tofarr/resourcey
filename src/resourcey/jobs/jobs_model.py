@@ -24,13 +24,15 @@ from enum import StrEnum
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, Integer, String, Uuid
+from sqlalchemy import DateTime, Integer, String, Uuid
 from sqlalchemy import Enum as SqlEnum
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.auth.auth_principal import PRINCIPAL_CTX_KEY
 from resourcey.core.dto import DtoField
 from resourcey.core.resource import Resource
+from resourcey.jobs.jobs_details import JobDetails
+from resourcey.sql.model_type import ModelType
 from resourcey.sql.session_manager import SqlSessionManager
 from resourcey.sql.sql_resource import SqlResource
 from resourcey.sql.sql_service import SqlService
@@ -106,8 +108,8 @@ class Job(JobsBase):
         job_details_kind: The concrete ``JobDetails`` kind (its class name); the
             discriminator the runner deserializes the body by. Runner-managed
             (derived from the body on create).
-        job_details: The serialized ``JobDetails`` body (JSON). Immutable once
-            created.
+        job_details: The ``JobDetails`` body, stored as JSON but exposed to the
+            ORM as the concrete kind. Immutable once created.
         status: The lifecycle status (see :class:`JobStatus`). A client may set
             only :data:`CLIENT_STATUS_VALUES`; the rest are runner-managed.
         detail: Optional human-readable status text.
@@ -135,8 +137,8 @@ class Job(JobsBase):
     job_details_kind: Mapped[str] = mapped_column(
         String(128), nullable=False, index=True, info={"dto_field": RUNNER_FIELD}
     )
-    job_details: Mapped[dict[str, Any]] = mapped_column(
-        JSON, nullable=False, info={"dto_field": DtoField(in_update_request=False)}
+    job_details: Mapped[JobDetails] = mapped_column(
+        ModelType(JobDetails), nullable=False, info={"dto_field": DtoField(in_update_request=False)}
     )
     status: Mapped[JobStatus] = mapped_column(
         SqlEnum(JobStatus, native_enum=False, length=32),
@@ -192,7 +194,10 @@ class JobsService(SqlService[Any, Any]):
         """
         updates: dict[str, Any] = {}
         details = getattr(payload, "job_details", None)
-        if isinstance(details, dict) and isinstance(details.get("kind"), str):
+        if isinstance(details, JobDetails):
+            updates["job_details_kind"] = type(details).__name__
+        elif isinstance(details, dict) and isinstance(details.get("kind"), str):
+            # Defensive: a raw mapping rather than a validated model instance.
             updates["job_details_kind"] = details["kind"]
         principal = self._ctx.get(PRINCIPAL_CTX_KEY)
         creator = getattr(payload, "creator_id", MISSING)

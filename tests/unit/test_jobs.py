@@ -208,11 +208,11 @@ def test_public_view_narrows_the_writable_status_set(jobs):
     # A runner-managed status is not accepted on the wire...
     with pytest.raises(ValidationError):
         view.get_rest_models().create_request.model_validate(
-            {"job_details": {}, "status": "RUNNING"}
+            {"job_details": {"kind": "LogJobDetails", "message": "x"}, "status": "RUNNING"}
         )
     # ...but a client-settable one is.
     ok = view.get_rest_models().create_request.model_validate(
-        {"job_details": {}, "status": "SCHEDULED"}
+        {"job_details": {"kind": "LogJobDetails", "message": "x"}, "status": "SCHEDULED"}
     )
     assert ok.status == "SCHEDULED"
     # The read model keeps the full enum, so a finished job still reads back.

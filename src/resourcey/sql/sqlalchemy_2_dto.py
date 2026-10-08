@@ -64,6 +64,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapper
 
 from resourcey.core.dto import _UNSET, DTO, DtoField, _apply_conventions
+from resourcey.sql.model_type import ModelType
 from resourcey.util.naming import singularise
 
 # The ``Column.info`` key under which a developer supplies an explicit
@@ -234,6 +235,12 @@ def _annotation_for_column(column: Any, declared: Any = None) -> Any:
     """
     if _is_secret_column(declared):
         annotation: Any = SecretStr
+    elif isinstance(column.type, ModelType):
+        # A model-typed column (``ModelType``): the annotation is the model
+        # itself, recovered from the column type (SQLAlchemy erases the type
+        # parameter to ``Any``), so the field round-trips the model and the
+        # generated request models carry its schema.
+        annotation = _model_type_of(column) or Any
     elif isinstance(column.type, JSON):
         # The SQL type says only "JSON"; the declared annotation carries the
         # container shape (``list[str]``, ``dict``, ...), so prefer it when the
@@ -244,6 +251,16 @@ def _annotation_for_column(column: Any, declared: Any = None) -> Any:
     else:
         annotation = _scalar_annotation(column.type)
     return annotation | None if column.nullable else annotation
+
+
+def _model_type_of(column: Any) -> Any:
+    """The Pydantic model a :class:`~resourcey.sql.model_type.ModelType` column binds.
+
+    Read from the column-type instance, which survives a SQLAlchemy ``copy`` (via
+    ``ModelType.copy``), so the DTO inference recovers the exact author-written
+    type even though SQLAlchemy erases the binding's type parameter to ``Any``.
+    """
+    return getattr(column.type, "model", None)
 
 
 def _declared_annotation(declared: Any) -> Any:

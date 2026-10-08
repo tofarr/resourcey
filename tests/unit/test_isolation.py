@@ -177,6 +177,7 @@ def test_the_sql_files_exist_without_an_init():
         "cursor.py",
         "db_config.py",
         "filter_converter.py",
+        "model_type.py",
         "session_manager.py",
         "sort_converter.py",
         "sql_config.py",
