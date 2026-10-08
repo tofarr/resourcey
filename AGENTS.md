@@ -779,7 +779,21 @@ a developer can drop straight back to SQLAlchemy.
   projection is inferred from the column's generation behaviour. **Plain
   columns only**: a FK column is a plain scalar field; `relationship()`s are
   not projected (a known limitation — nested projection is its own future
-  issue).
+  issue). A column typed with `ModelType` (below) keeps the bound model as the
+  field's annotation, so the generated request models carry the model's own
+  schema — for a `DiscriminatedUnionMixin`, the discriminated union of its
+  kinds, rather than a free-form object.
+* `model_type.py` — `ModelType(model, *, impl=JSON)` is a `TypeDecorator` (the
+  general-purpose, reusable answer to "a column whose Python value is a Pydantic
+  model"): binding serializes with `model_dump(mode="json")`, reading validates
+  back with `model_validate`, and `impl` defaults to `JSON` (DDL unchanged, so
+  an existing `JSON` column adopts it with no migration — `alembic check`
+  agrees). It records the bound model on the type instance (surviving
+  SQLAlchemy's `copy`), which `sqlalchemy_2_dto` reads back so the DTO field's
+  annotation is the model, and it gives a model-typed field **no** filter / sort
+  operators (`operators_for_annotation` treats a `BaseModel` like another
+  non-scalar container), so the transport never synthesises a query param for a
+  structured payload.
 * `cursor.py` — the SQL keyset `WHERE` predicate (`keyset_predicate`); it
   re-exports the storage-agnostic cursor *codec* (`encode_cursor` /
   `decode_cursor`) from `util/cursor.py` so the tamper-proof encoding is
@@ -1719,7 +1733,10 @@ layers (`core` / `sql` / `config` / `auth` for the principal key / `util`):
   body reports; a body that raises is mapped to `ERROR` by the runner.
 * `jobs_model.py` — the **`Job`** ORM model + `JobsBase` + the resources.
   Columns: `id` (`uuid4`), `job_details_kind` (the discriminator), `job_details`
-  (JSON), `status` (`JobStatus` = `PENDING` / `SCHEDULED` / `RUNNING` /
+  (a `ModelType(JobDetails)` column — typed as the model, stored as JSON, so a
+  row round-trips the concrete `JobDetails` *kind* and the generated request
+  models carry the discriminated-union schema), `status` (`JobStatus` =
+  `PENDING` / `SCHEDULED` / `RUNNING` /
   `COMPLETED` / `ERROR` / `CANCELLED`), `detail`, `run_at`, `claimed_by` /
   `claimed_at` (the claim), `attempts` / `max_attempts` / `max_seconds_for_run`
   (the retry / recovery bound), `creator_id` (the `Owner` field), and the

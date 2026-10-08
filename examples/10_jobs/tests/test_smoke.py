@@ -55,3 +55,15 @@ def test_public_view_hides_runner_managed_fields() -> None:
     assert read_status == JobStatus
     create_status = view.get_rest_models().create_request.model_fields["status"].annotation
     assert create_status == CLIENT_STATUS_TYPE
+
+
+async def test_openapi_exposes_the_job_details_union(wired: tuple) -> None:
+    """The stored ``JobDetails`` body is documented as its discriminated union."""
+    app = wired[2]
+    schemas = app.openapi()["components"]["schemas"]
+    create_props = schemas["JobViewCreateRequest"]["properties"]
+    assert create_props["job_details"] == {"$ref": "#/components/schemas/JobDetails"}
+    union = schemas["JobDetails"]
+    assert union["discriminator"]["propertyName"] == "kind"
+    referenced = {option["$ref"].rsplit("/", 1)[-1] for option in union["oneOf"]}
+    assert {"EchoJobDetails", "SlowJobDetails", "BoomJobDetails"} <= referenced

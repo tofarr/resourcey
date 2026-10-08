@@ -9,6 +9,7 @@ resulting resource round-tripping the standard actions.
 
 from __future__ import annotations
 
+from abc import ABC
 from collections.abc import AsyncIterator
 from datetime import date, datetime, time
 from enum import StrEnum
@@ -42,8 +43,10 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from resourcey.core.dto import DtoField
 from resourcey.encryption.encryption_config import EncryptionKeyConfig, EncryptionKeysConfig
 from resourcey.encryption.encryption_service import EncryptionService
+from resourcey.sql.model_type import ModelType
 from resourcey.sql.sql_resource import SqlResource
 from resourcey.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
+from resourcey.util.models import DiscriminatedUnionMixin
 
 
 class Kind(StrEnum):
@@ -730,5 +733,95 @@ async def test_generated_uuid_id_is_used_on_insert():
         async with maker() as session, await resource.get_service(resource_ctx(session)) as service:
             created = await service.create(dto(label="n"))
             assert isinstance(created.id, UUID)
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# ModelType — a column typed as a Pydantic model
+# ---------------------------------------------------------------------------
+
+
+class Envelope(DiscriminatedUnionMixin, ABC):
+    """An abstract, polymorphic payload for the ``ModelType`` tests."""
+
+
+class PingEnvelope(Envelope):
+    label: str
+
+
+class PongEnvelope(Envelope):
+    count: int = 0
+
+
+class Node(AdoptedBase):
+    """A model with a typed payload column and a nullable one."""
+
+    __tablename__ = "model_type_nodes"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    payload: Mapped[Envelope] = mapped_column(ModelType(Envelope))
+    optional_payload: Mapped[Envelope | None] = mapped_column(ModelType(Envelope), nullable=True)
+
+
+def test_model_type_column_infers_the_model_annotation():
+    dto = sqlalchemy_2_dto(Node)
+    # A model-typed column's field annotation is the model itself.
+    assert dto.get_rest_models().create_request.model_fields["payload"].annotation is Envelope
+    # A nullable model column widens the annotation with ``None``.
+    assert dto.get_rest_models().read_response.model_fields["optional_payload"].annotation == (
+        Envelope | None
+    )
+
+
+def test_model_type_column_carries_the_union_schema_on_the_wire():
+    schema = sqlalchemy_2_dto(Node).get_rest_models().create_request.model_json_schema()
+    assert schema["properties"]["payload"] == {"$ref": "#/$defs/Envelope"}
+    assert {"PingEnvelope", "PongEnvelope"} <= set(schema["$defs"])
+    assert schema["$defs"]["Envelope"]["discriminator"]["propertyName"] == "kind"
+
+
+def test_model_type_field_has_no_filter_operators():
+    # A structured payload is not scalarly comparable, so the transport must not
+    # synthesize a query param for it.
+    from resourcey.util.search_filter import operators_for_annotation
+
+    assert operators_for_annotation(Envelope) == frozenset()
+    assert operators_for_annotation(Envelope | None) == frozenset()
+
+
+def test_model_type_passes_through_raw_values_and_copies():
+    column_type = ModelType(Envelope)
+    # A raw mapping is bound verbatim (a legacy / direct-SQL write).
+    assert column_type.process_bind_param({"kind": "PingEnvelope", "label": "x"}, None) == {
+        "kind": "PingEnvelope",
+        "label": "x",
+    }
+    assert column_type.process_bind_param(None, None) is None
+    # An already-validated result is returned as-is; ``None`` stays ``None``.
+    instance = PingEnvelope(label="x")
+    assert column_type.process_result_value(instance, None) is instance
+    assert column_type.process_result_value(None, None) is None
+    # ``copy`` (a SQLAlchemy column-type clone) preserves the bound model.
+    clone = column_type.copy()
+    assert isinstance(clone, ModelType)
+    assert clone.model is Envelope
+
+
+async def test_model_type_round_trips_an_instance_through_sqlite():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    resource = SqlResource(Node, session_factory=maker)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(AdoptedBase.metadata.create_all)
+        dto = resource.get_dto_type()
+        async with maker() as session, await resource.get_service(resource_ctx(session)) as service:
+            created = await service.create(dto(payload=PingEnvelope(label="hi")))
+            assert created is not None
+            read = await service.read(created.id)
+            assert isinstance(read.payload, PingEnvelope)
+            assert read.payload.label == "hi"
+            assert read.optional_payload is None
     finally:
         await engine.dispose()
