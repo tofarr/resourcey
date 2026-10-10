@@ -115,7 +115,23 @@ curl -i -X POST http://localhost:8083/threads \
 
 # With no key → 401.
 curl -i http://localhost:8083/threads
+
+# Who am I? → the authenticated principal, OIDC UserInfo shaped.
+curl -H 'X-API-Key: example-api-key' http://localhost:8083/me
+# {"sub":"00000000-0000-0000-0000-000000000001","kind":"service",
+#  "roles":[],"scopes":[]}
 ```
+
+## The `me` endpoint (who am I?)
+
+`register_me_routes` mounts `GET` / `POST /me` **after** `create_app`, reading
+the same authenticator the builder uses, so it accepts whatever credential the
+app configured. The body is an [OIDC UserInfo](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo)
+object: `sub` is the caller's internal principal id (always present), plus
+`kind` / `roles` / `scopes` (and `external_id` for an external-IdP caller). An
+**absent or invalid** credential is a `401` — `me` has no anonymous meaning,
+even under an `OPTIONAL` posture. This example has no user store, so no profile
+claims are added.
 
 ## How it works
 

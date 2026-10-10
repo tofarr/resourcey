@@ -55,6 +55,7 @@ from resourcey.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.auth.auth_config import ApiKeysConfig
+from resourcey.auth.auth_me_routes import register_me_routes
 from resourcey.core.manifest import Manifest
 from resourcey.core.resource import Resource
 from resourcey.http.app import create_app
@@ -110,7 +111,12 @@ def build_app(
         ],
         managers=[manager],
     )
-    return manifest, create_app(manifest, dependency_builder=builder)
+    app = create_app(manifest, dependency_builder=builder)
+    # The `me` endpoint (issue #150) exposes the authenticated principal in the
+    # OIDC UserInfo shape; this example has no user store, so the body carries
+    # only the principal (``sub`` + kind/roles/scopes).
+    register_me_routes(app, authenticator=builder.authenticator)
+    return manifest, app
 
 
 manifest, app = build_app()

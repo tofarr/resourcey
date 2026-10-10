@@ -33,6 +33,7 @@ from resourcey.auth.auth_api_key import (
 )
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.auth.auth_me_routes import register_me_routes
 from resourcey.core.manifest import Manifest
 from resourcey.http.app import create_app
 from resourcey.sql.sql_resource import SqlResource
@@ -45,7 +46,12 @@ def _keys(*values: str) -> ApiKeysConfig:
     """A key list as the environment would supply it (ids are placeholders)."""
     return ApiKeysConfig(
         api_keys=[
-            ApiKeyConfig(id=f"k{i}", name=None, key=SecretStr(value))
+            ApiKeyConfig(
+                id=f"k{i}",
+                name=None,
+                key=SecretStr(value),
+                principal_id="00000000-0000-0000-0000-000000000001",
+            )
             for i, value in enumerate(values)
         ]
     )
@@ -74,6 +80,9 @@ async def app() -> AsyncIterator[FastAPI]:
 
     manifest, builder = _manifest(maker, _keys(_API_KEY))
     built: FastAPI = create_app(manifest, dependency_builder=builder)
+    # Mirror the shipped `build_app`: mount the `me` endpoint over the same
+    # authenticator (no user store in this example).
+    register_me_routes(built, authenticator=builder.authenticator)
     # ASGITransport does not run the lifespan; enter the manifest manually so the
     # resources' runtime lifecycle is active for the requests below.
     await manifest.__aenter__()
@@ -174,3 +183,21 @@ def test_build_auth_wires_the_api_key_builder() -> None:
     builder, _view = build_auth(_keys(_API_KEY))
     assert isinstance(builder, AuthorizedDependencyBuilder)
     assert isinstance(builder.authenticator, ApiKeyAuthenticator)
+
+
+async def test_me_returns_the_service_principal(client: AsyncClient) -> None:
+    """`GET /me` (issue #150) returns the authenticated key's principal.
+
+    This example has no user store, so the body carries only the principal; the
+    config key's PRINCIPAL_ID gives `sub` a stable value.
+    """
+    resp = await client.get("/me", headers={API_KEY_HEADER_NAME: _API_KEY})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sub"] == "00000000-0000-0000-0000-000000000001"
+    assert body["kind"] == "service"
+
+
+async def test_me_requires_a_credential(client: AsyncClient) -> None:
+    assert (await client.get("/me")).status_code == 401
+    assert (await client.get("/me", headers={API_KEY_HEADER_NAME: "nope"})).status_code == 401

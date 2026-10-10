@@ -219,7 +219,8 @@ inner `SqlResource`, the config-list inner `ListResource`, the exposed
 the OAuth / OIDC method (issue #151) in `auth_oauth.py` / `auth_oauth_client.py`
 / `auth_oauth_config.py` / `auth_oauth_provider.py` / `auth_oauth_routes.py` /
 `auth_oauth_service.py` / `auth_oauth_setup.py` / `auth_oauth_token.py` (see the
-OAuth section below).
+OAuth section below), plus the `me` endpoint (issue #150) in
+`auth_me_routes.py` (see the `me` section below).
 It imports only the lower framework layers, and `http` must not import `auth`
 (the app supplies the builder), so no cycle exists.
 
@@ -559,6 +560,47 @@ selects the client, `aud` is scoped to that row, a token failing `iss` / `aud` /
 allowlist (no HMAC confusion), an unmapped `(iss, sub)` is fail-closed, the local
 user store is authoritative (a disabled / missing user ⇒ invalid), and absent is
 not invalid. `examples/07_oauth` is the runnable app.
+
+### `auth` the `me` endpoint (issue #150)
+
+`auth_me_routes.py` mounts a "who am I?" endpoint over the **same**
+`Authenticator` seam the rest of `auth` uses, so it works uniformly across the
+API-key, cookie, and OAuth methods with no method-specific code. It is a
+`register_me_routes(app, *, authenticator, user_resource=None, path="me",
+methods=("GET", "POST"))` free function mounted **after** `create_app` (the
+`06_filestore` / `07_oauth` / `08_webhooks` pattern) — a "who am I" response is
+not one of the eight standard resource actions, and the app owns the
+authenticator the route must agree with.
+
+The response is an **OIDC UserInfo**-shaped JSON object (`specs/me.qnt`):
+
+* **`sub`** — the caller's internal principal id, as a string, **always
+  present** (the OIDC UserInfo `sub` requirement). It is the *local* user the
+  credential maps to — the same value a session cookie's `sub` carries — never
+  the provider's opaque `external_id`.
+* **`external_id`** — the provider subject, carried alongside the internal id;
+  present only for an external-IdP caller.
+* **`kind`** / **`roles`** / **`scopes`** — the framework's extension over the
+  OIDC claim set, straight off the `Principal` (`kind` lowercased; `roles` /
+  `scopes` sorted lists).
+* **profile claims** (`email`, `preferred_username`, `name`, …) — read from the
+  caller's **own** row of `user_resource` (a `Resource`), used only when the row
+  carries a non-`None` value; an unavailable claim is **omitted**, never `null`
+  (OIDC's "claims the OP does not have are omitted"). No `user_resource` means no
+  profile claims (the credential-only posture of examples 01-03).
+
+Authorization is the crux, and the spec pins it: the route reads the row through
+the resource's **own** service rather than through any `AuthorizedService`, so it
+is **not** gated by the `users` policy (an admin-only `users` surface must not
+stop a caller seeing its own `me`), and it reads **only** the caller's own id —
+never a client-named one — so it can only return the identity the credential
+already proved (no privilege escalation; a missing row yields `sub` alone, not a
+`404`). It depends on the **strict** principal dependency
+(`required_principal(authenticator)`, the same one the transport adds), so an
+absent or invalid credential is a `401` regardless of the builder's posture —
+`me` has no anonymous meaning. `specs/me.qnt` pins the self-only read, the
+unauthenticated `401`, the always-present `sub`, the omitted-not-null claim
+rule, and that the result is independent of the `users` read grant.
 
 ### Storage backends and the shared paging base
 
