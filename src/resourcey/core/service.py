@@ -35,6 +35,7 @@ from __future__ import annotations
 import enum
 from abc import ABC
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Annotated, Any, Generic, TypeVar
 
 from pydantic import SkipValidation, field_validator
@@ -112,11 +113,11 @@ class CacheStrategy:
 
     Concrete strategies live in ``resourcey.cache``; ``core`` deliberately
     does not depend on them. A migrated resource supplies its own strategy and
-    the transport layer interprets it. The two methods below are the whole
-    transport-facing contract a concrete strategy must satisfy: a header for a
-    list of read models, and one for a bare count. Both return ``None`` here
-    (no caching), and both are typed ``Any`` so ``core`` stays free of the
-    concrete ``CacheHeader`` type.
+    the transport layer interprets it. The methods below are the whole contract a
+    concrete strategy must satisfy: a header for a list of read models, one for a
+    bare count, and the *programmatic* freshness question (whether a cached copy
+    a server-side cache holds is still good). All three are typed ``Any`` /
+    primitive so ``core`` stays free of the concrete ``CacheHeader`` type.
     """
 
     def get_cache_header(self, models: list[Any], *, context: dict[str, Any] | None = None) -> Any:
@@ -126,6 +127,23 @@ class CacheStrategy:
     def count_cache_header(self, count: int, filters: Any = None) -> Any:
         """Compute a cache header for a bare ``count`` result (default: none)."""
         return None
+
+    async def should_read(
+        self,
+        read_at: datetime | None = None,
+        etag: str | None = None,
+    ) -> bool:
+        """Whether a fresh read from the source is required (default: always).
+
+        The *programmatic* counterpart to the HTTP-facing header methods: a
+        server-side cache asks "is the copy I hold still good?" and re-reads the
+        source only when this returns ``True``. ``read_at`` is when the cache
+        entry was written and ``etag`` the validator it holds. Async so a
+        strategy that must consult storage can without a later signature change.
+
+        The base returns ``True`` — no policy, so always read.
+        """
+        return True
 
 
 @dataclass

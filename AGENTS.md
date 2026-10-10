@@ -1111,7 +1111,32 @@ node.
   projection; `count_cache_header(count, filters)` handles the bare-integer
   `count` route (a count-derived ETag; never last-modified). The optimistic
   strategy overrides `count_cache_header` to return freshness only, so it emits
-  no validator on **any** route — the read and count routes agree.
+  no validator on **any** route — the read and count routes agree. Each strategy
+  also answers the *programmatic* freshness question (issue #168),
+  `should_read(read_at, etag)`: `Optimistic` is a pure time check (good while
+  `read_at` is within `expire_in`, so a wrapper serves from memory with no source
+  contact), while `LastModified` / `ETag` return `True` — Last-Modified needing
+  the source's current `updated_at` (a cheap metadata read) and ETag degenerating
+  to read-then-compare (the tag is a content hash). The `core` placeholder and
+  the `cache` base both return `True` (no policy ⇒ always read).
+* `cache_store.py` — the pluggable cache medium for a server-side wrapper
+  (issue #168): `CacheStore` (a `DiscriminatedUnionMixin`) with `get` / `set` /
+  `delete` / `clear(prefix)` and its in-memory default `InMemoryCacheStore`.
+  `CacheEntry` carries the `payload`, the `read_at` freshness stamp, and an
+  optional `etag`.
+* `cached_resource.py` / `cached_service.py` — `CachedResource` (issue #168),
+  the read-through wrapper: it delegates every observable surface to the inner
+  resource (schema / actions / query-sort / cache policy / registration /
+  lifecycle, `get_exposed_resource()` returning `self` so the wrapper's service
+  is the one registered) and wraps the inner service in `CachedService`, which
+  serves `read` / `search` / `count` / `batch_read` from the store while the
+  strategy's `should_read` says the copy is fresh and refills on `True`; every
+  write (`create` / `update` / `delete` / `batch_edit`) evicts the resource's
+  entries. A caller-scoped response (`response_is_private()` from the wrapper's
+  `private=` flag **or** an `Owner`-scoped inner service) is **never** stored —
+  sharing a principal-narrowed body across callers would be an authorization
+  leak — so such a service always reads through. `specs/cache_freshness.qnt`
+  pins the per-strategy freshness decision.
 * `cache_defaults.py` — the storage-agnostic default policy.
   `default_cache_strategy(rest_models, supported_actions)` selects, in order: a
   **read-only** resource (one advertising none of the write actions) →
