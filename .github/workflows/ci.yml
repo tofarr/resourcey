@@ -78,6 +78,8 @@ jobs:
         run: quint test specs/jobs.qnt --main=jobs --match "^(claimSingleWinner|claimNeedsRunnable|terminalSticky|completionOnlyIfOwner|attemptCap|staleRecoverable|scheduleAndRunnerGates)$"
       - name: Run realtime spec tests
         run: quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$"
+      - name: Run me spec tests
+        run: quint test specs/me.qnt --main=me --match "^(absentIsUnauthenticatedTest|invalidIsUnauthenticatedTest|authenticatedGetsOkTest|subIsAlwaysPresentTest|profileClaimOmissionTest|selfOnlyTest|notGatedByUsersGrantTest|invariantsHold)$"
       - name: Check invariants
         run: |
           quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100

@@ -23,6 +23,7 @@ from resourcey.auth.auth_api_key import (
 )
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
 from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.auth.auth_me_routes import register_me_routes
 from resourcey.auth.auth_role import AppRole, role_key
 from resourcey.core.manifest import Manifest
 from resourcey.http.app import create_app
@@ -70,6 +71,9 @@ async def app() -> AsyncIterator[FastAPI]:
         ]
     )
     built: FastAPI = create_app(manifest, dependency_builder=builder)
+    # Mirror the shipped `build_app`: mount the `me` endpoint over the same
+    # authenticator and user store.
+    register_me_routes(built, authenticator=builder.authenticator, user_resource=users_inner)
     await manifest.__aenter__()
     try:
         yield built
@@ -121,6 +125,26 @@ async def test_user_resource_is_read_only_in_the_openapi_schema(client: AsyncCli
     paths = schema["paths"]
     assert set(paths["/users"]) == {"get"}
     assert set(paths["/users/{id}"]) == {"get"}
+
+
+async def test_me_serves_the_callers_own_principal(client: AsyncClient) -> None:
+    """`me` (issue #150) returns the caller's own row, though `/users` is
+    admin-only — a USER that cannot read `GET /users/{id}` can still read `me`."""
+    headers = {API_KEY_HEADER_NAME: USER_KEY}
+    # The admin-only users surface denies a USER (empty page)...
+    assert (await client.get("/users", headers=headers)).json()["items"] == []
+    # ...but `me` resolves the caller's own stored row.
+    body = (await client.get("/me", headers=headers)).json()
+    assert body["sub"] == str(USER_ID)
+    assert body["roles"] == ["USER"]
+    assert body["email"] == "user@example.com"
+    assert body["preferred_username"] == "user"
+
+
+async def test_me_requires_a_credential(client: AsyncClient) -> None:
+    """Despite the OPTIONAL posture (anonymous reads), `me` is strict."""
+    assert (await client.get("/me")).status_code == 401
+    assert (await client.get("/me", headers={API_KEY_HEADER_NAME: "nope"})).status_code == 401
 
 
 async def test_roles_are_not_leaked_on_the_key_resource(client: AsyncClient) -> None:

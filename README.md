@@ -294,6 +294,23 @@ per-app role vocabulary (`RolePolicyResolver`) and a store-backed RBAC resolver
 action: a denied create is `403`, an out-of-scope read/update/delete is `404`,
 and a denied search/count yields an empty page / `0`.
 
+### Who am I — the `me` endpoint
+
+`register_me_routes(app, authenticator=..., user_resource=...)` (issue #150)
+mounts `GET` / `POST /me` **after** `create_app`, reading the same `Authenticator`
+the app's builder uses, so it works uniformly across the API-key, cookie, and
+OAuth methods. The response is an [OIDC UserInfo](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo)
+object: `sub` (the caller's internal principal id — always present), plus the
+framework's `kind` / `roles` / `scopes` and, for an external-IdP caller,
+`external_id`. When a `user_resource` is supplied, the caller's **own** row adds
+profile claims (`email`, `preferred_username`, …); an unavailable claim is
+omitted, never `null`. The route reads that row directly (not through the
+`users` policy) and can only ever return the id the credential already proved, so
+an admin-only `users` surface does not block a caller from seeing its own `me`.
+It is guarded by the **strict** principal dependency: an absent or invalid
+credential is a `401` regardless of the builder's posture. See
+[`examples/04_simple_roles`](examples/04_simple_roles) / [`07_oauth`](examples/07_oauth).
+
 ### OAuth / OIDC (external identity providers)
 
 The OAuth method (issue #151) federates to an external IdP. `OAuthAuthenticator`

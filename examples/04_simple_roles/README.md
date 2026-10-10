@@ -122,7 +122,29 @@ curl -H 'X-API-Key: user-key' -X PATCH localhost:8084/messages/1 \
 # only the admin sees the stored principals; everyone else gets an empty page
 curl -H 'X-API-Key: admin-key' localhost:8084/users
 curl -H 'X-API-Key: user-key'  localhost:8084/users   # {"items": []}
+
+# ...but every caller can read its OWN row at /me (OIDC UserInfo shape)
+curl -H 'X-API-Key: user-key' localhost:8084/me
+# {"sub":"11111111-...","kind":"service","roles":["USER"],"scopes":[],
+#  "email":"user@example.com","preferred_username":"user"}
 ```
+
+## The `me` endpoint (who am I?)
+
+`register_me_routes` mounts `GET` / `POST /me` **after** `create_app`, reading
+the same authenticator and user store. The body is an
+[OIDC UserInfo](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo)
+object: `sub` is the caller's internal principal id (always present), plus
+`kind` / `roles` / `scopes`, and — when a `user_resource` is supplied — profile
+claims (`email`, `preferred_username`, …) read from the caller's **own** row.
+An unavailable claim is **omitted**, never `null`.
+
+Crucially, `me` reads that row through the resource's own service, **not** the
+admin-only `users` policy: a `USER` that gets an empty page from
+`GET /users` (and a `404` from `GET /users/{id}`) can still read its own `me`.
+The route only ever returns the id the credential already proved, so it is not
+an escalation. An absent or invalid credential is a `401` — `me` is strict even
+though reads here run under the `OPTIONAL` posture.
 
 ## Run it
 
