@@ -120,6 +120,27 @@ class CacheStrategy(DiscriminatedUnionMixin, CoreCacheStrategy, ABC, Generic[T])
         """
         raise NotImplementedError
 
+    async def should_read(
+        self,
+        read_at: datetime | None = None,
+        etag: str | None = None,
+    ) -> bool:
+        """Whether a fresh read from the source is required (default: always).
+
+        The *programmatic* freshness question a server-side cache asks: given
+        when its entry was written (``read_at``) and the validator it holds
+        (``etag``), does it need to hit the source again? ``True`` = re-read (the
+        copy is stale), ``False`` = the cached copy is still good. Async so a
+        strategy that must consult storage can, without a signature change later.
+
+        The base reads every time (a policy that says nothing cannot prove
+        freshness), and each shipped strategy overrides it: optimistic is a pure
+        time check, last-modified compares the source's ``updated_at``, and ETag
+        degenerates to read-then-compare. A missing ``read_at`` (an empty cache)
+        always reads.
+        """
+        return True
+
     def count_cache_header(self, count: int, filters: Any = None) -> CacheHeader:
         """A count-derived header for the ``count`` route.
 
@@ -175,6 +196,11 @@ class ETagCacheStrategy(CacheStrategy[T]):
     ``model_dump(mode="json", exclude_unset=False, context=context)`` sorted
     by key, concatenated over the list in order. No ``updated_at`` is
     produced.
+
+    :meth:`should_read` **cannot avoid the source read**: the tag is a hash of
+    the content, so deciding whether the cached copy is current means reading
+    the content and comparing. It saves materialisation / diffing and the
+    network transfer of an equal body, not the round trip.
     """
 
     def get_cache_header(
@@ -194,6 +220,19 @@ class ETagCacheStrategy(CacheStrategy[T]):
             parts.append(b"\n")
         return self.with_expiry(CacheHeader(etag=f'"{_digest(parts)}"'))
 
+    async def should_read(
+        self,
+        read_at: datetime | None = None,
+        etag: str | None = None,
+    ) -> bool:
+        """Always ``True``: an ETag cannot be decided without reading the source.
+
+        The validator is a hash of the content, so a server-side cache holding it
+        still has to fetch the body to recompute and compare — this degenerates
+        to read-then-compare, not a read-free freshness check.
+        """
+        return True
+
 
 class LastModifiedCacheStrategy(CacheStrategy[T]):
     """Last-Modified strategy: ``max(item.updated_at)`` over the list.
@@ -201,6 +240,14 @@ class LastModifiedCacheStrategy(CacheStrategy[T]):
     The value is taken from the resource's ``updated_at`` read-model field.
     Items missing ``updated_at`` contribute ``datetime.min`` (they do not
     advance the max). No ``etag`` is produced.
+
+    :meth:`should_read` **cannot decide from the signature alone**: deciding
+    whether the cached copy is current means comparing the source's *current*
+    ``updated_at`` against the entry's ``read_at``, and that current value is not
+    one of the parameters, so it must come from a cheap source read (metadata /
+    a ``HEAD``-style call). The strategy therefore reports ``True`` (the wrapper
+    must consult the source) — the same "read required" answer as ETag, but where
+    ETag needs the full body, this one needs only the source's timestamp.
     """
 
     def get_cache_header(
@@ -222,6 +269,19 @@ class LastModifiedCacheStrategy(CacheStrategy[T]):
                 latest = updated
         return self.with_expiry(CacheHeader(updated_at=latest))
 
+    async def should_read(
+        self,
+        read_at: datetime | None = None,
+        etag: str | None = None,
+    ) -> bool:
+        """Always ``True``: freshness needs the source's current ``updated_at``.
+
+        That value is not carried by the signature, so a caller holding only
+        ``read_at`` / ``etag`` cannot prove the copy current and must read the
+        source's timestamp — cheaper than a full read, but still a source contact.
+        """
+        return True
+
 
 class OptimisticCacheStrategy(CacheStrategy[T]):
     """Optimistic strategy: only a freshness window, no validators.
@@ -229,6 +289,10 @@ class OptimisticCacheStrategy(CacheStrategy[T]):
     ``expire_in`` is required to be ``> 0``. The HTTP layer emits
     ``Cache-Control: max-age=<expire_in>`` and ``Expires`` but no validators,
     so a client may serve a stale copy without revalidating within the window.
+
+    :meth:`should_read` is the pure **time check** the strategy already encodes:
+    the copy is good while ``read_at`` is within ``expire_in`` of now, and stale
+    once it is not — no source contact at all.
     """
 
     @model_validator(mode="after")
@@ -252,3 +316,22 @@ class OptimisticCacheStrategy(CacheStrategy[T]):
         the read routes.
         """
         return self.with_expiry(CacheHeader())
+
+    async def should_read(
+        self,
+        read_at: datetime | None = None,
+        etag: str | None = None,
+    ) -> bool:
+        """Whether the copy is older than the freshness window — a pure time check.
+
+        ``False`` (the copy is good) while ``read_at`` is within ``expire_in``
+        seconds of now, ``True`` once it is not. An absent ``read_at`` (an empty
+        cache) always reads. No source contact — this is why optimistic is the
+        strategy a caching wrapper can serve from memory without hitting the
+        source at all.
+        """
+        if read_at is None:
+            return True
+        if read_at.tzinfo is None:
+            read_at = read_at.replace(tzinfo=UTC)
+        return utc_now() - read_at >= timedelta(seconds=self.expire_in)
