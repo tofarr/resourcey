@@ -1,51 +1,31 @@
 """``WebhookTrigger`` — the framework's own HTTP-delivering ``Trigger`` (issue #155).
 
-:mod:`~resourcey.triggers.trigger` ships only the abstract ``Trigger``
-contract; this module is the generic, concrete webhook sender built on top of
-it — the framework's answer to "notify an external system over HTTP when rows
-change". It is deliberately kept behind the ``httpx`` import: building a real
-client without the ``webhooks`` extra (``resourcey[webhooks]``) raises an
-actionable :class:`ImportError`, the same lazy-import shape
-:class:`~resourcey.filestore.s3_file_store.S3FileStore` uses for ``boto3`` —
-so no HTTP client becomes a mandatory framework dependency merely because an
-app wants to attach one trigger.
+The generic, concrete webhook sender: the framework's answer to "notify an
+external system over HTTP when rows change". It is kept behind the ``httpx``
+import: building a real client without the ``webhooks`` extra raises an
+actionable ``ImportError``, the same lazy-import shape ``S3FileStore`` uses for
+``boto3``.
 
-A ``WebhookTrigger`` carries exactly three delivery-shaping fields:
+A ``WebhookTrigger`` carries three delivery-shaping fields:
 
-* ``url`` — **required, no default**. A webhook with no destination would
-  silently deliver nowhere, so the one field that determines where every
-  request goes must be supplied explicitly.
-* ``headers`` — a list of :class:`WebhookHeader` (``name`` + a
-  :class:`~pydantic.SecretStr` ``value``), sent with every request. A typical
-  use is a signing secret or bearer token the receiving endpoint checks;
-  ``SecretStr`` keeps it redacted from default serialization / ``repr`` /
-  logging, the same convention :class:`~resourcey.sql.db_config.DbConfig`'s
-  ``password`` and :class:`~resourcey.auth.auth_config.ApiKeyConfig`'s ``key``
-  use.
-* ``retry`` — a polymorphic :class:`RetryStrategy` (default
-  :class:`NoRetry`, i.e. a single attempt). A deployment opts into retries
-  explicitly rather than the framework silently retrying (or not) on its
-  behalf.
+* ``url`` — **required, no default**: a webhook with no destination would
+  silently deliver nowhere.
+* ``headers`` — a list of :class:`WebhookHeader`, sent with every request; a
+  ``SecretStr`` value keeps it redacted from serialization / ``repr`` / logging.
+* ``retry`` — a polymorphic ``RetryStrategy`` (default ``NoRetry``).
 
-``callback`` fires once per edit operation (never per item — see the
-``Trigger`` docstring), ``POST``-ing a JSON array of ``{"kind", "item"/"id",
-"result"}`` records, one per ``(edit, result)`` pair, aligned exactly with
-``edits`` / ``results``. A non-2xx response or a transport error is retried
-per ``retry.delays()``; exhausting every attempt re-raises the last error,
-which :class:`~resourcey.triggers.trigger_runner.TriggerRunner` isolates and
-logs — this trigger raising never stops another configured trigger, and never
-fails the request that triggered it (see ``triggered_service.py``).
+``callback`` fires once per edit operation, ``POST``-ing a JSON array of
+``{"kind", "item"/"id", "result"}`` records aligned exactly with ``edits`` /
+``results``. A non-2xx response or a transport error is retried per
+``retry.delays()``; exhausting every attempt re-raises the last error, which
+``TriggerRunner`` isolates and logs.
 
-An explicit ``client=`` constructor argument (mirroring ``S3FileStore``) lets
-a caller inject its own HTTP client — a real one pointed at a non-default
-transport, or a test double — so delivery is testable without a real socket.
-:meth:`WebhookTrigger.bind_client` is the escape hatch for the rarer case
-where that client can only be built *after* the trigger already exists (e.g.
-a client bound to the very app the trigger will notify, which cannot exist
-before the app does — see ``examples/08_webhooks``).
+An explicit ``client=`` lets a caller inject its own HTTP client so delivery is
+testable without a real socket. :meth:`WebhookTrigger.bind_client` is the escape
+hatch for when that client can only be built *after* the trigger exists.
 
-This module is part of ``resourcey.triggers``; it imports only lower
-framework layers (``core`` / ``util``), plus its sibling :mod:`trigger`.
+This module is part of ``resourcey.triggers``; it imports only lower framework
+layers, plus its sibling ``trigger``.
 """
 
 from __future__ import annotations
@@ -64,12 +44,8 @@ from resourcey.util.models import DiscriminatedUnionMixin
 class WebhookHeader(BaseModel):
     """One HTTP header a :class:`WebhookTrigger` sends with every request.
 
-    Attributes:
-        name: The header name (e.g. ``"X-Webhook-Secret"``, ``"Authorization"``).
-        value: The header's plaintext, read as a :class:`~pydantic.SecretStr`
-            so it is redacted by default serialization / ``repr`` / logging —
-            only this trigger's own delivery code reads the plaintext (via
-            :meth:`~pydantic.SecretStr.get_secret_value`).
+    The value is a ``SecretStr`` so it is redacted from serialization / ``repr`` /
+    logging; only the trigger's delivery code reads the plaintext.
     """
 
     name: str
@@ -79,10 +55,8 @@ class WebhookHeader(BaseModel):
 class RetryStrategy(DiscriminatedUnionMixin, ABC):
     """Abstract, polymorphic retry policy for a :class:`WebhookTrigger` delivery.
 
-    :meth:`delays` is the whole contract: the number of seconds to sleep
-    before each *retry* attempt (never the first). An empty list means the
-    first attempt is the only attempt; a list of length ``n`` means up to
-    ``n`` retries after an initial failure, so up to ``n + 1`` attempts total.
+    :meth:`delays` is the whole contract: the seconds to sleep before each
+    *retry* attempt (never the first). An empty list means a single attempt.
     """
 
     @abstractmethod
@@ -168,9 +142,7 @@ def _json_safe(value: Any) -> Any:
 def _edit_payload(edit: Create[Any] | Update[Any] | Delete[Any], result: Any) -> dict[str, Any]:
     """One wire record for a single ``(edit, result)`` pair.
 
-    ``create`` / ``update`` carry the client's ``item`` alongside the
-    service's ``result`` (``None`` on a miss); ``delete`` carries only the
-    target ``id`` — there is no item and the result is always ``None``.
+    ``delete`` carries only the target ``id``; there is no item.
     """
     if isinstance(edit, Delete):
         return {"kind": "delete", "id": _json_safe(edit.id)}
@@ -181,9 +153,8 @@ def _edit_payload(edit: Create[Any] | Update[Any] | Delete[Any], result: Any) ->
 class WebhookTrigger(Trigger[Any, Any]):
     """Delivers edit-event notifications to ``url`` over HTTP, with configurable retry.
 
-    See the module docstring for the field contract and the wire payload
-    shape. ``timeout_seconds`` bounds a single delivery attempt (not the
-    whole retry sequence).
+    ``timeout_seconds`` bounds a single delivery attempt, not the whole retry
+    sequence.
     """
 
     url: str
@@ -200,10 +171,8 @@ class WebhookTrigger(Trigger[Any, Any]):
     def bind_client(self, client: Any) -> None:
         """Attach an already-built HTTP client for this trigger to deliver through.
 
-        The constructor's ``client=`` argument is the usual injection point
-        (a trigger built with a known destination up front); this is the
-        escape hatch for the rarer case where the client can only be built
-        *after* the trigger already exists — see the module docstring.
+        The escape hatch for when the client can only be built *after* the
+        trigger exists; the constructor's ``client=`` is the usual injection point.
         """
         self._client = client
 

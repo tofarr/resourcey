@@ -1,30 +1,21 @@
 """At-rest value encryption and auth-token JWE encryption (issue #78).
 
 ``EncryptionService`` provides two JWE compact-serialization paths, both using
-``alg=dir`` + ``enc=A256GCM`` (direct symmetric key, AES-256-GCM):
+``alg=dir`` + ``enc=A256GCM``:
 
-* **Value encryption** (:meth:`encrypt_value` / :meth:`decrypt_value`) —
-  encrypts sensitive field values at rest. The plaintext is wrapped in a
-  ``{"v": plaintext}`` JSON payload before encryption. The keyset cursor
+* **Value encryption** (:meth:`encrypt_value` / :meth:`decrypt_value`) — the
+  plaintext is wrapped in a ``{"v": plaintext}`` JSON payload. The keyset cursor
   uses this path to make a cursor tamper-proof.
 * **Auth-token encryption** (:meth:`create_jwe_token` / :meth:`decrypt_jwe_token`)
-  — encrypts arbitrary claim dicts (with optional ``exp``) as JWE tokens. It is
-  carried across from the earlier design so the change is a clean supersede
-  rather than
-  a partial copy, and so the auth layer can depend on it.
+  — encrypts arbitrary claim dicts (with optional ``exp``).
 
-The symmetric key is SHA-256 derived from the configured secret. The key
-``id`` is carried in the JWE ``kid`` header so the correct decryption key can
-be selected on read, enabling key rotation.
+The symmetric key is SHA-256 derived from the configured secret, and the key
+``id`` is carried in the JWE ``kid`` header so the correct decryption key can be
+selected on read.
 
-Unlike the earlier design, the ``EncryptionService`` is **not** a singleton and has no
-env-parsing of its own: it stays a plain class built from an injected
-:class:`~resourcey.encryption.encryption_config.EncryptionKeysConfig`
-instance, so how a caller obtains the config is the caller's concern. The
-process-wide *lookup* is a module-level function
-(:func:`get_encryption_service`), symmetric with
-``sql.session_manager.get_sql_session_manager`` — it reads the environment via
-``EncryptionKeysConfig.get_instance()`` and caches the result.
+The service is **not** a singleton and does no env parsing of its own: it is
+built from an injected ``EncryptionKeysConfig``. The process-wide lookup is
+:func:`get_encryption_service`, symmetric with ``get_sql_session_manager``.
 
 This module imports no code outside the framework.
 """
@@ -66,10 +57,8 @@ def _urlsafe_b64decode(data: str) -> bytes:
 def _jwe_kid(ciphertext: str) -> str:
     """Extract the ``kid`` from a JWE compact serialization's protected header.
 
-    The protected header is the first dot-separated segment, base64url JSON.
     Parsing it directly lets the decryption key be selected before the
-    authenticated decryption is attempted. Raises ``ValueError`` for malformed
-    tokens or tokens lacking a ``kid``.
+    authenticated decryption is attempted.
     """
     segments = ciphertext.split(".")
     if len(segments) != 5:
@@ -117,10 +106,8 @@ class EncryptionService:
     ) -> str:
         """Encrypt a claim dict into a JWE compact token for auth use.
 
-        Adds ``iat`` (issued-at) and, when *expires_in* is given, ``exp``
-        (expiry) claims to the payload before encryption. The encryption key's
-        ``id`` is carried in the ``kid`` header so the correct decryption key
-        can be selected on read.
+        Adds ``iat`` and, when ``expires_in`` is given, ``exp`` claims before
+        encryption.
         """
         now = utc_now()
         jwt_payload: dict[str, Any] = {
@@ -146,9 +133,8 @@ class EncryptionService:
     def decrypt_jwe_token(self, token: str) -> dict[str, Any]:
         """Decrypt a JWE compact token back to its claim dict.
 
-        Selects the decryption key from the ``kid`` header; an unknown ``kid``
-        raises ``ValueError``. Unlike :meth:`decrypt_value` (which unwraps a
-        ``{"v": ...}`` payload), this returns the raw claim dict.
+        Unlike :meth:`decrypt_value`, this returns the raw claim dict rather than
+        unwrapping a ``{"v": ...}`` payload.
         """
         key_id = _jwe_kid(token)
         key = self._get_decryption_key(key_id)
@@ -163,11 +149,7 @@ class EncryptionService:
         return payload
 
     def encrypt_value(self, plaintext: str) -> str:
-        """Encrypt a plaintext string into a JWE compact ciphertext.
-
-        The encryption key's ``id`` is carried in the ``kid`` header so the
-        correct decryption key can be selected on read.
-        """
+        """Encrypt a plaintext string into a JWE compact ciphertext."""
         symmetric_key = _derive_symmetric_key(self._encryption_key.value.get_secret_value())
         protected_header = {
             "alg": "dir",
@@ -183,13 +165,7 @@ class EncryptionService:
         )
 
     def decrypt_value(self, ciphertext: str) -> str:
-        """Decrypt a JWE compact ciphertext back to the original plaintext.
-
-        Selects the decryption key from the ``kid`` header; an unknown ``kid``
-        raises ``ValueError``. The protected header is parsed from the first
-        compact segment (base64url JSON) so the key can be selected before the
-        authenticated decryption is attempted.
-        """
+        """Decrypt a JWE compact ciphertext back to the original plaintext."""
         key_id = _jwe_kid(ciphertext)
         key = self._get_decryption_key(key_id)
         symmetric_key = _derive_symmetric_key(key.value.get_secret_value())
@@ -209,9 +185,8 @@ _cached_service: EncryptionService | None = None
 def get_encryption_service() -> EncryptionService:
     """The process-wide service, built from ``EncryptionKeysConfig.get_instance()``.
 
-    Symmetric with ``get_sql_session_manager``: cached so repeated calls return
-    the same instance; call :func:`clear_encryption_service_cache` to pick up a
-    different config (tests that flip the encryption env vars between cases).
+    Cached; call :func:`clear_encryption_service_cache` to pick up a different
+    config (tests that flip the encryption env vars between cases).
     """
     global _cached_service
     if _cached_service is None:
@@ -220,9 +195,6 @@ def get_encryption_service() -> EncryptionService:
 
 
 def clear_encryption_service_cache() -> None:
-    """Drop the cached process-wide service so the next call rebuilds it.
-
-    Test-only, mirroring ``clear_sql_session_manager_cache``.
-    """
+    """Drop the cached process-wide service so the next call rebuilds it (test-only)."""
     global _cached_service
     _cached_service = None

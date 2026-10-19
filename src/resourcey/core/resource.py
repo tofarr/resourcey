@@ -1,11 +1,7 @@
 """``Resource`` — the abstract, storage-agnostic resource contract.
 
 A :class:`Resource` is a genuine abstract base class: every method is abstract
-and a backend supplies all of them. ``core`` keeps no behaviour here — the
-DTO / REST-model surface, the action declaration, exposure, the service seam,
-the manifest reference, and the runtime lifecycle are all contract, so a
-backend decides how each is satisfied. That keeps core free of any storage or
-transport assumption and makes the resource a clean seam to subclass::
+and a backend supplies all of them, so ``core`` keeps no behaviour here::
 
     manifest = Manifest(resources=[SqlResource(Thread, session_factory=factory)])
 
@@ -16,32 +12,19 @@ transport assumption and makes the resource a clean seam to subclass::
 resolve a connection), and the returned
 :class:`~resourcey.core.service.Service` is the async context manager that
 owns the storage lifetime, so the call site is
-``async with await resource.get_service(ctx) as service``. This keeps storage
-strategies expressible without core privileging one:
-
-* **session-per-service** — a caller supplies the storage via ``ctx`` and owns
-  commit/close;
-* **session-per-operation** — the service opens and closes its own storage.
-
-The rule that lets both coexist:
+``async with await resource.get_service(ctx) as service``. The rule that lets
+both storage strategies coexist:
 
     Whoever opens the storage owns its commit and close. A resource that finds
     storage already in ``ctx`` reuses it and neither commits nor closes it.
 
 ``ctx`` is a plain ``MutableMapping`` keyed by module-level sentinels
 (:data:`~resourcey.core.service.STORAGE_KEY`), so an escape-hatch caller can
-pre-seed storage and every resource in the call adopts it. ``AppContext``
-(app-scoped: config, factories, clients) is a separate concept — ``ctx`` must
-not absorb it.
+pre-seed storage and every resource in the call adopts it.
 
-``get_supported_actions()`` is the single action declaration (there is no
-``actions`` property); exposure composes on top of it, and the exposed
-resource's declaration wins outright.
-
-This module is part of the ``core`` bottom layer: it imports no other
-``resourcey`` module. It deliberately knows nothing about HTTP — resolving a
-per-request service dependency is a transport concern and lives in
-``resourcey.http``.
+This module is part of the ``core`` bottom layer: it imports no other project
+package, and deliberately knows nothing about HTTP — resolving a per-request
+service dependency is a transport concern and lives in ``resourcey.http``.
 """
 
 from __future__ import annotations
@@ -126,8 +109,8 @@ class Resource(ABC, Generic[T, K]):
         """A declared object-filter class, or ``None`` to derive the surface.
 
         When set, the declared class's ``<attribute>__<op>`` fields *are* the
-        filter surface (v1's opt-in style); when ``None`` the surface is derived
-        from the read model via :meth:`get_filter_operators`.
+        filter surface; when ``None`` it is derived from the read model via
+        :meth:`get_filter_operators`.
         """
 
     @abstractmethod

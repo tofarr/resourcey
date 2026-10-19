@@ -1,8 +1,8 @@
 """Resolve dotted import paths to objects, lazily and never at import time.
 
-Used by config fields that carry "list of dotted paths -> list of classes"
-(e.g. :attr:`FrameworkConfig.resources`). Resolution imports the named modules
-on first read so importing a config module never triggers the work.
+Used by config fields that carry "list of dotted paths -> list of classes".
+Resolution imports the named modules on first read so importing a config module
+never triggers the work.
 """
 
 from __future__ import annotations

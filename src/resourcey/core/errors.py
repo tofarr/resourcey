@@ -1,21 +1,13 @@
 """Framework exception types.
 
 ``ResourceyError`` is the base for every error raised by the framework, so
-callers can catch all resourcey failures with a single ``except``.
-``ResourceyConfigError`` covers config build/parse failures — a bad integer, a
-missing required variable, a malformed ``_CLASS`` value, and an unresolvable
-import path in a *list* lazy field. The single-class lazy field
-(``LazyField._resolve``) is the one gap: an unresolvable ``{NAME}_CLASS`` path
-surfaces the underlying ``ModuleNotFoundError`` / ``AttributeError`` directly
-rather than being mapped here.
+callers can catch all resourcey failures with a single ``except``. The
+service-level classes (``ServiceError``, ``NotFoundError``, ``ForbiddenError``)
+also derive from it but stay with the code that raises them (see
+``core/service.py``).
 
-The service-level classes (``ServiceError``, ``NotFoundError``,
-``ForbiddenError``) also derive from ``ResourceyError`` but stay with the code
-that raises them (see ``core/service.py``), so every framework error roots in
-the one base.
-
-This module is part of the ``core`` bottom layer: it imports no other
-``resourcey`` module.
+This module is part of the ``core`` bottom layer: it imports no other project
+package.
 """
 
 
@@ -31,17 +23,15 @@ class InvalidInputError(ResourceyError):
     """A request named something the resource does not support.
 
     Raised when a ``field__op`` query parameter is not part of the resource's
-    query surface — an unknown field, an operator the field's type does not
-    allow, or any filter parameter on a resource with no query surface. The
-    transport maps it to ``400``.
+    query surface. The transport maps it to ``400``.
     """
 
 
 class UnsupportedFilterError(ResourceyError):
     """A search filter could not be pushed down to the storage backend.
 
-    Filtering is all-or-nothing per filter: when the backend cannot translate
-    a filter into its native query (and the resource has not opted into an
+    Filtering is all-or-nothing per filter: when the backend cannot translate a
+    filter into its native query (and the resource has not opted into an
     in-memory iteration fallback) it raises this rather than silently scanning
     the whole table. The transport maps it to ``501``.
     """
@@ -51,8 +41,6 @@ class ConflictError(ResourceyError):
     """A write collided with an existing record (a duplicate key).
 
     The storage-neutral counterpart of a driver's duplicate-key error: a backend
-    whose driver raises a type the transport does not know (e.g. pymongo's
-    ``DuplicateKeyError``) translates it here, so the envelope can map it to
-    ``409`` without importing that driver. ``sql`` keeps letting SQLAlchemy's
-    ``IntegrityError`` reach the same ``409`` handler directly.
+    whose driver raises a type the transport does not know translates it here, so
+    the envelope can map it to ``409`` without importing that driver.
     """

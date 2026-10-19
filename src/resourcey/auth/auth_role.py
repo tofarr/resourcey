@@ -1,31 +1,23 @@
 """Simple, per-app roles and the centralized ``role -> policy`` translation (issue #132).
 
-Part 1 (#131) made ``Principal -> Policy`` a pluggable
-:class:`~resourcey.auth.auth_policy.PolicyResolver`. This module is the
-**simple-roles** rung: a small, app-declared role vocabulary, transported on the
-credential so a role authenticates without a store lookup, and translated to
-policies in **one place**.
+Part 1 (#131) made ``Principal -> Policy`` a pluggable ``PolicyResolver``. This
+module is the **simple-roles** rung: a small, app-declared role vocabulary,
+transported on the credential so a role authenticates without a store lookup, and
+translated to policies in **one place**.
 
 Two deliberate choices:
 
 * **Roles are per-app, never global.** The same string (``"ADMIN"``) can mean
   different things in different apps, so anything that names roles is scoped to
-  the app — declared as a :class:`AppRole` subclass, mapped by an app's
-  :class:`RolePolicyResolver`. There is deliberately no process-wide registry
-  unioning every app's roles.
+  the app. There is deliberately no process-wide role registry.
 * **The transported form is a plain string.** :class:`AppRole` is the ergonomic
-  vocabulary (``AppRole.ADMIN``, no magic strings), but a credential carries the
-  string (``"ADMIN"``), so the framework never imports app code to interpret a
-  credential. :func:`role_key` / :func:`roles_from_credential` are the small
-  conversion seam.
+  vocabulary, but a credential carries the string, so the framework never imports
+  app code to interpret a credential. :func:`role_key` /
+  :func:`roles_from_credential` are the conversion seam.
 
 :class:`RolePolicyResolver` is the single location where an app expresses its
-``role -> policy`` rules. It supports a **global** mapping (a role's policies on
-every resource) and a **per-resource** mapping (keyed by the resource's path), an
-explicit **fail-closed default** for un-roled / anonymous callers, and the union
-model: a principal with several roles gets the OR-combination of their policies,
-so a ``DenyAll`` from one role does not override another's grant (see
-``specs/permissions.qnt``).
+``role -> policy`` rules, with a global and a per-resource mapping and an
+explicit fail-closed default.
 
 This rung is **static** — the mapping is declared in app code / config. The
 store-backed resolver that looks roles up per request is Part 3.
@@ -49,30 +41,25 @@ from resourcey.core.resource import Resource
 class AppRole(StrEnum):
     """Base class for an app's role vocabulary.
 
-    Subclass it to declare the roles an app recognizes, so routing can name them
-    without magic strings::
+    Subclass it to declare the roles an app recognizes::
 
         class Role(AppRole):
             ADMIN = "ADMIN"
             USER = "USER"
 
     The members' values *are* the transported role strings; the base itself has
-    no members, so the framework never assumes a role set. A role is scoped to
-    the app that declares it — two apps may both have an ``ADMIN`` meaning
-    different things.
+    no members, so the framework never assumes a role set.
     """
 
 
-# A role in the app's vocabulary (an ``AppRole`` member) or its raw string form
-# as it arrives on a credential. Named for documentation; no runtime wrapping.
+# A role as an ``AppRole`` member or its raw credential string.
 RoleName = str
 
 
 def role_key(role: AppRole | str) -> str:
     """The plain string a role is stored / transported / compared as.
 
-    An :class:`AppRole` member reduces to its value; a string passes through, so
-    a credential-carried role needs no app import.
+    An :class:`AppRole` member reduces to its value; a string passes through.
     """
     return role.value if isinstance(role, AppRole) else str(role)
 
@@ -85,9 +72,8 @@ def role_keys(roles: Iterable[AppRole | str]) -> frozenset[str]:
 def roles_from_credential(raw: str | Iterable[str] | None) -> frozenset[str]:
     """Normalise a credential-carried role value to a set of role strings.
 
-    A credential may carry one role (a bare string, or a comma-separated list) or
-    several (a JSON / sequence). Blank entries are dropped, so an unset value
-    yields the empty set (an un-roled caller).
+    A bare string may be comma-separated. Blank entries are dropped, so an unset
+    value yields the empty set (an un-roled caller).
     """
     if raw is None:
         return frozenset()
@@ -100,29 +86,17 @@ def roles_from_credential(raw: str | Iterable[str] | None) -> frozenset[str]:
 class RolePolicyResolver(PolicyResolver):
     """The centralized ``role -> policy`` translation for an app.
 
-    The resolver is the **one place** an app expresses its authorization rules.
     A principal's roles are looked up in the global :attr:`role_policies` map and
-    in the per-resource :attr:`resource_role_policies` map (keyed by the target
-    resource's path), and the matching policies are unioned by
-    :class:`~resourcey.auth.auth_authorized_service.AuthorizedService`.
+    in the per-resource :attr:`resource_role_policies` map, and the matching
+    policies are unioned by ``AuthorizedService``. Fail-closed by default: an
+    un-roled or anonymous caller resolves to :attr:`default` (empty unless the
+    app opts in), so an unknown role grants nothing.
 
-    Fail-closed by default: an un-roled or anonymous caller, or a caller whose
-    roles match nothing, resolves to :attr:`default` (empty unless the app opts
-    in). An unknown role therefore grants nothing rather than everything.
-
-    Attributes:
-        role_policies: Global rules — role name -> policies on *every* resource.
-        resource_role_policies: Per-resource rules — resource path -> role name
-            -> policies. A role's global and per-resource policies are both
-            *added* to the union (they are not narrowed by each other), so a
-            broader grant wins: declaring ``ReadOnly`` globally and ``Owner``
-            per resource yields read-all (``ReadOnly``'s ``AllFilter`` dominates
-            the union), not own-rows-only. To scope a role per resource, declare
-            the policy only in ``resource_role_policies``.
-        default: Policies for a caller whose roles matched nothing (or who has no
-            roles). Empty by default — fail-closed.
-        resource_defaults: Per-resource overrides for :attr:`default`, keyed by
-            resource path.
+    ``resource_role_policies`` maps a resource path -> role name -> policies. A
+    role's global and per-resource policies are both *added* to the union, so
+    declaring ``ReadOnly`` globally and ``Owner`` per resource yields read-all,
+    not own-rows-only. To scope a role per resource, declare the policy only in
+    ``resource_role_policies``.
     """
 
     role_policies: dict[str, list[Policy]] = Field(default_factory=dict)
@@ -135,10 +109,8 @@ class RolePolicyResolver(PolicyResolver):
     ) -> list[Policy]:
         """The policies ``principal``'s roles grant on ``resource``.
 
-        The per-resource map is keyed by the resource's path, so the same role
-        can be scoped differently per resource. When no role matches (an
-        un-roled / anonymous caller, or an unknown role) the resolver falls back
-        to its (fail-closed) default for that resource.
+        When no role matches the resolver falls back to its (fail-closed) default
+        for that resource.
         """
         path = resource.get_resource_path()
         roles = principal.roles if principal is not None else frozenset()

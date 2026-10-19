@@ -1,23 +1,15 @@
 """``SqlSessionManager`` — build and own the engines behind ``SqlConfig`` (issue #74).
 
-The manager turns a :class:`~resourcey.sql.sql_config.SqlConfig` into session
-makers on demand: engines are built **lazily** on first use of a connection and
-cached for the manager's life, and :meth:`__aexit__` disposes every engine it
-built. Entering is an **idempotent** marker, so a fresh ``TestClient`` per test
-case against one app works without an error; exiting clears the engine cache so
-the next enter (or first use) rebuilds.
+Engines are built **lazily** on first use of a connection and cached for the
+manager's life; :meth:`__aexit__` disposes every engine it built. Entering is an
+**idempotent** marker, so a fresh ``TestClient`` per test case against one app
+works.
 
 The manager hands out session *makers*, never sessions: opening a session stays
-with the code that owns the transaction, so there is one storage-ownership story
-(``core``'s "whoever opens the storage owns its commit and close") rather
-than two. It extends that rule to itself — using an un-entered manager raises,
-so a caller who forgets ``async with manifest`` fails loudly instead of leaking
-engines nobody disposes.
-
-A module-level :func:`get_sql_session_manager` (configured from
-:meth:`SqlConfig.get_instance`) is the global accessor ``SqlResource`` uses by
-default; :func:`clear_sql_session_manager_cache` is the test-only reset,
-mirroring ``BaseConfig.clear_instance_cache`` / ``Singleton.clear_singleton_cache``.
+with the code that owns the transaction, so the one storage-ownership rule
+("whoever opens the storage owns its commit and close") is not duplicated. Using
+an un-entered manager raises, so a caller who forgets ``async with manifest``
+fails loudly instead of leaking engines.
 
 This module imports no code outside the framework.
 """
@@ -58,8 +50,8 @@ class SqlSessionManager:
     def _resolve(self, name: str | None) -> DbConfig:
         """The named connection, or the first when ``name`` is ``None``.
 
-        An empty connection list and an unknown name are both misconfigurations
-        and raise rather than falling back to a hidden default.
+        An empty connection list and an unknown name both raise rather than
+        falling back to a hidden default.
         """
         connections = self._config.sql_connections
         if not connections:
@@ -78,10 +70,8 @@ class SqlSessionManager:
     async def get_session_maker(self, name: str | None = None) -> async_sessionmaker[AsyncSession]:
         """The session maker for connection ``name`` (default: the first).
 
-        The engine is built and cached on first use. Raises
-        :class:`~resourcey.core.errors.ResourceyConfigError` when the manager
-        has not been entered, when ``name`` is unknown, or when no connections
-        are configured.
+        The engine is built and cached on first use. Raises when the manager has
+        not been entered, ``name`` is unknown, or no connections are configured.
         """
         if not self._entered:
             raise ResourceyConfigError(
@@ -126,7 +116,7 @@ _cached_manager: SqlSessionManager | None = None
 def get_sql_session_manager() -> SqlSessionManager:
     """The process-wide manager, built from ``SqlConfig.get_instance()``.
 
-    The instance is cached (engines are still built lazily per use); call
+    Cached (engines are still built lazily per use); call
     :func:`clear_sql_session_manager_cache` to pick up a different config.
     """
     global _cached_manager
@@ -136,10 +126,6 @@ def get_sql_session_manager() -> SqlSessionManager:
 
 
 def clear_sql_session_manager_cache() -> None:
-    """Drop the cached process-wide manager so the next call rebuilds it.
-
-    Test-only: engines are disposed by the manager's own ``__aexit__``, so this
-    only forgets a manager built against a stale config.
-    """
+    """Drop the cached process-wide manager so the next call rebuilds it (test-only)."""
     global _cached_manager
     _cached_manager = None

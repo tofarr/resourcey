@@ -1,16 +1,14 @@
 """The SQL backend: :class:`SqlResource` (issue #78, refactored #89).
 
-The SQL workflow is model-first: a developer defines the SQLAlchemy ORM model
-they already work with and hands it to :class:`SqlResource`, which infers the
-DTO (and hence the REST models) from it via
-:func:`~resourcey.sql.sqlalchemy_2_dto.sqlalchemy_2_dto`. There is **no**
-DTO-to-model generation and no declarative base to manage: SQLAlchemy is the
-schema of record, so migrations and foreign-key relations stay SQLAlchemy's /
-Alembic's concern, and a developer can always drop back to plain SQLAlchemy.
+The workflow is model-first: a developer defines the SQLAlchemy ORM model and
+hands it to :class:`SqlResource`, which infers the DTO (and hence the REST
+models) from it. There is **no** DTO-to-model generation: SQLAlchemy is the
+schema of record, so migrations and foreign keys stay Alembic's concern and a
+developer can always drop back to plain SQLAlchemy.
 
 A column may override the inferred field projection by placing a
-:class:`~resourcey.core.dto.DtoField` in its ``info`` under the
-``dto_field`` key.
+:class:`~resourcey.core.dto.DtoField` in its ``info`` under the ``dto_field``
+key.
 
 The action layer lives in :mod:`resourcey.sql.sql_service`.
 
@@ -87,8 +85,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         self._session_factory = session_factory
         self._session_manager = session_manager
         self._connection_name = name
-        # Resolved eagerly so cursor pagination works out of the box; the
-        # explicit argument remains the escape hatch.
+        # Resolved eagerly so cursor pagination works out of the box.
         self._encryption_service = encryption_service or get_encryption_service()
         self._entered = False
         self._manifest: Manifest | None = None
@@ -132,53 +129,40 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """Every field the read model exposes — the default query surface.
 
         Derived from ``read_response``, so a field projected away is not
-        filterable: a wrapper that hides ``secret`` must not leave
-        ``?secret__eq=`` disclosing it.
+        filterable and ``?secret__eq=`` cannot disclose it.
         """
         return frozenset(self.get_rest_models().read_response.model_fields)
 
     def get_filter_operators(self) -> Mapping[str, frozenset[str]]:
         """The derived filter surface: each queryable field's allowed operators.
 
-        A field is filterable exactly when it is readable, and the operator set
-        follows the field's Python type (equality always, ordering for numbers /
-        datetimes, substring for strings). Override to widen or narrow it.
+        The operator set follows the field's Python type. Override to widen or
+        narrow it.
         """
         fields = self.get_rest_models().read_response.model_fields
         return {name: operators_for_annotation(field.annotation) for name, field in fields.items()}
 
     def get_search_filter_type(self) -> type[SearchFilter[Any]] | None:
-        """A declared object-filter class, or ``None`` (derive from the read model).
-
-        Override to opt into v1-style declared filters; the class's
-        ``<attribute>__<op>`` fields then define the whole surface.
-        """
+        """A declared object-filter class, or ``None`` (derive from the read model)."""
         return None
 
     def get_sortable_fields(self) -> frozenset[str]:
         """Every field the read model exposes — the default sort surface.
 
         Derived from ``read_response`` (the same gate as filtering), so a field
-        projected away is not sortable: ``?sort=secret`` would otherwise leak
-        the hidden value's relative order. Override to narrow it.
+        projected away is not sortable. Override to narrow it.
         """
         return self.get_queryable_fields()
 
     def get_sort_order_type(self) -> type[SortOrder[Any]] | None:
-        """A declared :class:`SortOrder` class, or ``None`` (derive the surface).
-
-        Override to opt into a declared sort node; the derived
-        ``(attribute, descending)`` surface is otherwise used.
-        """
+        """A declared :class:`SortOrder` class, or ``None`` (derive the surface)."""
         return None
 
     def resolve_sort_order(self, sort: str | None, desc: bool) -> SortOrder[Any] | None:
         """Validate ``sort`` / ``desc`` into the ordering a search will use.
 
-        With no ``sort`` the identifier order is used and ``desc`` is ignored
-        (the identifier is always the default ascending key). With a declared
-        :meth:`get_sort_order_type` the field is validated against the declared
-        class; otherwise it is checked against :meth:`get_sortable_fields` so a
+        With no ``sort`` the identifier order is used and ``desc`` is ignored.
+        The field is checked against :meth:`get_sortable_fields` so a
         projected-away field cannot be sorted on.
         """
         if not sort:
@@ -198,14 +182,12 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """The table column name backing DTO attribute ``attribute``.
 
         The DTO field name is the mapper attribute name, which can differ from
-        the underlying column name; a cursor's sort key must be read by column
-        name because the row is keyed that way.
+        the underlying column name.
         """
         return cast("str", self._column_for_attr.get(attribute, attribute))
 
-    # Opt-in escape hatch: when True, an unconvertible filter falls back to an
-    # in-memory scan instead of raising. Off by default — see
-    # ``SqlService._apply_filters``.
+    # Opt-in escape hatch: an unconvertible filter falls back to an in-memory
+    # scan instead of raising.
     allow_filter_iteration: bool = False
 
     # ------------------------------------------------------------------
@@ -217,11 +199,9 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     ) -> SqlFilterContext:
         """The conversion context: only *queryable* fields resolve to columns.
 
-        Restricting ``columns`` to :meth:`get_queryable_fields` is the security
-        gate: a field projected away from the read model has no column here, so
-        ``?secret__eq=`` raises rather than disclosing the value. Extension
-        point — a subclass may add handler inputs (dialect, resource, cache)
-        without changing converter signatures.
+        That restriction is the security gate: a field projected away from the
+        read model has no column here, so ``?secret__eq=`` raises rather than
+        disclosing the value.
         """
         queryable = self.get_queryable_fields()
         columns = {
@@ -246,10 +226,9 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def build_sort_context(self) -> SqlSortContext:
         """The sort context: only *sortable* fields resolve to columns.
 
-        Restricting ``columns`` to :meth:`get_sortable_fields` is the security
-        gate, mirroring filtering: a field projected away from the read model
-        has no column here, so ``?sort=secret`` raises rather than leaking the
-        hidden value's relative order.
+        The same security gate as filtering: a field projected away has no
+        column here, so ``?sort=secret`` raises rather than leaking its relative
+        order.
         """
         sortable = self.get_sortable_fields()
         columns = {
@@ -282,11 +261,9 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build a :class:`SqlService` over ``ctx`` and a session maker.
 
-        An explicit ``session_factory`` wins (the escape hatch); otherwise the
-        session maker is resolved from ``session_manager`` — the injected one,
-        else the process-wide :func:`get_sql_session_manager` — by
-        ``connection_name``. Resolving by name makes this method async. The
-        service itself is built by :meth:`make_service`, the subclass seam.
+        An explicit ``session_factory`` wins; otherwise the session maker is
+        resolved from ``session_manager`` by ``connection_name``, which makes
+        this method async.
         """
         maker = self._session_factory
         if maker is None:
@@ -299,9 +276,8 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     ) -> Service[T, K]:
         """Build the service for this resource — the subclass seam.
 
-        A backend variant (e.g. the auth key resource, which adds
-        ``find_by_key``) overrides this rather than :meth:`get_service`, so the
-        session-resolution logic is written once.
+        A variant adding an extra method (e.g. the auth key resource's
+        ``find_by_key``) overrides this rather than :meth:`get_service`.
         """
         return SqlService(self, ctx, session_factory)
 
@@ -351,8 +327,7 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def id_column(self) -> Column[Any]:
         """The table column backing the identifier.
 
-        The DTO field name is the mapper *attribute* name, which can differ from
-        the *column* name, so the identifier is resolved through the same
-        attribute→column map the payload uses.
+        Resolved through the attribute→column map, since the DTO field name is
+        the mapper attribute and can differ from the column name.
         """
         return cast("Column[Any]", self.table.c[self._column_for_attr[self.get_id_field()]])

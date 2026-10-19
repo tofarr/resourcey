@@ -1,25 +1,14 @@
 """``ListService`` — the read-only action layer of the list backend (issue #116).
 
-A :class:`~resourcey.list.list_resource.ListResource` yields a
-``ListService`` from
-:meth:`~resourcey.list.list_resource.ListResource.get_service`. The service
-holds the resolved items as instance state and implements the read subset of the
-standard :class:`~resourcey.core.service.Service` contract — ``read`` /
-``search`` / ``count`` / ``batch_read`` — entirely in memory.
+Implements ``read`` / ``search`` / ``count`` / ``batch_read`` entirely in
+memory. Filtering uses the storage-agnostic :meth:`SearchFilter.matches`
+predicate and ordering the :meth:`SortOrder.compare` reference — the same
+semantics the SQL / Mongo converters push down. Paging reuses the shared
+tamper-proof keyset cursor codec and mirrors the SQL ``keyset_predicate`` in
+memory.
 
-Filtering uses the storage-agnostic :meth:`SearchFilter.matches` predicate and
-ordering the :meth:`SortOrder.compare` reference — the same semantics the SQL /
-Mongo converters push down — so a filter or sort behaves identically across
-backends. Paging reuses the shared tamper-proof keyset cursor codec
-(:mod:`resourcey.util.cursor`) and mirrors the SQL ``keyset_predicate``
-in memory, so a cursor round-trips and a cursor reused under a different sort is
-rejected rather than applied against the wrong field.
-
-Items are converted to the resource's DTO type before being returned, so the
-transport projects DTO -> the derived REST model exactly as it does for SQL /
-Mongo. Write actions (``create`` / ``update`` / ``delete`` / ``batch_edit``)
-keep the raising :class:`Service` defaults: a list resource advertises only the
-read actions, so those methods are never routed.
+Write actions keep the raising :class:`Service` defaults: a list resource
+advertises only the read actions, so those methods are never routed.
 
 This module imports no code outside the framework.
 """
@@ -54,10 +43,8 @@ K = TypeVar("K")
 class ListService(Service[T, K]):
     """The read-only service over an in-process list of Pydantic objects.
 
-    Holds the call-scoped ``ctx`` and the resolved items (instance state, not a
-    per-call parameter). There is no external storage to open, so entering the
-    service only adopts the items into ``ctx`` (matching the other backends'
-    reuse seam) and the lifecycle guard.
+    There is no external storage to open, so entering the service only adopts
+    the items into ``ctx`` and sets the lifecycle guard.
     """
 
     def __init__(
@@ -103,12 +90,7 @@ class ListService(Service[T, K]):
     ) -> Page[T]:
         """Filter, order, and keyset-page the items in memory; return a :class:`Page`.
 
-        ``search_filter`` is a standard :class:`SearchFilter` tree (an object
-        filter is lowered first) applied via ``matches``; ``sort_order`` is the
-        validated ordering (``None`` for the default identifier order) applied
-        via ``compare``, with the identifier appended as a stable tie-breaker.
-        ``cursor`` is an opaque keyset cursor from a previous page; a cursor
-        built for a different ``(sort field, direction)`` is rejected.
+        A cursor built for a different ``(sort field, direction)`` is rejected.
         """
         self._require_entered()
         models = [self._to_dto(item) for item in self._items]
@@ -154,10 +136,8 @@ class ListService(Service[T, K]):
     def _order(self, models: list[T], sort_order: SortOrder[T] | None) -> list[T]:
         """Order ``models`` by the resolved sort, with the identifier as tie-breaker.
 
-        The identifier is always appended ascending (the tie-breaker the SQL
-        ``ORDER BY`` / ``keyset_predicate`` use), so paging is total. ``None``
-        sorts first ascending and last descending (the reference ordering
-        :meth:`AttrSortOrder.compare` describes), which the two-pass stable sort
+        The identifier is always appended ascending, so paging is total. ``None``
+        sorts first ascending and last descending, which the two-pass stable sort
         below reproduces.
         """
         id_field = self._resource.get_id_field()
@@ -177,10 +157,8 @@ class ListService(Service[T, K]):
     ) -> list[T]:
         """Keep only the models strictly after the cursor row (the keyset walk).
 
-        Mirrors :func:`resourcey.sql.cursor.keyset_predicate`: the sort-key
-        comparison mirrors for descending, the identifier tie-breaker never does,
-        and the null block is seeked past with explicit ``None`` tests (NULLs
-        first ascending, last descending).
+        Mirrors :func:`resourcey.sql.cursor.keyset_predicate`: only the sort-key
+        comparison mirrors for descending, never the identifier tie-breaker.
         """
         _cursor_field, cursor_ascending, cursor_key, cursor_id = self._decode(cursor, sort_order)
         id_field = self._resource.get_id_field()
@@ -220,9 +198,7 @@ class ListService(Service[T, K]):
     ) -> tuple[str | None, bool, Any, Any]:
         """Decrypt a cursor and reject one built for a different sort.
 
-        A malformed or tampered cursor is a client error (``400``); a cursor
-        whose ``(sort_field, ascending)`` does not match the request is rejected
-        rather than applied against the wrong field.
+        A malformed or tampered cursor is a client error (``400``).
         """
         try:
             cursor_field, cursor_ascending, sort_key, id_value = decode_cursor(
@@ -246,13 +222,9 @@ class ListService(Service[T, K]):
     def _to_dto(self, item: Any) -> T:
         """Project a served item into the resource's DTO type.
 
-        The item first passes through the resource's ``clone_for_output`` (a
-        defensive resource deep-copies here, so a served object can never be
-        mutated through a result). The served Pydantic model *is* the DTO, so a
-        non-defensive read returns the stored object itself (v1's
-        ``nonDefensiveServesStore``). The field-by-field projection only runs for
-        the ``dto=`` escape hatch, where the served model differs from the
-        declaration.
+        The item first passes through ``clone_for_output``, so a defensive
+        resource deep-copies here. The field-by-field projection only runs for
+        the ``dto=`` escape hatch.
         """
         served = self._resource.clone_for_output(item)
         dto_type = self._resource.get_dto_type()

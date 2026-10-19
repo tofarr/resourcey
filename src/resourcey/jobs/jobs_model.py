@@ -1,17 +1,14 @@
 """The ``jobs`` table and its governed resources (issue #16).
 
-The workflow is **model-first**, like every SQL resource: :class:`Job` is the
-ORM model (the schema of record) and the framework infers the DTO / REST models
-from it. A deployment points Alembic at :data:`JobsBase.metadata` (or imports the
-model) exactly as it does for any other SQLAlchemy model.
+The workflow is **model-first**, like every SQL resource: :class:`Job` is the ORM
+model (the schema of record) and the framework infers the DTO / REST models from
+it. A deployment points Alembic at :data:`JobsBase.metadata`.
 
-The row is a **governed** entity: it is served over REST, RBAC-scoped, cached,
-and migrated like any other resource. Three of its fields are runner-managed —
-``claimed_by`` / ``claimed_at`` / ``attempts`` — and its ``status`` has a
-restricted client-writable set, so the public surface is a
-:class:`~resourcey.view.resource_view.ResourceView` (:func:`jobs_view`) that
-hides the runner-managed fields and narrows ``status``. The runner writes through
-the **inner** resource (:func:`jobs_resource`), which carries the full model.
+The row is a **governed** entity: served over REST, RBAC-scoped, cached, and
+migrated like any other resource. The runner-managed fields are hidden from the
+public surface, which is a ``ResourceView`` (:func:`jobs_view`) that also narrows
+``status``. The runner writes through the **inner** resource
+(:func:`jobs_resource`).
 
 This module is part of ``resourcey.jobs``; it imports lower framework layers
 (``core`` / ``sql`` / ``view``).
@@ -53,14 +50,11 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-# A runner-managed field: neither client-suppliable on create nor writable on
-# update. Declared on the column's ``info`` (the documented escape hatch).
+# Neither client-suppliable on create nor writable on update.
 RUNNER_FIELD = DtoField(in_create_request=False, in_update_request=False)
 
-# The values a client may write to ``status`` on the public surface: it may
-# enqueue (``PENDING``), schedule a future one-shot (``SCHEDULED``), or cancel
-# (``CANCELLED``). ``RUNNING`` / ``COMPLETED`` / ``ERROR`` are runner-managed and
-# rejected on the wire — the public view narrows the request models to this set.
+# A client may enqueue, schedule, or cancel; ``RUNNING`` / ``COMPLETED`` /
+# ``ERROR`` are runner-managed and rejected on the wire.
 CLIENT_STATUS_VALUES: tuple[str, ...] = ("PENDING", "SCHEDULED", "CANCELLED")
 
 # The client-writable status type: a ``Literal`` (not the full ``JobStatus``
@@ -92,43 +86,16 @@ TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
 
 
 class JobsBase(DeclarativeBase):
-    """The declarative base owning the ``jobs`` table.
-
-    Kept local so the jobs package is self-contained; an app points Alembic at
-    this metadata (or imports the model) exactly as it does for any SQLAlchemy
-    model.
-    """
+    """The declarative base owning the ``jobs`` table (an app points Alembic at it)."""
 
 
 class Job(JobsBase):
     """A durable, claimable unit of work — a governed ``jobs`` row.
 
-    Attributes:
-        id: The server-generated identifier.
-        job_details_kind: The concrete ``JobDetails`` kind (its class name); the
-            discriminator the runner deserializes the body by. Runner-managed
-            (derived from the body on create).
-        job_details: The ``JobDetails`` body, stored as JSON but exposed to the
-            ORM as the concrete kind. Immutable once created.
-        status: The lifecycle status (see :class:`JobStatus`). A client may set
-            only :data:`CLIENT_STATUS_VALUES`; the rest are runner-managed.
-        detail: Optional human-readable status text.
-        run_at: For a ``SCHEDULED`` job, when it becomes claimable; ``NULL``
-            means "as soon as claimed".
-        claimed_by: The runner UUID holding the claim; ``NULL`` = unclaimed.
-            Runner-managed.
-        claimed_at: The claim start; the stale-claim sweep measures from here.
-            Runner-managed.
-        attempts: How many times the job has been claimed. Runner-managed.
-        max_attempts: The retry cap; a job requeues while
-            ``attempts < max_attempts``, else goes terminal. Defaults to ``1``
-            (no retry unless opted in).
-        max_seconds_for_run: An optional per-job wall-clock cap and the
-            stale-claim bound; ``NULL`` falls back to the config default.
-        creator_id: The owner the job is scoped to (the ``Owner`` policy's
-            field). Runner-managed (stamped from the authenticated principal on
-            create).
-        created_at / updated_at: Framework-owned timestamps.
+    ``job_details_kind`` is the discriminator the runner deserializes the body
+    by, derived from the body on create. ``max_attempts`` defaults to ``1`` (no
+    retry unless opted in), and ``max_seconds_for_run`` is both the wall-clock
+    cap and the stale-claim bound.
     """
 
     __tablename__ = "jobs"
@@ -172,25 +139,17 @@ class Job(JobsBase):
 class JobsService(SqlService[Any, Any]):
     """A ``jobs`` service that enforces the **terminal-status** rule on writes.
 
-    A job in a terminal status (``COMPLETED`` / ``ERROR`` / ``CANCELLED``) never
-    transitions: a client may cancel a ``PENDING`` / ``SCHEDULED`` job but may not
-    revive a finished one, and the runner's own writes already carry a
-    ``status == RUNNING`` condition. The rule is enforced by folding a
-    "not terminal" condition into every client update, so it is atomic with the
-    write — an update of a terminal job is a no-op returning ``None`` (the same
-    result as an absent row), never an error.
+    A "not terminal" condition is folded into every client update, so it is
+    atomic with the write — an update of a terminal job is a no-op returning
+    ``None`` (the same result as an absent row), never an error.
     """
 
     async def create(self, payload: Any) -> Any:
         """Derive ``job_details_kind`` and stamp ``creator_id`` on create.
 
-        ``job_details_kind`` is not a client field: it is the discriminator the
-        runner deserializes the body by, so it is derived from the body's own
-        ``kind``. ``creator_id`` is likewise runner-managed (the ``Owner`` policy
-        leaves ``create`` unscoped, so a new row has no owner until here); the
-        runner's own :meth:`~resourcey.jobs.jobs_runner.JobRunner.enqueue` passes
-        it explicitly (it is not serving a request, so there is no principal on
-        the ctx).
+        ``job_details_kind`` is derived from the body's own ``kind``.
+        ``creator_id`` is stamped from the authenticated principal; the runner's
+        ``enqueue`` passes it explicitly, since it serves no request.
         """
         updates: dict[str, Any] = {}
         details = getattr(payload, "job_details", None)
@@ -208,15 +167,7 @@ class JobsService(SqlService[Any, Any]):
         return await super().create(payload)
 
     async def update(self, payload: Any, *, condition: SearchFilter[Any] | None = None) -> Any:
-        """Apply the update, refusing to transition a **terminal** job.
-
-        A job in ``COMPLETED`` / ``ERROR`` / ``CANCELLED`` never transitions, so a
-        "not terminal" guard is folded into the write's condition: an update of a
-        terminal job is a no-op returning ``None`` (the same result as an absent
-        row), never an error. The runner's own writes already carry a
-        ``status == RUNNING`` condition, so this is the client-facing half of the
-        rule.
-        """
+        """Apply the update, refusing to transition a **terminal** job."""
         terminal = or_(
             *(
                 AttrFilter(attribute="status", filter=EqFilter(value=status))
@@ -243,8 +194,6 @@ def jobs_resource(
 ) -> Resource[Any, Any]:
     """The **inner** ``jobs`` resource: the full row, for the runner / RBAC.
 
-    The runner writes through this (it is not serving a request, so no
-    ``AuthorizedService`` policy scope is folded into its conditional writes).
     Register :func:`jobs_view` over it, not this, for the public surface.
     """
     return JobsResource(
@@ -258,12 +207,8 @@ def jobs_resource(
 def jobs_view(inner: Resource[Any, Any]) -> ResourceView[Any, Any]:
     """The exposed ``jobs`` view: hides runner-managed fields, narrows ``status``.
 
-    It hides ``claimed_by`` / ``claimed_at`` / ``attempts`` (runner-managed, never
-    client-visible or client-writable) and narrows ``status``'s *request* type to
-    :data:`CLIENT_STATUS_VALUES`, so a client cannot write a runner-managed
-    status. The read model keeps the full :class:`JobStatus`, so a job the runner
-    has taken to ``RUNNING`` / ``COMPLETED`` / ``ERROR`` still reads back
-    correctly.
+    The read model keeps the full ``JobStatus``, so a job the runner has taken
+    to ``RUNNING`` / ``COMPLETED`` / ``ERROR`` still reads back correctly.
     """
     hidden = {
         "in_read_response": False,

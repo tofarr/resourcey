@@ -1,43 +1,26 @@
 """AsyncAPI documentation for the realtime WebSocket (issue #17).
 
 FastAPI documents the REST surface (OpenAPI) for free; nothing documents the
-WebSocket's in-band message protocol (:mod:`~resourcey.realtime.realtime_routes`)
-or the per-resource event payloads a subscriber decodes. This module closes
-that gap the same way the REST surface is documented -- generatively, from the
-manifest -- rather than by hand-maintained prose:
-`AsyncAPI <https://www.asyncapi.com/>`_ is to a message-based API what OpenAPI
-is to REST, and :func:`generate_asyncapi_document` builds a spec-compliant
-(2.6.0) document describing exactly the one WebSocket channel
-:func:`~resourcey.realtime.realtime_routes.add_realtime` mounts:
+WebSocket's in-band message protocol or the per-resource event payloads. This
+module closes that gap generatively, from the manifest: ``AsyncAPI`` is to a
+message-based API what OpenAPI is to REST, and
+:func:`generate_asyncapi_document` builds an AsyncAPI 2.6.0 document describing
+the one WebSocket channel ``add_realtime`` mounts:
 
 * the six static protocol messages (``subscribe`` / ``unsubscribe`` / client
-  ``ping`` published *to* the server; ``ack`` / ``error`` / ``event`` / server
-  ``ping`` the server publishes, per
-  :mod:`~resourcey.realtime.realtime_routes`'s protocol docstring);
+  ``ping``; ``ack`` / ``error`` / ``event`` / server ``ping``);
 * one ``<resource>Event`` message per **subscribable** resource (the same
-  ``Action.READ``-in-exposed-actions gate
-  :meth:`~resourcey.realtime.realtime_routes.RealtimeHub.subscribe` enforces,
-  so the document never promises a subscription the hub would reject), whose
-  ``item`` schema is the resource's own read model
-  (``get_rest_models().read_response``) -- the same model the REST ``read`` /
-  ``search`` responses already use, and the same security gate a
-  :class:`~resourcey.triggers.redis_trigger.RedisTrigger` projects onto before
-  publishing (see that module).
+  ``Action.READ`` gate the hub enforces), whose ``item`` schema is the
+  resource's own read model — the same security gate ``RedisTrigger`` projects
+  onto before publishing.
 
 :func:`add_asyncapi` mounts the document at a single ``GET`` route (default
-``/asyncapi.json``), generated **once at registration time** from the manifest
--- a resource's read model does not change per request, so there is nothing to
-regenerate per call.
+``/asyncapi.json``), generated **once at registration time** from the manifest.
 
-It also mounts a second ``GET`` route (default ``/asyncapi``) serving an HTML
-viewer, exactly the role FastAPI's own ``/docs`` plays for the REST surface:
-:func:`get_asyncapi_html` returns a small, static page that loads the
-`AsyncAPI React Component <https://github.com/asyncapi/asyncapi-react>`_'s
-standalone browser bundle from a CDN and points it at the JSON route -- the
-same "CDN script + link to the JSON this app already serves" shape
-``fastapi.openapi.docs.get_swagger_ui_html`` uses for Swagger UI, so there is
-no new static-asset-serving concern and no bundler step. Both routes are
-``include_in_schema=False`` (neither is a REST endpoint).
+It also mounts a second route (default ``/asyncapi``) serving an HTML viewer —
+the ``/docs`` equivalent for this channel — a static page loading the AsyncAPI
+React Component's CDN bundle and pointing it at the JSON route. Both routes are
+``include_in_schema=False``.
 
 This module is part of ``resourcey.realtime``; it imports only lower framework
 layers.
@@ -167,11 +150,8 @@ def _event_message(resource_path: str, item_schema_name: str) -> dict[str, Any]:
 def _rename_defs(schema: dict[str, Any], prefix: str) -> dict[str, Any]:
     """Pull a pydantic schema's ``$defs`` up to top-level, prefixed to avoid collisions.
 
-    Two different resources' read models may declare identically named nested
-    types (e.g. an ``EventKind``-like enum); prefixing every ``$defs`` key with
-    the owning resource's path, and rewriting every ``$ref`` that pointed at
-    it, keeps them from colliding once merged into one shared
-    ``components.schemas`` map.
+    Two resources' read models may declare identically named nested types, so
+    every ``$defs`` key and ``$ref`` is prefixed with the resource path.
     """
     defs = schema.pop("$defs", {})
     renamed = {f"{prefix}__{name}": body for name, body in defs.items()}
@@ -226,8 +206,7 @@ def generate_asyncapi_document(
 ) -> dict[str, Any]:
     """Build the AsyncAPI 2.6.0 document for ``manifest``'s realtime channel.
 
-    Pure and side-effect free (no FastAPI dependency), so it is directly
-    testable without mounting a route.
+    Pure and side-effect free, so it is directly testable without a route.
     """
     messages: dict[str, Any] = {
         "subscribe": _SUBSCRIBE_MESSAGE,
@@ -306,10 +285,8 @@ def get_asyncapi_html(
 ) -> HTMLResponse:
     """Build the HTML page that renders ``asyncapi_url`` with the AsyncAPI viewer.
 
-    Mirrors ``fastapi.openapi.docs.get_swagger_ui_html``: a self-contained page
-    loading a CDN JS bundle and CSS file, told where the JSON document already
-    served by this app lives. Pure and side-effect free, so it is directly
-    testable without mounting a route.
+    Mirrors ``get_swagger_ui_html``: a self-contained page loading a CDN bundle
+    and told where the JSON document lives.
     """
     html = f"""
     <!DOCTYPE html>
@@ -349,13 +326,9 @@ def add_asyncapi(
 ) -> APIRouter:
     """Mount the realtime WebSocket's AsyncAPI document and its HTML viewer.
 
-    Call **after** :func:`~resourcey.http.app.create_app` /
-    :func:`~resourcey.realtime.realtime_routes.add_realtime`, mirroring every
-    other after-the-fact mount in this framework. The document is generated
-    once, here, from the manifest's resources at registration time (a
-    resource's read model does not change per request). ``html_path`` (default
-    ``/asyncapi``) serves the rendered viewer -- the ``/docs`` equivalent for
-    this channel; pass ``html_path=None`` to mount the JSON only.
+    Call **after** ``create_app`` / ``add_realtime``. The document is generated
+    once, here, at registration time. Pass ``html_path=None`` to mount the JSON
+    only.
     """
     document = generate_asyncapi_document(
         manifest, path=path, title=title, version=version, server_url=server_url

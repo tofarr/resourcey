@@ -3,37 +3,19 @@
 A :class:`SearchFilter` is a frozen, generic, discriminated-union Pydantic model
 with a single behavioural method — ``matches(value) -> bool`` — plus the shape
 information a backend needs to translate it. Nothing here imports a storage
-library: the SQL translation lives in ``sql/filter_converter.py`` and this
-module is the bottom ``util`` layer, importing only its sibling
-:mod:`resourcey.util.models` (plus :mod:`resourcey.util.singleton`).
+library; this is the bottom ``util`` layer.
 
-Two levels of lowering
-----------------------
-1. **Standard filters** — the node types below (``AllFilter``, ``NoMatchFilter``,
-   ``AndFilter``, ``OrFilter``, ``NotFilter``, ``AttrFilter`` and the value
-   leaves ``EqFilter`` / ``GtFilter`` / ``GeFilter`` / ``LtFilter`` / ``LeFilter``
-   / ``ContainsFilter``). This is the tree a backend sees.
+Two levels of lowering:
+
+1. **Standard filters** — the node types below. This is the tree a backend sees.
 2. **Object filters** — :class:`BaseObjectFilter` subclasses declare
-   ``<attribute>__<op>`` fields (the ergonomic REST shape) and lower *themselves*
-   to a standard tree via :meth:`BaseObjectFilter.create_standard_filter`.
+   ``<attribute>__<op>`` fields and lower *themselves* to a standard tree via
+   :meth:`BaseObjectFilter.create_standard_filter`, so a custom object filter
+   needs no backend handler.
 
-A backend therefore only ever converts a standard tree; a custom object filter
-needs no backend handler at all, because it lowers first.
-
-Normalisation lives in the factory functions
---------------------------------------------
-A frozen Pydantic model cannot return a *different* type from ``__init__``, so
-the algebraic identities live in :func:`and_`, :func:`or_`, :func:`not_`, and
-:func:`attr` — which return the simplest equivalent node — rather than in a
-validator. The node classes themselves remain the raw, un-normalised form.
-
-Naming
-------
-Every node class ends in ``Filter``. That is consistent with ``v1``, avoids
-colliding with SQLAlchemy's ``and_`` / ``or_`` / ``not_`` / ``Column.contains``
-and the ``all`` / ``filter`` builtins, and — because
-:attr:`~resourcey.util.models.DiscriminatedUnionMixin.kind` is the class name
-— makes the OpenAPI discriminator unambiguous for free.
+Normalisation cannot live in ``__init__`` (a frozen model cannot return a
+different type), so the algebraic identities live in :func:`and_`, :func:`or_`,
+:func:`not_`, and :func:`attr`, which return the simplest equivalent node.
 """
 
 from __future__ import annotations
@@ -58,20 +40,14 @@ ValT = TypeVar("ValT")
 # The separator in an ``<attribute>__<op>`` object-filter field name.
 SEPARATOR = "__"
 
-# The most values an :class:`InFilter` may carry. An ``IN`` literal list is bounded
-# by the database's bind-parameter limit (SQLite's default is 999, Postgres
-# ~65535) and a very large set is a modelling smell; the cap keeps a set leaf well
-# inside the smallest of those. Beyond it, push the set down as a store join /
-# subquery (the materialized-ACL escape hatch) rather than a literal list.
+# The most values an :class:`InFilter` may carry. Beyond it, push the set down as
+# a store join / subquery rather than a literal list.
 MAX_IN_VALUES = 500
 
-# A nested filter field annotated with this is validated by the ``mode="before"``
-# resolvers below (which route a ``dict`` through ``SearchFilter.model_validate``)
-# and then accepted as-is. Without ``SkipValidation`` a *parameterised* generic
-# annotation (``SearchFilter[T]``) re-enters the discriminated-union validator on
-# an already-built instance, which the mixin's ``data.pop("kind")`` path cannot
-# handle. The resolver keeps the wire (dict) and in-memory (instance) paths both
-# working, and the annotation keeps mypy honest about the nested value type.
+# A nested filter field is validated by the ``mode="before"`` resolvers below and
+# then accepted as-is. Without ``SkipValidation`` a parameterised generic
+# annotation re-enters the discriminated-union validator on an already-built
+# instance, which the mixin cannot handle.
 NestedFilter = Annotated["SearchFilter[Any]", SkipValidation]
 NestedTuple = Annotated[tuple["SearchFilter[Any]", ...], SkipValidation]
 
@@ -92,8 +68,7 @@ class SearchFilter(DiscriminatedUnionMixin, Generic[T]):
     """A frozen predicate over values of type ``T``, tagged by ``kind``.
 
     The only behaviour is :meth:`matches`; storage translation is a backend
-    concern. Every field is part of the public structure a backend introspects,
-    so a translator never needs to subclass or modify the node types.
+    concern.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -106,8 +81,7 @@ class SearchFilter(DiscriminatedUnionMixin, Generic[T]):
     def create_standard_filter(self) -> SearchFilter[Any]:
         """This filter as a standard tree (identity for a standard node).
 
-        :class:`BaseObjectFilter` overrides this to lower its ``<attr>__<op>``
-        fields; a backend only ever needs to convert the result.
+        :class:`BaseObjectFilter` overrides this to lower its fields.
         """
         return self
 
@@ -185,10 +159,8 @@ class NotFilter(SearchFilter[T]):
 class AttrFilter(SearchFilter[ObjT], Generic[ObjT, ValT]):
     """Applies a value filter to one attribute of the object.
 
-    ``ObjT`` is the object type; ``ValT`` is the attribute's type. Two type
-    parameters are needed because the wrapped filter is ``SearchFilter[ValT]``
-    while the filter itself is a ``SearchFilter[ObjT]`` — a single parameter
-    cannot express both.
+    Two type parameters are needed: the wrapped filter is ``SearchFilter[ValT]``
+    while this node is a ``SearchFilter[ObjT]``.
     """
 
     attribute: str
@@ -261,12 +233,9 @@ class LeFilter(SearchFilter[T]):
 class ContainsFilter(SearchFilter[T]):
     """Substring / membership: ``stored`` contains this filter's ``value``.
 
-    Pinned semantics (the issue left this ambiguous): the *stored* attribute
-    value is the haystack and the filter's ``value`` is the needle, so an
-    ``AttrFilter("name", ContainsFilter(value="ali"))`` means "``name`` contains
-    ``ali``" — which is what ``?name__contains=ali`` must mean. Strings compare
-    case-insensitively as substrings; other values fall back to membership
-    (``needle in stored``).
+    The *stored* attribute value is the haystack and the filter's ``value`` the
+    needle. Strings compare case-insensitively; other values fall back to
+    membership.
     """
 
     value: T
@@ -278,19 +247,11 @@ class ContainsFilter(SearchFilter[T]):
 class InFilter(SearchFilter[T]):
     """Set membership: the stored value is one of ``values``.
 
-    ``values`` is a **tuple** (not a list) so the frozen tree stays hashable, the
-    same reason :class:`AndFilter` / :class:`OrFilter` children are tuples. It
-    composes with the existing :class:`AttrFilter`, which binds the column::
+    ``values`` is a **tuple** so the frozen tree stays hashable. An **empty set
+    matches nothing** (fail-closed): it is a deny, never "no restriction".
 
-        AttrFilter("id", InFilter(values=(uuid1, uuid2, ...)))
-
-    An **empty set matches nothing** (fail-closed): it is a deny, never "no
-    restriction". This is deliberate and differs from v1's ``AclFilter``, whose
-    empty id list meant "no restriction" -- a footgun for a permission set.
-
-    ``values`` is capped at :data:`MAX_IN_VALUES` so an unbounded ``IN`` list is
-    refused with an actionable error; the escape hatch beyond the cap is a store
-    join / subquery (the materialized-ACL path), not a literal list.
+    ``values`` is capped at :data:`MAX_IN_VALUES`; beyond it a store join /
+    subquery is the escape hatch.
     """
 
     values: tuple[T, ...]
@@ -419,8 +380,7 @@ def _flatten(filters: Iterable[SearchFilter[Any]], node_type: type[Any]) -> list
 # BaseObjectFilter — the ergonomic ``<attribute>__<op>`` surface
 # ---------------------------------------------------------------------------
 
-# Object-filter operator suffix -> standard leaf node type. Suffixes mirror the
-# node names (``ge`` / ``le``), not v1's ``gte`` / ``lte``.
+# Object-filter operator suffix -> standard leaf node type.
 _OP_NODES: dict[str, Any] = {
     "eq": EqFilter,
     "gt": GtFilter,
@@ -435,17 +395,10 @@ _OP_NODES: dict[str, Any] = {
 class BaseObjectFilter(SearchFilter[T]):
     """A filter whose clauses are declared as ``<attribute>__<op>`` fields.
 
-    Subclass it and declare optional fields named ``<attribute>__<op>`` (for
-    example ``email__contains``, ``created_at__ge``). The base reflects over its
-    own Pydantic fields, collects every non-``None`` value, and lowers them to a
-    standard filter tree with :meth:`create_standard_filter` — cached once, on
-    first match, in a private attribute (never a field, so it stays out of
-    ``model_dump`` / iteration, which the count ETag relies on).
-
-    An unset (or all-``None``) filter lowers to ``AllFilter`` and so matches
-    everything. ``T`` is the entity type; a subclass may declare it via
-    ``Generic`` parameterisation for documentation, but lowering does not depend
-    on it.
+    The base reflects over its own Pydantic fields, collects every non-``None``
+    value, and lowers them to a standard filter tree, cached in a private
+    attribute (never a field, so it stays out of ``model_dump``). An unset filter
+    lowers to ``AllFilter``.
     """
 
     _standard_filter: SearchFilter[Any] | None = PrivateAttr(default=None)
@@ -480,10 +433,7 @@ class BaseObjectFilter(SearchFilter[T]):
 # Deriving a query surface from a read model
 # ---------------------------------------------------------------------------
 
-# Operator suffixes by base Python type. Equality is always allowed; ordering
-# only where it is meaningful; ``contains`` only for strings; ``in`` (set
-# membership) for every filterable field, since a set test is a variant of
-# equality.
+# Operator suffixes by base Python type.
 _IN = frozenset({"in"})
 _ORDERED_OPS = frozenset({"gt", "ge", "lt", "le"})
 _EQ_ONLY = frozenset({"eq"}) | _IN
@@ -500,10 +450,8 @@ _CONTAINER_TYPES = (dict, list, set, frozenset, tuple)
 def _base_annotation(annotation: Any) -> Any:
     """Strip ``Optional`` / ``Annotated`` down to the underlying scalar type.
 
-    Only ``Annotated`` and a union (``Optional`` / ``X | None``) are unwrapped; a
-    generic container (``list[str]``, ``dict``) is returned as-is, so
-    :func:`operators_for_annotation` can reject it rather than mistake a
-    ``list[str]`` column for a ``str``.
+    A generic container is returned as-is, so :func:`operators_for_annotation`
+    can reject it rather than mistake a ``list[str]`` column for a ``str``.
     """
     origin = get_origin(annotation)
     if origin is Annotated:
@@ -518,12 +466,8 @@ def _base_annotation(annotation: Any) -> Any:
 def operators_for_annotation(annotation: Any) -> frozenset[str]:
     """The ``<op>`` suffixes a field of ``annotation`` supports.
 
-    The derived query surface: a field is filterable exactly when the read model
-    exposes it, and the operator set follows the field's type (equality for
-    scalars, ordering for numbers and datetimes, substring for strings, and the
-    ``in`` set test throughout). A non-scalar annotation (a JSON ``dict`` / list
-    column, or a model-typed column) yields **no** operators: it is not scalarly
-    comparable, and a query param of that type is not one FastAPI can wire.
+    A non-scalar annotation (a JSON ``dict`` / list column, or a model-typed
+    column) yields **no** operators: it is not scalarly comparable.
     """
     base = _base_annotation(annotation)
     if isinstance(base, type):
@@ -553,10 +497,8 @@ def build_filter(clauses: Iterable[tuple[str, str, Any]]) -> SearchFilter[Any]:
 def _leaf_for(op: str, value: Any) -> SearchFilter[Any]:
     """Construct the value leaf for ``op``, naming its field correctly.
 
-    Most leaves take ``value``; the set leaf (:class:`InFilter`) takes ``values``.
-    A comma-separated string (the wire form of a set) is split into a tuple, and
-    a bare scalar is wrapped, so both the query-string path and an already-typed
-    object-filter field lower to the same leaf.
+    The set leaf takes ``values``; a comma-separated string (the wire form of a
+    set) is split into a tuple and a bare scalar is wrapped.
     """
     if op == "in":
         if isinstance(value, str):

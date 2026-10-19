@@ -4,11 +4,9 @@ Both client resources expose the same seam the authenticator validates through::
 
     async def find_by_issuer(self, issuer: str) -> Any | None
 
-``issuer`` is the presented token's ``iss`` claim; a match is the client row /
-config entry whose ``issuer`` equals it. The lookup is a dedicated method, never
-a :class:`~resourcey.util.search_filter.SearchFilter` — the public query surface
-is closed over the client secret, so a guess-confirmation oracle over it must not
-be reachable.
+``issuer`` is the presented token's ``iss`` claim. The lookup is a dedicated
+method, never a ``SearchFilter``: the public query surface is closed over the
+client secret, so a guess-confirmation oracle over it must not be reachable.
 
 :class:`ExternalIdentityService` adds the ``(issuer, subject)`` mapping lookup
 that correlates an external principal across providers, plus the link helper.
@@ -31,8 +29,7 @@ class OAuthClientService(SqlService[Any, Any]):
     async def find_by_issuer(self, issuer: str) -> Any | None:
         """The stored client row whose ``issuer`` equals ``issuer``, or ``None``.
 
-        A direct indexed equality lookup through the resource's escape hatch,
-        never the public query surface.
+        A direct indexed equality lookup, never the public query surface.
         """
         session = self._active_session()
         column = self._resource.table.c["issuer"]

@@ -1,37 +1,14 @@
 """FastAPI route mounting for a resource's standard actions.
 
-This is the transport layer's route half: it turns a
-:class:`~resourcey.core.resource.Resource` declaration into FastAPI routes
-for the actions the resource supports, projecting each action's DTO result onto
-the matching derived REST model.
+Turns a :class:`~resourcey.core.resource.Resource` declaration into FastAPI
+routes for the actions it supports, projecting each action's DTO result onto the
+matching derived REST model.
 
-:func:`register_routes` resolves the exposed resource once
-(``resource.get_exposed_resource()``): a hidden resource registers no routes,
-and the exposed resource drives the path, the derived models, the supported
-actions, and the service dependency. The per-request service dependency is
-built through the configured :class:`~resourcey.http.dependency_builder.DependencyBuilder`
-(issue #86): the builder is resolved on the **exposed** resource, so a
-projection's wrapped service is the projection's, not the hidden inner
-resource's.
-
-Where the seams differ from the earlier iteration:
-
-* ``v1``'s ``get_create_model`` / ``get_update_model`` / ``get_read_model`` are
-  replaced by ``get_rest_models()`` -> :class:`~resourcey.core.dto.RestModels`,
-  so each action is mapped to the right shape explicitly (``create`` ->
-  ``create_response``, so the one-time-reveal field survives).
-* services return DTO instances, so every response is **projected** onto the
-  REST model here (:func:`_project`), dropping the ``MISSING`` sentinel.
-* filtering is back (issue #79): search and count accept ``<field>__<op>``
-  query params, validated against the exposed resource's filter surface (a
-  declared :meth:`~resourcey.core.resource.Resource.get_search_filter_type`,
-  else derived from the read model). Sorting is back too (issue #97): search
-  accepts ``sort`` / ``desc``, validated against the exposed resource's
-  :meth:`~resourcey.core.resource.Resource.get_sortable_fields`.
-* caching is back (issue #92): the exposed resource's
-  :meth:`~resourcey.core.resource.Resource.get_cache_strategy` drives
-  ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires`` headers, and a
-  conditional ``GET`` short-circuits to ``304 Not Modified``.
+:func:`register_routes` resolves the exposed resource once: a hidden resource
+registers no routes, and the exposed resource drives the path, the derived
+models, the supported actions, and the service dependency. The builder is
+resolved on the **exposed** resource, so a projection's wrapped service is the
+projection's, not the hidden inner resource's.
 
 This module imports no code outside the framework.
 """
@@ -81,14 +58,10 @@ from resourcey.util.search_filter import SEPARATOR, SearchFilter, build_filter
 
 T = TypeVar("T", bound=BaseModel)
 
-# The batch-edit ``condition`` wire field. It is typed ``Any`` rather than the
-# native ``SearchFilter`` union: FastAPI's ``generate_definitions`` re-generates
-# a JSON schema for the parameterised generic base and hits
-# ``DiscriminatedUnionMixin``'s "no subclasses" guard, even under a
-# ``WithJsonSchema`` override. ``Any`` sidesteps that, the explicit schema
-# documents the shape, and ``_resolve_wire_condition`` (below) turns the incoming
-# dict into a real filter before the node is built. A bare ``SearchFilter`` field
-# on core's ``Update`` / ``Delete`` resolves a dict the same way.
+# The batch-edit ``condition`` wire field is typed ``Any`` rather than the native
+# ``SearchFilter`` union: FastAPI re-generates a JSON schema for the parameterised
+# generic base and hits ``DiscriminatedUnionMixin``'s "no subclasses" guard, even
+# under a ``WithJsonSchema`` override.
 _WireCondition = Annotated[Any, WithJsonSchema({"type": "object", "title": "SearchFilter"})]
 
 
@@ -110,31 +83,14 @@ def register_routes(
     """Build an :class:`APIRouter` with the exposed resource's action routes and include it.
 
     Accepts a ``FastAPI`` app, an ``APIRouter``, or any object with
-    ``include_router`` (duck-typed). Resolution order:
+    ``include_router`` (duck-typed). ``exposed = resource.get_exposed_resource()``
+    is the sole gate on exposure: when it is ``None`` the resource is
+    internal-only and **no** routes are registered.
 
-    1. ``exposed = resource.get_exposed_resource()``. When it is ``None`` the
-       resource is internal-only and **no** routes are registered — the sole
-       gate on exposure.
-    2. ``exposed`` drives the path, the derived models, the supported actions,
-       and the service dependency.
-
-    ``dependency_builder`` decides how the per-request service dependency is
-    built (issue #86); it defaults to
-    :class:`~resourcey.http.dependency_builder.OpenDependencyBuilder`. It
-    is resolved on ``exposed``, so a projection's wrapped service is the
-    projection's.
-
-    The ``{resource}`` path segment is the plural, lower-case, kebab-case name
-    from ``exposed.get_resource_path()``; sub-paths use dashes (``batch-read``,
-    ``batch-edit``, ``count``). ``tags`` defaults to that path humanized
-    (``"threads"`` -> ``"Threads"``, ``"api-keys"`` -> ``"Api Keys"``), so
-    operations group by resource rather than by the *framework* class that
-    happens to implement it — a model-first ``SqlResource(Thread, ...)`` and a
-    ``MessageResource(Message, ...)`` land in distinct groups, and a
-    ``ResourceView`` does not collapse into a single ``ResourceView`` bucket. A
-    route is only added if none already exists at that path + method on the
-    target router — a developer who registers a custom route first keeps it
-    (escape hatch). Returns the built :class:`APIRouter`.
+    ``tags`` defaults to the resource path humanized, so operations group by
+    resource rather than by the framework class implementing it. A route is only
+    added if none already exists at that path + method on the target router — a
+    developer who registers a custom route first keeps it (escape hatch).
     """
     exposed = resource.get_exposed_resource()
     if exposed is None:
@@ -225,10 +181,8 @@ def _service_dependency(
 ) -> Callable[..., AsyncIterator[Service[T, Any]]]:
     """Resolve the per-request service dependency for ``resource`` via ``builder``.
 
-    The builder is consulted **once, here, at registration time** (issue #86);
-    the callable it returns is what FastAPI invokes per request. It is
-    generic over the DTO type, so a route's injected ``service`` is typed
-    against the resource's DTO.
+    The builder is consulted **once, at registration time**; the callable it
+    returns is what FastAPI invokes per request.
     """
     dependency = builder.get_service_dependency(resource)
     if not callable(dependency):
@@ -247,16 +201,11 @@ def _service_dependency(
 def _filter_surface(resource: Resource[Any, Any]) -> dict[str, tuple[Any, frozenset[str]]]:
     """The exposed resource's filter surface: attribute -> (annotation, ops).
 
-    Two sources, matching the two candidates in issue #79:
-
-    * a **declared** filter class (:meth:`get_search_filter_type`) — its
-      ``<attribute>__<op>`` fields are the whole surface (v1's opt-in style);
-    * the **derived** surface (:meth:`get_filter_operators`) — a field is
-      filterable exactly when the read model exposes it, with the operator set
-      fixed by the field's type.
-
-    The returned mapping drives both the generated FastAPI query parameters and
-    the rejection of unknown ``field__op`` params.
+    Two sources: a **declared** filter class, whose ``<attribute>__<op>`` fields
+    are the whole surface, or the **derived** surface, where a field is
+    filterable exactly when the read model exposes it. The mapping drives both
+    the generated query parameters and the rejection of unknown ``field__op``
+    params.
     """
     declared = resource.get_search_filter_type()
     if declared is not None:
@@ -284,10 +233,9 @@ def _filter_dependency(
 ) -> Callable[..., dict[str, Any]]:
     """Build a FastAPI dependency exposing each ``<attribute>__<op>`` as a query param.
 
-    The signature is synthesised (one typed, ``Query``-defaulted parameter per
-    attribute/operator pair) so FastAPI unfolds them into OpenAPI parameters and
-    coerces each value before the handler runs. Unknown params are not rejected
-    by FastAPI, so the handler still validates the raw query keys.
+    The signature is synthesised so FastAPI unfolds the parameters into OpenAPI
+    and coerces each value. Unknown params are not rejected by FastAPI, so the
+    handler validates the raw query keys separately.
     """
     parameters: list[inspect.Parameter] = []
     for attribute, (annotation, ops) in surface.items():
@@ -318,11 +266,9 @@ def _resolve_filters(
 ) -> SearchFilter[Any] | None:
     """Validate the ``field__op`` query keys and build a standard filter tree.
 
-    FastAPI collects the declared params into ``values`` (typed / coerced) and
-    surfaces them in OpenAPI, but it silently ignores unknown query parameters.
-    To keep a typo from being dropped, any ``field__op`` key outside the surface
-    is rejected with :class:`InvalidInputError` (mapped to ``400``). With no
-    surface at all, every filter param is rejected. Returns ``None`` when no
+    FastAPI silently ignores unknown query parameters, so any ``field__op`` key
+    outside the surface (or any filter param at all when there is no surface) is
+    rejected with :class:`InvalidInputError` (``400``). Returns ``None`` when no
     filter params were supplied.
     """
     present = {key for key in request.query_params if SEPARATOR in key}
@@ -358,14 +304,10 @@ def _resolve_filters(
 def _coerce_filter_value(op: str, value: Any, annotation: Any) -> Any:
     """Coerce a wire filter value to the field's type.
 
-    ``in`` arrives as a comma-separated string (the transport types it as
-    ``str``); each item must be coerced to the column's type (UUID, int, ...)
-    before the ``IN`` predicate binds it, so a typed set filter accepts the same
-    string form a single-value filter already does. Every other operator is
-    already coerced by FastAPI via its typed query parameter.
-
-    A malformed item is an ``InvalidInputError`` (``400``), matching the ``422``
-    FastAPI gives a bad single-value param, rather than escaping as a ``500``.
+    ``in`` arrives as a comma-separated string, so each item is coerced to the
+    column's type before the ``IN`` predicate binds it. Every other operator is
+    already coerced by FastAPI. A malformed item is an ``InvalidInputError``
+    (``400``) rather than a ``500``.
     """
     if op != "in" or not isinstance(value, str):
         return value
@@ -387,11 +329,8 @@ def _coerce_filter_value(op: str, value: Any, annotation: Any) -> Any:
 def _resource_display_name(exposed: Resource[Any, Any]) -> str:
     """A human-readable name for ``exposed``, from its DTO type.
 
-    Used to make each operation's summary / description name the resource it
-    acts on (e.g. "Create Thread"). The declaration's trailing ``DTO``
-    convention suffix is dropped so ``ThreadDTO`` reads as ``Thread`` (matching
-    the SQL backend's inferred ``Thread``). Falls back to the resource path when
-    the DTO type has no usable name.
+    The trailing ``DTO`` suffix is dropped so ``ThreadDTO`` reads as ``Thread``.
+    Falls back to the resource path when the DTO type has no usable name.
     """
     name = getattr(exposed.get_dto_type(), "__name__", "")
     if name.endswith("DTO") and len(name) > 3:
@@ -404,14 +343,9 @@ def _resource_display_name(exposed: Resource[Any, Any]) -> str:
 def _default_tag(exposed: Resource[Any, Any]) -> str:
     """The default OpenAPI tag for ``exposed``: its collection path, humanized.
 
-    ``type(exposed).__name__`` is a poor tag for a model-first resource — every
-    bare ``SqlResource(Thread, ...)`` would share the one ``"SqlResource"``
-    bucket, and every ``ResourceView`` would collapse into ``"ResourceView"``.
-    The REST path is the identifier the routes actually live under and is
-    already the plural, kebab-case collection name, so humanizing it groups
-    operations the way a caller navigates them: ``threads`` -> ``Threads``,
-    ``messages`` -> ``Messages``, ``api-keys`` -> ``Api Keys``. It falls back to
-    the framework class name only if the path is somehow empty.
+    ``type(exposed).__name__`` is a poor tag — every bare
+    ``SqlResource(Thread, ...)`` would share one ``"SqlResource"`` bucket. The
+    REST path groups operations the way a caller navigates them.
     """
     return humanize(exposed.get_resource_path()) or type(exposed).__name__
 
@@ -419,13 +353,8 @@ def _default_tag(exposed: Resource[Any, Any]) -> str:
 def _operation_metadata(action: Action, resource_name: str) -> tuple[str, str]:
     """The ``(summary, description)`` for one generated operation.
 
-    Every handler is a closure, so FastAPI would otherwise fall back to the
-    bare summary "Handler" and emit no description for every route. These name
-    the action and the resource so the generated OpenAPI is self-describing.
-
-    ``{name}`` is the singular resource name and ``{plural}`` its plural, so the
-    read-side actions can talk about the collection and the rest about one
-    object.
+    Every handler is a closure, so FastAPI would otherwise label every operation
+    the bare summary "Handler" with no description.
     """
     templates: dict[Action, tuple[str, str]] = {
         Action.CREATE: (
@@ -610,19 +539,8 @@ def _add_search_route(
 ) -> None:
     """Register ``GET /{resource}`` — cursor-paginated, filterable, sortable search.
 
-    ``limit`` and ``cursor`` paginate; ``sort`` / ``desc`` order the page
-    (resolved by the exposed resource's
-    :meth:`~resourcey.core.resource.Resource.resolve_sort_order`, an unknown
-    or non-sortable field -> ``400``); declared ``<field>__<op>`` query params
-    are collected into a standard :class:`SearchFilter` and pushed down. The
-    filter surface (fields + operators) comes from the exposed resource's
-    :meth:`~resourcey.core.resource.Resource.get_filter_operators` (or a
-    declared :meth:`~...get_search_filter_type`); an unknown field or operator,
-    or any filter on a resource with no surface, is rejected ``400``.
-
-    The resolved ordering and filter are passed to ``search`` as plain
-    arguments (``search_filter`` / ``sort_order`` / ``cursor`` / ``limit``) rather
-    than wrapped in a request object.
+    An unknown or non-sortable sort field, and an unknown filter field or
+    operator, are rejected ``400``.
     """
     filter_spec = _filter_surface(exposed)
     filter_dep = _filter_dependency(filter_spec)
@@ -680,9 +598,8 @@ def _add_count_route(
 ) -> None:
     """Register ``GET /{resource}/count`` — the count of matching rows.
 
-    Accepts the same ``<field>__<op>`` filter surface as search, and contributes
-    the resolved filter to the cache ETag so distinct filters get distinct
-    validators.
+    Accepts the same filter surface as search, and contributes the resolved
+    filter to the cache ETag so distinct filters get distinct validators.
     """
     filter_spec = _filter_surface(exposed)
     filter_dep = _filter_dependency(filter_spec)
@@ -759,16 +676,8 @@ def _add_batch_edit_route(
 ) -> None:
     """Register ``POST /{resource}/batch-edit`` — mixed create / update / delete.
 
-    The body is a list discriminated by ``kind`` (``Create`` / ``Update`` /
-    ``Delete``), so one batch can create, update, *and* delete. Each item is
-    folded into the matching :class:`~resourcey.core.service.Edit` node and
-    the results align positionally with the input (a delete, or a miss, is
-    ``None``).
-
-    ``create`` / ``delete`` are only admitted when the resource *declares* those
-    actions (``supported``), so a batch cannot reach an action the resource
-    never exposed; the corresponding ``kind`` is absent from the body schema and
-    an unexpected one is rejected ``422``.
+    Each ``kind`` is only admitted when the resource declares the matching
+    action, so a batch cannot reach an action the resource never exposed.
     """
     allow_create = Action.CREATE in supported
     allow_update = Action.UPDATE in supported
@@ -847,17 +756,9 @@ def _project(
 ) -> BaseModel | None:
     """Project a DTO instance onto a derived REST model (dropping ``MISSING``).
 
-    The DTO is the internal type; the wire body is the projection. Fields the
-    service left ``MISSING`` are omitted so the REST model's own defaults apply.
-    ``None`` (a ``batch_read`` / ``batch_edit`` miss) projects to ``None``.
-
-    ``context`` is the service's serialization context; it is threaded into
-    ``model_validate`` so a secret-bearing field loads per the convention
-    (decrypted under an ``encryption_service``, plaintext under
-    ``expose_secrets``).
-
-    Returns the validated model instance (not a dict) so the cache strategy can
-    hash exactly the representation that will be serialised.
+    ``context`` is threaded into ``model_validate`` so a secret-bearing field
+    loads per the convention. Returns the validated model instance (not a dict)
+    so the cache strategy hashes exactly the representation that is serialised.
     """
     if instance is None:
         return None
@@ -866,11 +767,7 @@ def _project(
 
 
 def _dump(projected: Any, context: dict[str, Any] | None = None) -> Any:
-    """Serialise a projected model / list / scalar to a JSON-ready value.
-
-    ``context`` is the service's serialization context, threaded into
-    ``model_dump`` so the wire body reflects it rather than always redacting.
-    """
+    """Serialise a projected model / list / scalar to a JSON-ready value."""
     if isinstance(projected, BaseModel):
         return projected.model_dump(mode="json", context=context)
     if isinstance(projected, list):
@@ -908,12 +805,9 @@ def _response_is_private(service: Any) -> bool:
 def _private_strategy(strategy: Any, service: Any) -> Any:
     """``strategy`` with privacy forced on when ``service`` is caller-scoped.
 
-    A principal-narrowed resource (an ``Owner`` policy, or any resolver / policy
-    that scopes to the caller) must not let a shared cache store or revalidate
-    its response under a validator another caller could present. Forcing
-    ``private`` onto the strategy makes the emitted ``Cache-Control`` carry
-    ``private``. A strategy with no ``with_private`` (the ``core`` placeholder)
-    is left alone — it produces no validator, so there is nothing to protect.
+    A principal-narrowed response must not let a shared cache store or revalidate
+    it under a validator another caller could present. A strategy with no
+    ``with_private`` (the ``core`` placeholder) is left alone.
     """
     if strategy is None or not _response_is_private(service):
         return strategy
@@ -930,11 +824,8 @@ def _header_for(
     """Compute the cache header for ``items`` via the resource's strategy.
 
     ``None`` when the resource declares no strategy or the strategy yields
-    nothing (no validators and no freshness), so the response is uncached.
-    ``context`` is the service's serialization context, so a secret-bearing ETag
-    hashes exactly the bytes the response carries. ``service`` supplies the
-    per-request privacy fact (a caller-scoped response forces ``private`` onto
-    the header), so a shared cache cannot replay it across principals.
+    nothing, so the response is uncached. ``context`` makes a secret-bearing ETag
+    hash exactly the bytes the response carries.
     """
     if strategy is None:
         return None
@@ -951,8 +842,7 @@ def _http_date(value: datetime) -> str:
 
 
 def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
-    """Build the ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires``
-    response headers from a :class:`CacheHeader`'s non-``None`` fields."""
+    """Build the cache response headers from a :class:`CacheHeader`'s non-``None`` fields."""
     has_validator = header.etag is not None or header.updated_at is not None
     headers: dict[str, str] = {}
     if header.etag is not None:
@@ -985,8 +875,7 @@ def _cache_response_headers(header: CacheHeader) -> dict[str, str]:
 
 def _client_cache_header(request: Request) -> CacheHeader:
     """Map a request's ``If-None-Match`` / ``If-Modified-Since`` into a
-    :class:`CacheHeader` (the client's validators). ``expire_at`` is not a
-    client validator, so it is always ``None`` here."""
+    :class:`CacheHeader` of the client's validators."""
     etag = request.headers.get("if-none-match")
     if_modified_since = request.headers.get("if-modified-since")
     updated_at: datetime | None = None
@@ -1006,18 +895,10 @@ def _cached_json_response(
     header: CacheHeader | None,
     status_code: int = status.HTTP_200_OK,
 ) -> Response:
-    """Serialise ``body`` as JSON, applying cache headers and conditional
-    ``304`` short-circuiting.
+    """Serialise ``body`` as JSON, applying cache headers and conditional ``304``.
 
-    When ``header`` is ``None`` (the strategy yielded nothing) this is a plain
-    JSON response. Otherwise the validator + freshness headers are set, and if
-    the request is a safe method (``GET`` / ``HEAD`` - RFC 7232 restricts
-    ``304 Not Modified`` to safe methods) and the client's conditional request
-    headers prove the copy is current (``header.is_modified(client)`` is
-    ``False``) a ``304 Not Modified`` with an empty body (but the validator +
-    ``Cache-Control`` headers) is returned. Unsafe methods (``POST`` / ``PATCH``
-    / ``DELETE``) still emit the headers on the response but always send the
-    body - they cannot short-circuit to ``304``.
+    RFC 7232 restricts ``304 Not Modified`` to safe methods, so an unsafe method
+    still emits the headers but always sends the body.
     """
     if header is None:
         return _json_response(body, status_code)
@@ -1053,28 +934,12 @@ def _batch_edit_body(
 ) -> Any:
     """Build the ``batch-edit`` body: a ``kind``-discriminated union of edits.
 
-    The wire shapes match :class:`~resourcey.core.service.Create`,
-    :class:`~resourcey.core.service.Update`, and
-    :class:`~resourcey.core.service.Delete`:
+    The wire shapes match the ``Create`` / ``Update`` / ``Delete`` service
+    nodes. ``Delete`` carries the identifier directly rather than nesting it
+    under ``item``: there is no payload to nest.
 
-    * ``{kind: "Create", item: <create_request>}``
-    * ``{kind: "Update", item: {<id_field>, ...update_request fields}}``
-    * ``{kind: "Delete", <id_field>: <id>}``
-
-    The update item carries the identifier because the path does not; a create
-    item is the create request verbatim (a server-generated id is absent, a
-    natural key is client-supplied). ``Delete`` carries the identifier directly
-    rather than nesting it under ``item``: there is no payload to nest, and
-    mirroring the other nodes' ``item`` wrapper would only add an empty object.
-
-    ``allow_create`` / ``allow_update`` / ``allow_delete`` narrow the union to
-    the actions the resource declares, so a batch can never reach an action the
-    resource does not expose: the corresponding ``kind`` is absent from the body
-    schema and an unexpected one is rejected before a node is ever built. A
-    ``kind`` with no allowed member would make an empty union, so when none of
-    the three is allowed ``batch_edit`` itself was dropped by
-    :func:`~resourcey.core.service.normalize_actions` and this function is
-    never reached.
+    The ``allow_*`` flags narrow the union to the declared actions. When none is
+    allowed ``batch_edit`` was already dropped by ``normalize_actions``.
     """
     members: list[Any] = []
     if allow_create:
@@ -1148,9 +1013,9 @@ def _project_edit_result(
 ) -> BaseModel | None:
     """Project a batch-edit result onto the shape for its edit.
 
-    A delete yields ``None`` (nothing to return); a create projects onto the
-    create response (so a one-time-reveal field survives) and an update onto the
-    update response. A miss (``result`` is ``None``) stays ``None``.
+    A delete or a miss yields ``None``; a create projects onto the create
+    response (so a one-time-reveal field survives) and an update onto the update
+    response.
     """
     if isinstance(edit, Delete) or result is None:
         return None
@@ -1162,12 +1027,7 @@ def _project_edit_result(
 def _update_dto(
     dto_model: type[BaseModel], id_field: str, id_value: Any, payload: BaseModel
 ) -> BaseModel:
-    """Build the update DTO from the request body, injecting the path identifier.
-
-    ``request_to_dto`` is the single sanctioned request->DTO hop (``exclude_unset``);
-    the id is set here so the DTO carries its own identifier and the service takes
-    just the DTO.
-    """
+    """Build the update DTO from the request body, injecting the path identifier."""
     dto = request_to_dto(dto_model, payload)
     setattr(dto, id_field, id_value)
     return dto
@@ -1186,18 +1046,7 @@ def _normalize_prefix(prefix: str) -> str:
 def register_error_handlers(app: FastAPI) -> None:
     """Register the consistent error envelope on a FastAPI app.
 
-    Maps the exceptions the framework has today to the documented status + code:
-
-    * ``NotFoundError`` -> 404 ``not_found``
-    * ``ForbiddenError`` -> 403 ``forbidden``
-    * ``InvalidInputError`` -> 400 ``invalid_input``
-    * ``UnsupportedFilterError`` -> 501 ``unsupported_filter``
-    * ``ConflictError`` / ``IntegrityError`` -> 409 ``conflict``
-    * ``ServiceError`` -> 500 ``internal_error``
-    * Pydantic validation failures keep FastAPI's 422 (its default handler).
-
-    The wider ``ResourceyError`` hierarchy (issue #83) extends this same
-    function.
+    Pydantic validation failures keep FastAPI's default ``422`` handler.
     """
 
     @app.exception_handler(NotFoundError)

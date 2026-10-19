@@ -1,44 +1,23 @@
 """The store-backed ``PolicyResolver`` for RBAC (issue #133).
 
-:class:`RbacPolicyResolver` implements Part 1's
-:class:`~resourcey.auth.auth_policy.PolicyResolver` seam against the stored
-RBAC tables: for each request it resolves the authenticated principal's
+:class:`RbacPolicyResolver` implements the ``PolicyResolver`` seam against the
+stored RBAC tables: for each request it resolves the authenticated principal's
 **groups → roles → permissions** for the target resource and OR-combines them
 (the union model — a ``DenyAll`` contributes nothing; an empty set is
-fail-closed). It is Part 3's answer to #131's forward-compatible seam.
+fail-closed).
 
-Resolution
-----------
-1. Take the authenticated :class:`~resourcey.auth.auth_principal.Principal`
-   (whose credential carries a ``user_id`` / ``sub``). An anonymous principal
-   (``id is None``) resolves to the empty set (deny / fail-closed).
-2. Ask the :class:`~resourcey.auth.auth_rbac_store.RbacStore` for the
-   principal's groups and the role → permission policies **scoped to the target
-   resource** (never the principal's permissions for other resources).
-3. Bind the principal's group membership onto any
-   :class:`~resourcey.auth.auth_policy.GroupMember` policy, so its pure
-   reduction can branch on it.
-4. Return the policies; ``AuthorizedService`` OR-combines their reductions.
+Resolution: take the principal (an anonymous one resolves to the empty set), ask
+the store for the principal's groups and the resource-scoped policies, bind the
+group membership onto any ``GroupMember`` policy, and return the policies.
 
-Completeness + scaling
-----------------------
-The result is **complete** for ``(principal, resource)`` — a disjunction cannot
-be evaluated from a partial view — but it is **collapsed at the store**: a
-scoped query, ``SELECT DISTINCT``, and a single ``IN`` set for same-attribute
-grants. The materialized-ACL join/subquery is the documented escape hatch for a
-genuinely unbounded per-object grant set (see
-:meth:`materialized_acl` and
-:mod:`resourcey.auth.auth_rbac_store`).
+The result is **complete** for ``(principal, resource)`` but **collapsed at the
+store**: a scoped query, ``SELECT DISTINCT``, and a single ``IN`` set for
+same-attribute grants. The materialized-ACL join/subquery is the documented
+escape hatch for a genuinely unbounded per-object grant set.
 
-Freshness / the validation threshold
-------------------------------------
-A membership change is honoured no later than the credential's validation
-threshold (Part 1's cookie ``exp`` / refresh threshold). That trade-off is
-**explicit and configurable** here: :attr:`cache_ttl` bounds how long a resolved
-policy set is reused. ``None`` (the default) resolves every request, so an API
-key — which has no freshness threshold — sees a membership change immediately;
-an app serving cookies can set ``cache_ttl`` to (at most) its refresh window and
-accept the same staleness the credential already does.
+Freshness is explicit: :attr:`cache_ttl` bounds how long a resolved policy set is
+reused. ``None`` (the default) resolves every request, so an API key — which has
+no freshness threshold — sees a membership change immediately.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
 """
@@ -62,15 +41,9 @@ from resourcey.core.resource import Resource
 class RbacPolicyResolver(PolicyResolver):
     """Resolve a principal's stored groups → roles → permissions, per request.
 
-    Attributes:
-        store: The read seam over the RBAC tables (e.g.
-            :class:`~resourcey.auth.auth_rbac_store.SqlRbacStore`).
-        cache_ttl: How long a resolved policy set may be reused, or ``None``
-            (the default) to resolve on every request. It is the explicit
-            freshness knob: a membership change is honoured no later than
-            ``cache_ttl`` (and no later than the credential's own validation
-            threshold). Keep it at or below the cookie refresh window.
-        clock: The monotonic clock the cache reads, injectable for tests.
+    ``cache_ttl`` is the explicit freshness knob: a membership change is
+    honoured no later than ``cache_ttl`` (and no later than the credential's
+    own validation threshold). Keep it at or below the cookie refresh window.
     """
 
     store: RbacStore
@@ -79,9 +52,7 @@ class RbacPolicyResolver(PolicyResolver):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    # Resolution cache: ``(principal_id, resource_path) -> (policies, expiry)``.
-    # A private attribute (never a field) so it stays out of serialization and
-    # is not part of the resolver's declared configuration.
+    # A private attribute (never a field) so it stays out of serialization.
     _cache: dict[tuple[UUID, str], tuple[list[Policy], float]] = PrivateAttr(default_factory=dict)
 
     async def resolve(
@@ -89,8 +60,8 @@ class RbacPolicyResolver(PolicyResolver):
     ) -> list[Policy]:
         """The policies ``principal``'s stored roles grant on ``resource``.
 
-        An anonymous principal resolves to the empty set (deny / fail-closed).
-        A store miss likewise yields the empty set, never an implicit grant.
+        An anonymous principal or a store miss yields the empty set, never an
+        implicit grant.
         """
         if principal is None or principal.id is None:
             return []
@@ -108,14 +79,10 @@ class RbacPolicyResolver(PolicyResolver):
     async def materialized_acl(self, principal: Principal | None, resource: str) -> Acl | None:
         """The materialized per-object ACL for ``principal`` on ``resource``.
 
-        The documented escape hatch: a genuinely unbounded set of per-object
-        grants lives in ``resource_acls`` and is evaluated as a join / subquery
-        (``RbacStore.acl_id_subquery``), not enumerated into Python. This helper
-        is the portable bridge — it enumerates the (capped) ids into an
-        :class:`~resourcey.auth.auth_policy.Acl` policy for a small set; beyond
-        the cap the store raises and the caller must use the join flavour
-        directly. Returns ``None`` when the principal is anonymous or has no ACL
-        entries.
+        The portable bridge: it enumerates the (capped) ids into an ``Acl`` policy
+        for a small set; beyond the cap the store raises and the caller must use
+        the join flavour directly. Returns ``None`` when the principal is anonymous
+        or has no ACL entries.
         """
         if principal is None or principal.id is None:
             return None
@@ -125,14 +92,9 @@ class RbacPolicyResolver(PolicyResolver):
     def invalidate(self, principal_id: UUID | None = None, resource: str | None = None) -> None:
         """Drop cached resolutions, optionally narrowed to a principal / resource.
 
-        For an app that writes the RBAC tables and wants the change to take
-        effect before :attr:`cache_ttl` lapses. With no arguments the whole
-        cache is cleared.
-
-        The cache is **process-local**: with multiple workers / pods this clears
-        only the calling worker, so :attr:`cache_ttl` (not this call) is the
-        bound a cross-worker deployment can rely on. With the default
-        ``cache_ttl=None`` there is no cache to clear.
+        For an app that writes the RBAC tables and wants the change to take effect
+        before :attr:`cache_ttl` lapses. The cache is **process-local**: with
+        multiple workers this clears only the calling one.
         """
         if principal_id is None and resource is None:
             self._cache.clear()

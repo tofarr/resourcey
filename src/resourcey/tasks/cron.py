@@ -1,20 +1,17 @@
 """The internal 5-field cron parser and next-fire computation (issue #15).
 
-Scoped deliberately: a schedule is a standard **5-field** expression — ``minute
-hour day-of-month month day-of-week`` — plus the ``@``-shorthands
-(``@hourly`` / ``@daily`` / ``@weekly`` / ``@monthly`` / ``@yearly``). A seconds
-field, ``@reboot``, and quartz extensions (``?`` / ``L`` / ``W``) are out of
-scope, so this stays a small, dependency-free algorithm.
+A schedule is a standard **5-field** expression — ``minute hour day-of-month
+month day-of-week`` — plus the ``@``-shorthands. A seconds field, ``@reboot``, and
+quartz extensions (``?`` / ``L`` / ``W``) are out of scope, so this stays a small,
+dependency-free algorithm.
 
-Each field supports ``*`` (any), ``*/n`` (every ``n``), a fixed value, a range
-(``a-b``), a step over a range (``a-b/n``), and comma lists of those. Month and
-day-of-week also accept the conventional three-letter names (``jan`` /
-``mon``). Day-of-week is ``0``-``6`` with ``0`` = Sunday (``7`` is accepted as
-Sunday too).
+Each field supports ``*``, ``*/n``, a fixed value, a range (``a-b``), a step over
+a range (``a-b/n``), and comma lists. Month and day-of-week also accept the
+conventional three-letter names. Day-of-week is ``0``-``6`` with ``0`` = Sunday
+(``7`` is accepted as Sunday too).
 
-The one rule worth stating: when **both** day-of-month and day-of-week are
-restricted, a day matches if *either* does — the standard cron OR. When only one
-is restricted, that one must match. The rule is pinned by
+When **both** day-of-month and day-of-week are restricted, a day matches if
+*either* does — the standard cron OR. The rule is pinned by
 ``specs/background_tasks.qnt``.
 
 This module imports no code outside the framework (the standard library only).
@@ -26,9 +23,8 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-# The bound on the roll-forward search. Each iteration advances at least a
-# minute and usually far more, so this is generous enough for a leap-year
-# schedule (~1461 day-steps) while still failing fast on an unsatisfiable one.
+# Generous enough for a leap-year schedule while failing fast on an
+# unsatisfiable one.
 _MAX_ITERATIONS = 200_000
 
 _MONTH_NAMES = {
@@ -65,9 +61,6 @@ _SHORTHANDS = {
     "@midnight": "0 0 * * *",
     "@hourly": "0 * * * *",
 }
-
-# Field bounds are declared inline in ``parse_cron`` so each field carries its
-# own accepted names (month / weekday only).
 
 _ITEM_RE = re.compile(r"^(?P<base>[^/]+)(?:/(?P<step>\d+))?$")
 
@@ -117,9 +110,8 @@ class CronSchedule:
     def next_fire(self, after: datetime) -> datetime:
         """The first minute strictly after ``after`` that satisfies the schedule.
 
-        ``after`` must be timezone-aware; the result carries the same tzinfo.
-        The search rolls forward a whole unit at a time (month, day, hour,
-        minute), so it stays cheap even for a sparse schedule.
+        ``after`` must be timezone-aware; the result carries the same tzinfo. The
+        search rolls forward a whole unit at a time, so it stays cheap.
         """
         candidate = (after + timedelta(minutes=1)).replace(second=0, microsecond=0)
         for _ in range(_MAX_ITERATIONS):
@@ -155,8 +147,7 @@ def parse_cron(expression: str) -> CronSchedule:
     """Parse a 5-field cron expression (or an ``@``-shorthand).
 
     Raises :class:`CronError` for an unknown shorthand, the wrong number of
-    fields, an out-of-range value, or a malformed step / range. Callers are
-    expected to surface that at startup rather than silently never firing.
+    fields, an out-of-range value, or a malformed step / range.
     """
     text = expression.strip()
     if not text:

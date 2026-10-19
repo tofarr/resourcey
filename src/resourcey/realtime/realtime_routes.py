@@ -1,49 +1,31 @@
 """The realtime WebSocket transport (issue #17).
 
 :func:`add_realtime` mounts a single WebSocket route (default ``/ws``) that an
-app calls **after** :func:`~resourcey.http.app.create_app`, exactly as
-:func:`~resourcey.filestore.file_routes.register_file_routes` mounts the file
-handshake. It adds no :class:`~resourcey.core.service.Action` member and
-touches no core code -- a subscription socket is genuinely not one of the
-eight standard actions, and publishing is the independent, already-wired
-:class:`~resourcey.triggers.redis_trigger.RedisTrigger` seam (see that
-module); this one only *delivers*.
+app calls **after** ``create_app``. It adds no ``Action`` member and touches no
+core code — a subscription socket is not one of the eight standard actions, and
+publishing is the independent ``RedisTrigger`` seam.
 
 The socket is an **authorization boundary**, not a dumb pipe:
 
-* the handshake is authenticated with the *same* ``Authenticator`` seam as REST
-  (an API key / cookie works identically), so an absent credential is anonymous
-  only under an optional posture and a presented-but-invalid one is rejected;
+* the handshake is authenticated with the *same* ``Authenticator`` seam as REST;
 * a ``subscribe`` message names a resource and an optional filter; the
-  subscription is validated against the resource's **exposed actions** (a
-  client cannot subscribe to a resource it cannot read over REST) and the
+  subscription is validated against the resource's **exposed actions** and the
   filter is parsed with the framework's own ``<field>__<op>`` vocabulary;
-* the subscriber's ``PolicyResolver`` policies are resolved **once** at
-  subscribe time and every candidate event is filtered against them **per
-  subscriber** before send -- an out-of-scope row is never delivered and a
-  no-policy subscriber receives nothing (fail-closed). A row-scoped policy
-  (``Owner`` / ``Acl`` / group) means the server decides per event whether
-  *this* subscriber may see *this* row.
+* the subscriber's ``PolicyResolver`` policies are resolved **once** at subscribe
+  time and every candidate event is filtered against them **per subscriber**
+  before send — a no-policy subscriber receives nothing (fail-closed).
 
-Delivery is **at-most-once, unordered, no replay** -- pub/sub drops an event
-for a subscriber that is down or briefly disconnected. The reconnect reconcile
-is the ordinary REST ``search`` (with a cursor / ``updated_at__gt=``), which
-the framework already serves; the push channel is a latency optimisation over
-polling, not the source of truth. Each connection has a bounded outbound
-buffer (the channel's queue) so one slow client cannot exhaust a process.
+Delivery is **at-most-once, unordered, no replay**. The reconnect reconcile is
+the ordinary REST ``search``; the push channel is a latency optimisation over
+polling. Each connection has a bounded outbound buffer.
 
-Protocol (in-band messages, so the filter tree stays off the URL and the
-protocol can grow -- resubscribe, filter changes):
+Protocol (in-band messages, so the filter tree stays off the URL):
 
-* client -> server: ``{"type": "subscribe", "resource": ..., "filter": {...}}``,
-  ``{"type": "unsubscribe", "resource": ...}``, ``{"type": "ping"}``
-* server -> client: ``{"type": "ack", "resource": ...}`` /
-  ``{"type": "error", "message": ...}`` / ``{"type": "event", "event": {...}}`` /
-  ``{"type": "ping"}``
+* client -> server: ``subscribe`` / ``unsubscribe`` / ``ping``
+* server -> client: ``ack`` / ``error`` / ``event`` / ``ping``
 
-This protocol -- and the message / event schemas below -- is exactly what
-:func:`~resourcey.realtime.realtime_asyncapi.add_asyncapi` documents, so the
-two modules must be read together when either changes.
+This protocol is exactly what ``add_asyncapi`` documents, so the two modules must
+be read together when either changes.
 
 This module is part of ``resourcey.realtime``; it imports only lower framework
 layers.
@@ -109,11 +91,7 @@ class _Connection:
 
 
 class RealtimeHub:
-    """The subscription socket's state: the resource set, the channel, the auth.
-
-    Built once by :func:`add_realtime`; the route handler drives one
-    :class:`_Connection` per client through it.
-    """
+    """The subscription socket's state: the resource set, the channel, the auth."""
 
     def __init__(
         self,
@@ -137,11 +115,8 @@ class RealtimeHub:
     async def authenticate(self, conn: HTTPConnection) -> Any | None:
         """Resolve the handshake's principal, or ``None`` for an anonymous caller.
 
-        Uses the builder's ``Authenticator`` / posture when it has one (an
-        ``AuthorizedDependencyBuilder``); the default open builder
-        authenticates nobody. A presented-but-invalid credential, or a missing
-        credential under a required posture, raises
-        :class:`RealtimeRejectionError`.
+        A presented-but-invalid credential, or a missing credential under a
+        required posture, raises :class:`RealtimeRejectionError`.
         """
         authenticator = getattr(self._builder, "authenticator", None)
         if authenticator is None:
@@ -167,10 +142,8 @@ class RealtimeHub:
     ) -> _Subscription:
         """Validate and build one subscription, or raise :class:`RealtimeRejectionError`.
 
-        The resource must exist and be readable over REST; the filter is
-        parsed with the resource's own query surface; and the subscriber's
-        policies for the resource are resolved (fail-closed when they reduce
-        to deny).
+        The resource must exist and be readable over REST; the subscriber's
+        policies for it are resolved (fail-closed when they reduce to deny).
         """
         if not isinstance(resource_name, str) or resource_name not in self._resources:
             raise RealtimeRejectionError(f"Unknown resource {resource_name!r}.")
@@ -208,23 +181,10 @@ def add_realtime(
 ) -> APIRouter:
     """Mount the realtime subscription socket.
 
-    Args:
-        app_or_router: A ``FastAPI`` app / ``APIRouter`` (duck-typed).
-        manifest: The resource set served; the socket resolves subscription
-            targets from it.
-        channel: The channel this socket's subscribers are delivered from.
-            Must be the **same instance** every publishing
-            :class:`~resourcey.triggers.redis_trigger.RedisTrigger` forwards
-            to, so a write in this process reaches this process's
-            subscribers, and must already be entered (e.g. via
-            ``Manifest(managers=[channel])``).
-        dependency_builder: The builder whose ``Authenticator`` /
-            ``PolicyResolver`` the socket reuses (default
-            :class:`~resourcey.http.dependency_builder.OpenDependencyBuilder`,
-            which authenticates nobody and grants everything).
-        config: The realtime config (heartbeat); default
-            ``RealtimeConfig.get_instance()``.
-        path: The mount path (default ``/ws``).
+    ``channel`` must be the **same instance** every publishing
+    ``RedisTrigger`` forwards to, and must already be entered (e.g. via
+    ``Manifest(managers=[channel])``). ``dependency_builder`` supplies the
+    ``Authenticator`` / ``PolicyResolver`` the socket reuses.
     """
     builder = dependency_builder if dependency_builder is not None else OpenDependencyBuilder()
     resolved_config = config if config is not None else RealtimeConfig.get_instance()
@@ -317,13 +277,10 @@ async def _deliver(connection: _Connection, hub: RealtimeHub) -> None:
 def _deliverable(subscriptions: list[_Subscription], event: Any) -> bool:
     """Whether any of ``subscriptions`` admits ``event`` for this subscriber.
 
-    A ``created`` / ``updated`` event carries the (already projected -- see
-    :mod:`~resourcey.triggers.redis_trigger`) row, so it is matched against
-    the subscription's policy filter and its own filter. A ``deleted`` event
-    carries no row, so it is delivered only when **both** filters are unscoped
-    (``AllFilter``) -- a row-scoped subscriber cannot be verified for a row
-    that no longer exists, so it is fail-closed and reconciles with a REST
-    ``search`` instead.
+    A row-carrying event is matched against the subscription's policy filter
+    and its own filter. A ``deleted`` event carries no row, so it is delivered
+    only when **both** filters are unscoped — a row-scoped subscriber cannot be
+    verified for a row that no longer exists and reconciles via REST instead.
     """
     item = event.item
     for subscription in subscriptions:
@@ -360,10 +317,8 @@ async def _heartbeat(connection: _Connection, interval: int) -> None:
 async def _read_filter(policies: list[Policy], principal: Any | None) -> SearchFilter[Any]:
     """The subscriber's read scope: the OR-combination of its policies' READ reductions.
 
-    An empty policy set (or one that reduces to deny) yields a
-    ``NoMatchFilter``, so a no-policy subscriber receives nothing
-    (fail-closed). This mirrors the ``AuthorizedService`` union model -- a
-    ``DenyAll`` contributes nothing to the union.
+    An empty policy set yields a ``NoMatchFilter``, so a no-policy subscriber
+    receives nothing (fail-closed).
     """
     from resourcey.util.search_filter import NoMatchFilter, or_
 
@@ -377,13 +332,9 @@ async def _read_filter(policies: list[Policy], principal: Any | None) -> SearchF
 def _build_subscription_filter(resource: Resource[Any, Any], raw: Any) -> SearchFilter[Any] | None:
     """Parse a subscription's ``{field__op: value}`` filter with the resource's surface.
 
-    Mirrors the REST query path's security gate -- an unknown ``field__op``
-    key (or a filter on a resource with no query surface) is an error rather
-    than a silently dropped clause -- but coerces every value itself: a REST
-    query string is already typed by FastAPI's per-field ``Query(...)``
-    parameter before it reaches ``_coerce_filter_value``, while a subscription
-    message is raw JSON, so every operator (not just ``in``) needs coercion
-    here (see :func:`_coerce_subscription_value`).
+    Mirrors the REST query path's security gate -- an unknown ``field__op`` key
+    is an error. Unlike REST, a subscription message is raw JSON, so every
+    operator needs coercion here.
     """
     if raw in (None, {}):
         return None
@@ -407,11 +358,8 @@ def _build_subscription_filter(resource: Resource[Any, Any], raw: Any) -> Search
 def _coerce_subscription_value(op: str, value: Any, annotation: Any) -> Any:
     """Coerce one subscription filter value (raw JSON) to the field's type.
 
-    ``in`` accepts either a JSON array or the REST path's comma-separated
-    string, so a client can use either form; every other operator is
-    coerced the same way a REST query parameter would have been by FastAPI's
-    typed ``Query(...)``. A malformed value is an ``InvalidInputError`` (which
-    the caller turns into a rejected subscription), never a crash.
+    ``in`` accepts either a JSON array or a comma-separated string. A malformed
+    value is an ``InvalidInputError``, never a crash.
     """
     if annotation is None:
         return value

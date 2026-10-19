@@ -3,24 +3,18 @@
 The single place that picks the strategy a resource uses when it does not
 override :meth:`~resourcey.core.resource.Resource.get_cache_strategy`. It is
 storage-agnostic: a backend passes in the resource's derived read models and
-advertised actions and gets a concrete strategy back, so the policy is not
-duplicated per backend.
+advertised actions and gets a concrete strategy back.
 
 Selection, in order:
 
-* a **read-only** resource — one advertising none of the write actions — gets
+* a **read-only** resource gets
   :class:`~resourcey.cache.cache_strategy.OptimisticCacheStrategy` with a
-  freshness window (:data:`DEFAULT_READ_ONLY_EXPIRE_IN`) marked **private**. A
-  read-only surface cannot change underneath a client, so a validator buys
-  nothing and a freshness window lets clients skip revalidation. ``private`` is
-  not optional: "read-only" does not imply "the same bytes for every caller" —
-  a permission-narrowed search returns caller-scoped content, and without
-  ``private`` a *shared* cache could replay one caller's body to another for
-  the whole window (the API-key header is not ``Authorization``, so RFC 9111's
-  authenticated-response protection does not apply);
+  freshness window (:data:`DEFAULT_READ_ONLY_EXPIRE_IN`) marked **private**.
+  ``private`` is not optional: "read-only" does not imply "the same bytes for
+  every caller", and without it a *shared* cache could replay one caller's
+  permission-narrowed body to another for the whole window;
 * otherwise :class:`~resourcey.cache.cache_strategy.LastModifiedCacheStrategy`
-  when the read model carries an ``updated_at`` field (an accurate, cheap
-  validator);
+  when the read model carries an ``updated_at`` field;
 * otherwise :class:`~resourcey.cache.cache_strategy.ETagCacheStrategy`.
 
 This module imports no code outside the framework.
@@ -40,9 +34,7 @@ from resourcey.core.dto import RestModels
 from resourcey.core.service import Action
 from resourcey.core.service import CacheStrategy as CoreCacheStrategy
 
-# The freshness window a read-only resource gets by default (seconds). Read-only
-# data does not change, so a client may reuse a copy for this long without
-# revalidating.
+# The freshness window a read-only resource gets by default (seconds).
 DEFAULT_READ_ONLY_EXPIRE_IN = 600
 
 # The write actions: a resource advertising none of these is read-only.
@@ -61,11 +53,9 @@ def default_cache_strategy(
 ) -> CoreCacheStrategy:
     """The default strategy for a resource with these read models and actions.
 
-    ``rest_models`` is a :class:`~resourcey.core.dto.RestModels`; its
-    ``read_response`` fields decide between last-modified and ETag.
-    ``supported_actions`` is the resource's advertised
-    :class:`~resourcey.core.service.Action` set — a read-only set selects the
-    optimistic strategy before the read model is consulted.
+    A read-only action set selects the optimistic strategy before the read model
+    is consulted; otherwise the ``read_response`` fields decide between
+    last-modified and ETag.
     """
     if is_read_only(supported_actions):
         return OptimisticCacheStrategy(expire_in=DEFAULT_READ_ONLY_EXPIRE_IN, private=True)
@@ -78,24 +68,17 @@ def default_cache_strategy(
 class DefaultCacheStrategyMixin:
     """The default :meth:`get_cache_strategy` shared by the backends.
 
-    A backend implements :meth:`get_rest_models` and
-    :meth:`get_supported_actions` (both already part of the ``Resource``
-    contract) and mixes this in to inherit the default policy — including the
-    per-instance caching — instead of re-implementing it. The result is cached on
-    the instance because one resource *class* can serve many models, so a
-    class-level cache would hand one model's strategy to another.
+    The result is cached on the instance because one resource *class* can serve
+    many models, so a class-level cache would hand one model's strategy to
+    another.
 
-    Both hooks stay ``@abstractmethod`` here (with no body) so mixing this in
-    does not, by defining a concrete override, quietly drop them from the
-    ``Resource`` ABC's ``__abstractmethods__``: a backend that forgets one
-    still fails at instantiation rather than at the first request.
-
-    Overriding :meth:`get_cache_strategy` on the concrete resource still wins:
-    this is the default, not a sealed seam.
+    Both hooks stay ``@abstractmethod`` here so mixing this in does not, by
+    defining a concrete override, quietly drop them from the ``Resource`` ABC's
+    ``__abstractmethods__``.
     """
 
     # Resolved lazily on first use; the ``__dict__`` lookup treats "absent" as
-    # "not yet resolved", so no backend has to initialise it.
+    # "not yet resolved".
     _cache_strategy: CoreCacheStrategy | None = None
 
     @abstractmethod

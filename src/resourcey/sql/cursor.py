@@ -1,11 +1,9 @@
 """SQL keyset (seek) cursor predicate for pagination (issues #78, #97).
 
-The tamper-proof cursor *codec* (``encode_cursor`` / ``decode_cursor``) is
-storage-agnostic and now lives in :mod:`resourcey.util.cursor`, so a non-SQL
-backend reuses the identical encoding without importing SQLAlchemy. This module
-holds the SQLAlchemy half: :func:`keyset_predicate`, the ``WHERE`` clause that
-seeks past the cursor row, plus a re-export of the codec so existing
-``resourcey.sql.cursor`` importers keep working.
+The tamper-proof cursor *codec* lives in :mod:`resourcey.util.cursor`, so a
+non-SQL backend reuses the identical encoding without importing SQLAlchemy. This
+module holds the SQLAlchemy half — :func:`keyset_predicate`, the ``WHERE``
+clause that seeks past the cursor row — plus a re-export of the codec.
 
 A *seek* (keyset) cursor is both efficient (no ``OFFSET n`` scan) and stable
 under concurrent inserts.
@@ -37,19 +35,15 @@ def keyset_predicate(
     """Build the ``WHERE`` clause that seeks past the cursor row.
 
     Ordering is ``(sort_key, id)`` with the sort key in the requested direction
-    and the identifier *always ascending* (the tie-breaker :meth:`SqlSortConverter.apply`
-    appends). Ascending therefore keeps ``sort_key > cursor_key``, or an equal
-    key with a greater id. Descending keeps ``sort_key < cursor_key``, or an
-    equal key with a **greater** id: only the sort-key comparison mirrors, never
-    the tie-breaker — mirroring the id too would skip a row.
+    and the identifier *always ascending*. Only the sort-key comparison mirrors
+    for descending, never the tie-breaker — mirroring the id too would skip a row.
 
-    When the sort column *is* the id column (the default no-sort case), the
-    predicate collapses to a single comparison on id.
+    When the sort column *is* the id column, the predicate collapses to a single
+    comparison on id.
 
     A ``None`` ``cursor_key`` means the cursor row sits in the null block (NULLs
-    first ascending, last descending — the ordering :meth:`SqlSortConverter.apply`
-    emits). Such a row is seeked past with a NULL test rather than a ``= NULL``
-    comparison, which would match nothing.
+    first ascending, last descending), so it is seeked past with a NULL test
+    rather than a ``= NULL`` comparison.
     """
     if sort_column is id_column:
         if ascending:

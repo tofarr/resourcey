@@ -1,18 +1,9 @@
 """``ListResource`` — the read-only list backend (issue #116).
 
-A backend alongside :mod:`resourcey.sql`: a resource built from an
-application-supplied list of Pydantic models and served **read-only**.
-
-The use case is in-process reference data that is already modelled — country
-codes, feature flags, catalog entries, enum-like lookups — exposed over the same
-REST surface (filter / sort / cursor paging / cache headers) **without** being
-copied into a table. The list *is* the storage, so there is no table, no
-migration, and no external dependency::
-
-    class Country(BaseModel):
-        id: str
-        name: str
-        iso3: str
+A resource built from an application-supplied list of Pydantic models and served
+**read-only**, for in-process reference data that is already modelled (country
+codes, feature flags, catalog entries). The list *is* the storage, so there is no
+table, no migration, and no external dependency::
 
     countries = [
         Country(id="us", name="United States", iso3="USA"),
@@ -22,18 +13,14 @@ migration, and no external dependency::
     manifest = Manifest(resources=(resource,))
 
 The served Pydantic model is projected onto a
-:class:`~resourcey.core.dto.DTO` (via
-:func:`~resourcey.list.pydantic_2_dto.pydantic_2_dto`) so the six REST models,
-the query / sort surface, and the cache policy all derive exactly as they do for
-the SQL / Mongo backends. An explicit ``dto=`` wins over inference — the
-escape hatch for a hand-written projection.
+:class:`~resourcey.core.dto.DTO` so the six REST models, the query / sort surface,
+and the cache policy derive exactly as they do for the SQL / Mongo backends. An
+explicit ``dto=`` wins over inference.
 
 Read-only by construction: :meth:`get_supported_actions` returns exactly
-``{read, search, count, batch_read}``, and ``http/routes.py`` mounts a route
-only for a declared action, so **no write route exists** (a write is a ``405``,
-not an unimplemented handler). By default the resource is **defensive**: every
-object it outputs is a deep copy of the stored object, so a caller cannot mutate
-the served collection through a result (``defensive=False`` opts out).
+``{read, search, count, batch_read}``, so **no write route exists**. By default
+the resource is **defensive**: every object it outputs is a deep copy of the
+stored object.
 
 The action layer lives in :mod:`resourcey.list.list_service`.
 
@@ -75,23 +62,9 @@ _READ_ONLY_ACTIONS: frozenset[Action] = frozenset(
 class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
     """The list backend: an in-process list of Pydantic models, served read-only.
 
-    Args:
-        models: The objects to serve. They must all be instances of one Pydantic
-            model (inferred from the first item). The list is held **by
-            reference**, so mutating it later changes what the resource serves.
-        model: The served model, overriding inference (required when the list is
-            empty).
-        dto: An explicit :class:`~resourcey.core.dto.DTO` declaration — the
-            escape hatch, which wins over :func:`pydantic_2_dto`.
-        path: An explicit REST path segment (defaults to the model name,
-            pluralized / kebab-cased).
-        defensive: When ``True`` (the default) every output is a deep copy of the
-            stored object, so a caller cannot mutate the served collection
-            through a result.
-        encryption_service: The service used to encrypt/decrypt pagination
-            cursors. Defaults to the process-wide
-            :func:`~resourcey.encryption.encryption_service.get_encryption_service`;
-            pass one to override.
+    The list is held **by reference**, so mutating it later changes what the
+    resource serves. ``model`` overrides inference (required when the list is
+    empty) and ``dto`` is the hand-written-projection escape hatch.
     """
 
     def __init__(
@@ -116,19 +89,16 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
         self._models = items
         self._model = resolved
         self._dto = dto if dto is not None else pydantic_2_dto(cast("type[BaseModel]", resolved))
-        # The already-modelled object *is* the DTO for this backend (v1's "the
-        # model is the read model"): the service works with the served model
-        # directly, so a non-defensive read can serve the stored object itself.
-        # An explicit ``dto=`` is the escape hatch — a hand-written projection —
-        # so the declaration's generated model is the item type instead.
+        # The served model *is* the DTO for this backend, so a non-defensive
+        # read can return the stored object itself. An explicit ``dto=`` is a
+        # hand-written projection, whose generated model is the item type.
         if dto is not None:
             self._item_type: type[BaseModel] = self._dto.get_dto_type()
         else:
             self._item_type = cast("type[BaseModel]", resolved)
         self._path = path
         self._defensive = defensive
-        # Resolved eagerly so cursor pagination works out of the box; the
-        # explicit argument remains the escape hatch.
+        # Resolved eagerly so cursor pagination works out of the box.
         self._encryption_service = encryption_service or get_encryption_service()
         self._entered = False
         self._manifest: Manifest | None = None
@@ -140,10 +110,8 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def get_dto_type(self) -> type[T]:
         """The DTO model the service works with.
 
-        For the list backend the already-modelled object *is* the DTO (v1's "the
-        model is the read model"), so this is the served Pydantic model — which
-        is what lets a non-defensive read serve the stored object itself. With
-        only an explicit ``dto=`` it is the declaration's generated model.
+        For the list backend the served Pydantic model *is* the DTO. With only an
+        explicit ``dto=`` it is the declaration's generated model.
         """
         return cast("type[T]", self._item_type)
 
@@ -166,15 +134,13 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
         return pluralize(camel_to_kebab(self._dto.__name__)).lower()
 
     # get_cache_strategy is inherited from DefaultCacheStrategyMixin: a read-only
-    # resource gets OptimisticCacheStrategy(expire_in=600, private=True), so no
-    # per-backend cache code is needed.
+    # resource gets OptimisticCacheStrategy(expire_in=600, private=True).
 
     def get_queryable_fields(self) -> frozenset[str]:
         """Every field the read model exposes — the default query surface.
 
         Derived from ``read_response``, so a field projected away is not
-        filterable: a model that hides ``secret`` must not leave ``?secret__eq=``
-        disclosing it.
+        filterable.
         """
         return frozenset(self.get_rest_models().read_response.model_fields)
 
@@ -191,8 +157,7 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """Every field the read model exposes — the default sort surface.
 
         Derived from ``read_response`` (the same gate as filtering), so a field
-        projected away is not sortable: ``?sort=secret`` would otherwise leak the
-        hidden value's relative order.
+        projected away is not sortable.
         """
         return self.get_queryable_fields()
 
@@ -203,9 +168,7 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def resolve_sort_order(self, sort: str | None, desc: bool) -> SortOrder[Any] | None:
         """Validate ``sort`` / ``desc`` into the ordering a search will use.
 
-        With no ``sort`` the identifier order is used and ``desc`` is ignored. An
-        unknown or non-sortable field raises
-        :class:`~resourcey.core.errors.InvalidInputError`.
+        With no ``sort`` the identifier order is used and ``desc`` is ignored.
         """
         if not sort:
             return None
@@ -225,9 +188,8 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def get_supported_actions(self) -> frozenset[Action]:
         """The read-only action subset — no write route is ever mounted.
 
-        A list resource supports exactly ``read`` / ``search`` / ``count`` /
-        ``batch_read``. The route builder registers a route only for a supported
-        action, so the narrowing is structural, not a runtime guard.
+        The route builder registers a route only for a supported action, so the
+        narrowing is structural.
         """
         return _READ_ONLY_ACTIONS
 
@@ -242,10 +204,7 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build a :class:`ListService` over ``ctx`` and the served items.
 
-        A list already seeded on ``ctx`` (under ``STORAGE_KEY``) wins — the same
-        call-scoped reuse seam the SQL / Mongo services use; otherwise the
-        resource's own items are served. There is no connection to resolve, so
-        the async signature only matches the :class:`Resource` contract.
+        A list already seeded on ``ctx`` wins, mirroring the SQL / Mongo services.
         """
         mapping = ctx if ctx is not None else {}
         items = mapping.get(STORAGE_KEY)
@@ -256,9 +215,8 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def make_service(self, ctx: MutableMapping[Any, Any], items: list[Any]) -> Service[T, K]:
         """Build the service for this resource — the subclass seam.
 
-        A variant (e.g. the auth config-key resource, which adds ``find_by_key``)
-        overrides this rather than :meth:`get_service`, so the item-resolution
-        logic is written once.
+        A variant adding an extra method (e.g. the auth config-key resource's
+        ``find_by_key``) overrides this rather than :meth:`get_service`.
         """
         return ListService(self, ctx, items)
 

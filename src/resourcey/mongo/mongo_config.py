@@ -1,16 +1,12 @@
 """``MongoConfig`` — the app's named Mongo connections (issue #80).
 
-Mirrors :class:`~resourcey.sql.sql_config.SqlConfig`: parsed from the
-process-wide prefix (``APP`` by default), connection ``n`` reads
+Mirrors :class:`~resourcey.sql.sql_config.SqlConfig`: connection ``n`` reads
 ``APP_MONGO_CONNECTIONS_<n>_NAME`` / ``_URL`` / ``_PASSWORD``. The field is named
-``mongo_connections`` — the env parser derives each variable from
-``{prefix}_{FIELD_NAME}``, so that name is what yields the documented
-``APP_MONGO_CONNECTIONS_<n>_*`` — and ``connections`` is a read-only alias.
-``SqlConfig`` uses ``sql_connections``, so the two compose without a collision.
+``mongo_connections`` because the env parser derives each variable from
+``{prefix}_{FIELD_NAME}``; ``connections`` is a read-only alias. ``SqlConfig``
+uses ``sql_connections``, so the two compose without a collision.
 
-Names are required and must be unique (and non-empty): a connection lookup is an
-exact, case-sensitive match, so a duplicate or blank name has no defined target.
-Both are rejected here — at config build — rather than at lookup time.
+Names are required and must be unique (and non-empty), rejected at config build.
 
 This module imports no code outside the framework.
 """
@@ -29,9 +25,7 @@ class MongoConnectionConfig(BaseModel):
 
     The URL scheme selects the backend: ``embedded://<db>`` (or the bare
     ``embedded`` marker) builds the in-process ``mongomock`` client, while
-    ``mongodb://`` builds a real ``motor`` client. :attr:`name` is required so
-    every connection is addressable by name; a resource that names none uses the
-    first listed.
+    ``mongodb://`` builds a real ``motor`` client.
     """
 
     name: str = Field(
@@ -64,29 +58,20 @@ class MongoConnectionConfig(BaseModel):
         """The plaintext password for the Mongo driver, or ``None`` when unset.
 
         Mongo receives the password as a client kwarg rather than spliced into
-        the URL: ``motor`` (via ``pymongo``) treats it as a separate connection
-        option, and passing it explicitly *overrides* any password in the URL.
-        The caller must therefore pass it only when not ``None`` — passing
-        ``password=None`` is not neutral, it clears a URL-embedded password.
+        the URL, and passing ``password=None`` is not neutral — it clears a
+        URL-embedded password — so a caller must pass it only when not ``None``.
         """
         return self.password.get_secret_value() if self.password is not None else None
 
     @property
     def is_embedded(self) -> bool:
-        """Whether the URL selects the in-process mongomock client.
-
-        True for the bare ``embedded`` marker and any ``embedded://`` URL (whose
-        host component names the database).
-        """
+        """Whether the URL selects the in-process mongomock client."""
         return self.url == "embedded" or self.url.startswith("embedded://")
 
     def mongo_database_name(self, default: str) -> str:
         """The Mongo database name: the URL's database component, else ``default``.
 
-        For ``embedded://<name>`` the name is the host component (a bare
-        ``embedded`` has none). For a real ``mongodb://`` URL it is the first
-        path segment — the standard Mongo convention — parsed from the string
-        rather than via a driver so a multi-host URL
+        Parsed from the string rather than via a driver, so a multi-host URL
         (``mongodb://h1,h2/db``) needs no connection or DNS.
         """
         if self.url == "embedded":
@@ -98,14 +83,7 @@ class MongoConnectionConfig(BaseModel):
 
 
 class MongoConfig(BaseConfig):
-    """The app's Mongo connection list, parsed under the process-wide prefix.
-
-    The field is ``mongo_connections`` rather than ``connections`` because the
-    env parser derives each variable from ``{prefix}_{FIELD_NAME}`` (as
-    ``SqlConfig``'s ``sql_connections`` yields ``APP_SQL_CONNECTIONS_<n>_*``), so
-    the name is what produces the documented ``APP_MONGO_CONNECTIONS_<n>_*``.
-    ``connections`` remains available as a read-only alias.
-    """
+    """The app's Mongo connection list, parsed under the process-wide prefix."""
 
     mongo_connections: list[MongoConnectionConfig] = Field(
         default_factory=list,
@@ -126,11 +104,8 @@ class MongoConfig(BaseConfig):
     def _validate_connection_names(self) -> MongoConfig:
         """Reject blank or duplicate connection names.
 
-        A blank name is a misconfiguration, not "unnamed" (consistent with
-        ``SqlConfig`` and ``LazyField``'s set-but-empty rule); duplicates make
-        the lookup ambiguous. Both raise ``ValueError``, which
-        :meth:`BaseConfig.get_instance` maps to
-        :class:`~resourcey.core.errors.ResourceyConfigError`.
+        A blank name is a misconfiguration, not "unnamed"; duplicates make the
+        lookup ambiguous.
         """
         seen: set[str] = set()
         for connection in self.mongo_connections:

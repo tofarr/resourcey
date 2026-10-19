@@ -1,24 +1,18 @@
 """``BackgroundTaskScheduler`` — the task manager (issue #15).
 
-The scheduler is an ordinary ``Manifest`` **manager**: it is entered through the
-existing ``managers=`` slot (like
-:class:`~resourcey.sql.session_manager.SqlSessionManager` /
-:class:`~resourcey.mongo.mongo_client.MongoClientManager`), so ``core`` stays
-unaware of tasks and the whole feature lives in its own package.
+The scheduler is an ordinary ``Manifest`` **manager**, entered through the
+existing ``managers=`` slot, so ``core`` stays unaware of tasks.
 
 Entering starts **one** asyncio loop that fires each *active*, scheduled task on
 its cron schedule; leaving cancels it. The loop imposes **no mutual exclusion** —
-a schedule whose interval is shorter than a run simply overlaps, so a task that
-must not overlap enforces that itself (e.g. a Redis lock). A raising task is
-caught and logged, and the loop continues; there are no retries.
+a schedule shorter than a run simply overlaps, so a task that must not overlap
+enforces that itself. A raising task is caught and logged, and the loop
+continues; there are no retries.
 
-Entering is gated by ``background_tasks_scheduler_enabled``, so a web replica or
-a test process can start the manifest without scheduling anything. A one-shot
-command instead calls :meth:`run_once` **without** entering the loop, so it can
-run a task by name while the periodic schedule stays dormant.
+Entering is gated by ``background_tasks_scheduler_enabled``. A one-shot command
+instead calls :meth:`run_once` **without** entering the loop.
 
-This module imports only lower framework layers (``core`` / ``config`` / ``util``
-and the sibling task / cron modules).
+This module imports only lower framework layers.
 """
 
 from __future__ import annotations
@@ -43,15 +37,8 @@ logger = logging.getLogger(__name__)
 class BackgroundTaskScheduler:
     """Runs a set of background tasks on their cron schedules.
 
-    Args:
-        tasks: The tasks to schedule. Names must be unique (checked here, the
-            scheduler being the one place that sees them all).
-        config: The central config; defaults to
-            :meth:`BackgroundTasksConfig.get_instance`, which supplies the
-            timezone, the scheduler toggle, and (when the app has not already
-            wired it) the per-task entries.
-        timezone: An explicit timezone override (mostly for tests). When
-            ``None``, the config's ``background_tasks_timezone`` is used.
+    Names must be unique (checked here, the one place that sees them all).
+    ``timezone`` is an explicit override (mostly for tests).
     """
 
     def __init__(
@@ -66,8 +53,7 @@ class BackgroundTaskScheduler:
         self._by_name: dict[str, BackgroundTask] = {t.name: t for t in self._tasks}
         self._config = config if config is not None else BackgroundTasksConfig.get_instance()
         self._timezone = timezone or ZoneInfo(self._config.background_tasks_timezone)
-        # A schedule that will not parse is a startup error: it is better to fail
-        # here than to have a task silently never fire.
+        # A schedule that will not parse is a startup error.
         self._schedules: dict[str, CronSchedule] = {
             task.name: parse_cron(task.schedule) for task in self._tasks if task.schedule
         }
@@ -136,9 +122,8 @@ class BackgroundTaskScheduler:
     async def run_once(self, name: str | None = None) -> None:
         """Run one task by name, or every enabled task, exactly once.
 
-        A name is the explicit "run this one" override and runs the task even
-        when it is disabled; with no name, every *enabled* task runs. No loop
-        is started, so this is safe to call on an un-entered scheduler.
+        A name runs the task even when it is disabled. No loop is started, so
+        this is safe to call on an un-entered scheduler.
         """
         if name is not None:
             targets = [self.get_task(name)]
@@ -174,9 +159,8 @@ class BackgroundTaskScheduler:
     def tick(self, now: datetime) -> None:
         """Start each active scheduled task whose schedule matches ``now``'s minute.
 
-        Ticks are concurrent: each started task runs on its own asyncio task and
-        is tracked so exit can cancel it. The loop calls this after sleeping to
-        the next fire; tests call it directly with a chosen instant.
+        Ticks are concurrent and tracked so exit can cancel them. Tests call this
+        directly with a chosen instant.
         """
         fired = now.replace(second=0, microsecond=0)
         for task in self._tasks:
@@ -205,8 +189,7 @@ class BackgroundTaskScheduler:
 def scheduler_from_manifest(manifest: Manifest) -> BackgroundTaskScheduler:
     """The :class:`BackgroundTaskScheduler` among ``manifest``'s managers.
 
-    Raises :class:`ValueError` when the manifest has no scheduler, naming the
-    fix (register one in ``managers=``).
+    Raises :class:`ValueError` naming the fix (register one in ``managers=``).
     """
     for manager in manifest.managers:
         if isinstance(manager, BackgroundTaskScheduler):

@@ -1,32 +1,17 @@
 """``TriggeredResource`` — attach edit-event triggers to an existing resource (issue #155).
 
-``TriggeredResource`` wraps another resource and, after every successful
-create / update / delete / batch_edit, invokes each registered
-:class:`~resourcey.triggers.trigger.Trigger`. The primary use case is
-**webhooks**: notify an external system when rows change.
+``TriggeredResource`` wraps another resource and, after every successful write,
+invokes each registered ``Trigger``. The primary use case is **webhooks**.
 
-Unlike :class:`~resourcey.view.resource_view.ResourceView`, a trigger changes
-nothing observable about the resource — no field is hidden, no action is
-narrowed, the cache policy is unaffected. Every surface-defining method is
-therefore a plain delegation to the inner resource; only the service seam
-changes, wrapping the inner service in a
-:class:`~resourcey.triggers.triggered_service.TriggeredService`.
+Unlike ``ResourceView``, a trigger changes nothing observable about the resource,
+so every surface-defining method is a plain delegation; only the service seam
+changes, wrapping the inner service in a ``TriggeredService``.
+``get_exposed_resource()`` returns ``self`` so the wrapper is what gets
+registered — registering the inner would reach a service with no triggers.
 
-``get_exposed_resource()`` returns ``self`` (not the inner's exposed resource)
-for the same reason :class:`~resourcey.view.resource_view.ResourceView` does:
-the wrapper is what must be registered so its (triggering) service is what the
-transport mounts — registering the inner instead would reach a service with no
-triggers attached.
-
-At construction, every configured trigger that implements the optional
-:class:`~resourcey.triggers.trigger.ResourceBoundTrigger` protocol has its
-:meth:`~resourcey.triggers.trigger.ResourceBoundTrigger.bind_resource` called
-with the **inner** resource (so a trigger that projects onto the read model --
-e.g. :class:`~resourcey.triggers.redis_trigger.RedisTrigger` -- sees exactly
-the ``ResourceView``-narrowed surface this ``TriggeredResource`` wraps, not a
-wider one). A plain :class:`~resourcey.triggers.trigger.Trigger` that does not
-implement the protocol (e.g.
-:class:`~resourcey.triggers.webhook_trigger.WebhookTrigger`) is unaffected.
+At construction, every trigger implementing the optional ``ResourceBoundTrigger``
+protocol has ``bind_resource`` called with the **inner** resource, so a trigger
+that projects onto the read model sees exactly the narrowed surface.
 
 This module is part of ``resourcey.triggers``; it imports only lower framework
 layers (``core`` / ``util``).
@@ -57,13 +42,7 @@ K = TypeVar("K")
 
 
 def _validate_on_edit(triggers: Sequence[Any]) -> None:
-    """Reject a bare callable or a duplicate trigger, at construction time.
-
-    ``on_edit`` accepts only :class:`Trigger` instances — a bare callable
-    would lose the config fields ``Trigger`` exists to carry — and rejects a
-    duplicate (by value equality) so the same side effect cannot silently
-    fire twice per operation.
-    """
+    """Reject a bare callable or a duplicate trigger, at construction time."""
     for trigger in triggers:
         if not isinstance(trigger, Trigger):
             raise ResourceyConfigError(
@@ -80,16 +59,9 @@ def _validate_on_edit(triggers: Sequence[Any]) -> None:
 class TriggeredResource(Resource[T, K], Generic[T, K]):
     """A resource wrapper that fires ``on_edit`` triggers after a successful edit.
 
-    Args:
-        resource: The inner resource to wrap. Its schema, actions, query /
-            sort surface, cache policy, registration, and lifecycle are all
-            delegated verbatim — a trigger changes nothing observable.
-        on_edit: The triggers to invoke after a successful create / update /
-            delete / batch_edit, in declaration order. Must be ``Trigger``
-            instances with no duplicates (validated here).
-        background: Whether firing happens in the background (the default) or
-            is awaited inline before the write returns. See
-            :class:`~resourcey.triggers.triggered_service.TriggeredService`.
+    ``on_edit`` must be ``Trigger`` instances with no duplicates (validated
+    here). ``background`` selects background firing (the default) or awaiting
+    inline.
     """
 
     def __init__(
@@ -106,10 +78,8 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
         for trigger in self._triggers:
             if isinstance(trigger, ResourceBoundTrigger):
                 trigger.bind_resource(resource)
-        # Shared across every per-request TriggeredService this resource
-        # hands out via get_service(); only closed by this resource's own
-        # __aexit__ (app shutdown), never by a per-request service's exit --
-        # see trigger_runner.py for why that distinction matters.
+        # Shared across every per-request TriggeredService; only closed by this
+        # resource's own __aexit__, never by a per-request service's exit.
         self._runner = TriggerRunner()
         self._entered = False
 
@@ -176,10 +146,8 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """The inner service, wrapped so every configured trigger fires on success.
 
-        Every call shares this resource's one :class:`TriggerRunner`, so a
-        ``background=True`` run started by one request's service keeps
-        running after that (per-request) service exits — it is only
-        cancelled when this resource itself exits.
+        Every call shares this resource's one ``TriggerRunner``, so a background
+        run outlives the per-request service that started it.
         """
         inner = await self._inner.get_service(ctx)
         return TriggeredService(
@@ -206,10 +174,7 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
     async def __aexit__(self, *exc: object) -> None:
         """Drain this resource's shared ``TriggerRunner``, then exit the inner.
 
-        This is the *app-scoped* exit a background trigger run is actually
-        cancelled at (once, here, when the resource itself shuts down) — not
-        at any single per-request ``TriggeredService``'s exit. See
-        ``trigger_runner.py``.
+        This is the app-scoped exit a background trigger run is cancelled at.
         """
         await self._runner.aclose()
         await self._inner.__aexit__(*exc)

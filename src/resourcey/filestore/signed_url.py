@@ -1,31 +1,23 @@
 """Framework-signed download capability URLs over ``EncryptionService`` (issue #117, #158).
 
-SQL and local file mediums have no external object store to delegate signing to,
-so the framework mints its own **download** capability: a JWE token carrying
-``{"k": <opaque key>}`` plus an ``iat`` / ``exp``, produced by
-:meth:`~resourcey.encryption.encryption_service.EncryptionService.create_jwe_token`.
-The token is served by the ``GET`` route in :mod:`resourcey.filestore.file_routes`.
-Upload has no capability of its own to sign: ``create`` *is* the upload, a
-direct ``multipart/form-data`` request the API streams straight into the
-medium (see :mod:`resourcey.filestore.file_store`), so this module is
-download-only.
+SQL and local mediums have no external object store to delegate signing to, so
+the framework mints its own **download** capability: a JWE token carrying
+``{"k": <opaque key>}`` plus an ``iat`` / ``exp``. Upload has no capability to
+sign: ``create`` *is* the upload, so this module is download-only.
 
 Two facts drive the verifier:
 
-* **``decrypt_jwe_token`` does not enforce ``exp``.** It selects the key from
-  the ``kid``, decrypts, and returns the raw claim dict; the expiry check is the
-  *caller's* responsibility. :func:`verify_signed_url` therefore rejects a token
-  whose ``exp`` has passed -- without it a capability URL would be valid forever.
+* **``decrypt_jwe_token`` does not enforce ``exp``.** The expiry check is the
+  *caller's* responsibility, so :func:`verify_signed_url` rejects a token whose
+  ``exp`` has passed -- without it a capability URL would be valid forever.
 * **The token is a bearer capability.** Anyone holding the URL can use it until
   it expires, so it is short-lived and bound to exactly one key. AES-GCM
-  authenticates the claim, so a client cannot forge or edit it -- but it can
+  authenticates the claim, so a client cannot forge or edit it, but it can
   *replay* it, which the TTL bounds.
 
-:class:`SignedFileStore` is the base for a medium that uses this scheme: it owns
-the mint / verify helpers over an injected
-:class:`~resourcey.encryption.encryption_service.EncryptionService` (defaulting
-to the process-wide one), so its concrete subclasses implement only the medium
-operations.
+:class:`SignedFileStore` owns the mint / verify helpers over an injected
+:class:`~resourcey.encryption.encryption_service.EncryptionService`, so its
+concrete subclasses implement only the medium operations.
 
 This module imports no code outside the framework.
 """
@@ -66,9 +58,8 @@ def mint_signed_url(
 ) -> PresignedUrl:
     """Mint a framework-signed ``GET`` capability URL for one object key.
 
-    The TTL bounds replay: the token is valid until ``exp`` only. ``base_url``
-    is prepended when set (an absolute URL for a cross-origin client); otherwise
-    the URL is relative to the API host serving it.
+    ``base_url`` is prepended when set; otherwise the URL is relative to the API
+    host serving it.
     """
     token = encryption_service.create_jwe_token(
         {"k": key},
@@ -93,15 +84,9 @@ def verify_signed_url(
 ) -> str:
     """Verify a capability token and return the key it authorizes.
 
-    Rejects, with :class:`~resourcey.core.errors.InvalidInputError` (mapped to
-    ``400``):
-
-    * a malformed / tampered token (decryption fails);
-    * a token whose ``exp`` has passed -- the codec does not enforce it;
-    * a token missing its ``k`` claim.
-
-    The key comparison against the request path is the route's job (it must
-    reject a token for key A being used on the route for key B).
+    Rejects a malformed / tampered token, one whose ``exp`` has passed (the codec
+    does not enforce it), and one missing its ``k`` claim. Comparing the key
+    against the request path is the route's job.
     """
     try:
         claims = encryption_service.decrypt_jwe_token(token)
@@ -129,8 +114,7 @@ class SignedFileStore(FileStore, ABC):
     """A medium whose download capability is framework-signed and served by the API.
 
     ``presign_get`` is concrete here (it only mints a JWE); a subclass supplies
-    the medium operations plus the URL shape through :attr:`signed_url_base_url`
-    / :attr:`signed_url_path_template`.
+    the medium operations plus the URL shape.
     """
 
     signed_url_base_url: str = ""

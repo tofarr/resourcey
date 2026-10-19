@@ -1,14 +1,11 @@
 """``DbConfig`` — one named SQL connection (issue #74).
 
-A plain :class:`~pydantic.BaseModel` (nested inside
-:class:`~resourcey.sql.sql_config.SqlConfig`), so it carries no instance
-cache and no env prefix of its own: it is parsed as part of its parent's
-``APP_SQL_CONNECTIONS_<n>_*`` slice.
+A plain :class:`~pydantic.BaseModel` nested inside
+:class:`~resourcey.sql.sql_config.SqlConfig`, so it carries no instance cache
+and no env prefix of its own.
 
-The password is a separate field rather than being embedded in the URL so a
-secret store can populate it independently (e.g. from
-``APP_SQL_CONNECTIONS_0_PASSWORD`` encrypted at rest with SOPS) while the
-plaintext URL comes from an ordinary env var.
+The password is a separate field rather than embedded in the URL, so a secret
+store can populate it independently.
 
 This module imports no code outside the framework.
 """
@@ -23,8 +20,7 @@ class DbConfig(BaseModel):
     """One named SQL connection: a URL plus an optional separate password.
 
     The URL scheme selects the driver (``postgresql+asyncpg``,
-    ``sqlite+aiosqlite``, ...). :attr:`name` is required so every connection is
-    addressable by name; a resource that names none uses the first listed.
+    ``sqlite+aiosqlite``, ...).
     """
 
     name: str = Field(
@@ -54,11 +50,9 @@ class DbConfig(BaseModel):
     def database_url(self) -> str:
         """The connection URL with :attr:`password` spliced in when set.
 
-        Returns a plain ``str`` (SQLAlchemy accepts a string URL). The password
-        is spliced with SQLAlchemy's URL parser so reserved characters are
-        percent-encoded rather than corrupting the URL. When :attr:`password`
-        is ``None`` the URL is returned exactly as configured (so a password
-        embedded in the URL still works).
+        Spliced with SQLAlchemy's URL parser so reserved characters are
+        percent-encoded. With no password the URL is returned exactly as
+        configured, so one embedded in the URL still works.
         """
         if self.password is None:
             return self.url

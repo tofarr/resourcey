@@ -1,33 +1,25 @@
 """``OAuthAuthenticator`` — inbound OAuth / OIDC verification (issue #151).
 
-The inbound half of Part 4: an
-:class:`~resourcey.auth.auth_principal.Authenticator` whose credential is a
-bearer token issued by an external identity provider. It plugs into the same
-:class:`~resourcey.auth.auth_authorized_dependency.AuthorizedDependencyBuilder`
-and composes with an API-key authenticator through
-:class:`~resourcey.auth.auth_principal.CompositeAuthenticator` for "OAuth **or**
-API key".
+The inbound half of Part 4: an ``Authenticator`` whose credential is a bearer
+token issued by an external identity provider. It composes with an API-key
+authenticator through ``CompositeAuthenticator`` for "OAuth **or** API key".
 
 Verification contract:
 
-* Read the presented token (``Authorization: Bearer``), decode its **unverified**
-  ``iss`` claim, and select the client row with ``find_by_issuer(iss)``.
+* Read the presented token, decode its **unverified** ``iss`` claim, and select
+  the client row with ``find_by_issuer(iss)``.
 * Validate the token against **that row's** JWKS: ``iss``, ``aud``, ``exp`` /
-  ``nbf``, and **pin ``alg`` to the row's allowlist** (never the token header's
-  ``alg`` — no ``none`` / HMAC-confusion).
-* Map claims onto the :class:`~resourcey.auth.auth_principal.Principal`
-  vocabulary: ``sub`` -> ``external_id``, ``scope`` / ``scp`` -> ``scopes``, a
-  roles claim -> ``roles`` (the simple-roles rung), the remaining claims ->
+  ``nbf``, and **pin ``alg`` to the row's allowlist** (no ``none`` /
+  HMAC-confusion).
+* Map claims onto the ``Principal`` vocabulary: ``sub`` -> ``external_id``,
+  ``scope`` / ``scp`` -> ``scopes``, a roles claim -> ``roles``, the rest ->
   ``claims`` (provenance only).
 * Resolve ``(iss, sub)`` through the ``ExternalIdentity`` mapping to our internal
-  ``user_id``, then reuse the shared principal-store check
-  (:func:`~resourcey.auth.auth_principal.principal_is_active`) so a valid
-  external credential for a **missing or disabled local user** is rejected — the
-  local user store stays authoritative over the IdP. A first-seen ``(iss, sub)``
-  with no mapping is **fail-closed** (rejected) by default.
+  ``user_id``, then reuse the shared store check so a valid external credential
+  for a **missing or disabled local user** is rejected. A first-seen ``(iss,
+  sub)`` is **fail-closed**.
 
-The ``jwks_uri`` from a row is an SSRF vector and the fetch must be **cached**
-(``authenticate`` runs per request and must not hit the network each time); an
+The ``jwks_uri`` from a row is an SSRF vector and the fetch is **cached**; an
 optional host allowlist bounds it further.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
@@ -85,25 +77,10 @@ _bearer_scheme = HTTPBearer(
 class OAuthAuthenticator(Authenticator):
     """Verify an externally-issued bearer token against its issuer's client row.
 
-    Attributes:
-        client_resource: The **inner** client resource (config-list or DB-backed)
-            whose service exposes ``find_by_issuer``. ``None`` fails closed.
-        identity_resource: The ``ExternalIdentity`` resource whose service exposes
-            ``find_by_issuer_subject``. When supplied, ``(iss, sub)`` must map to a
-            known ``user_id`` (fail-closed on a first-seen pair). ``None`` keeps a
-            credential-only posture (a service principal carrying ``external_id``).
-        user_resource: An optional principal store the resolved internal user id
-            is validated against (live + ``enabled``), shared with
-            :class:`~resourcey.auth.auth_api_key.ApiKeyAuthenticator`.
-        jwks_cache_ttl: How long a fetched JWKS is reused. ``None`` re-fetches
-            every request (only sensible in tests).
-        allowed_hosts: An optional allowlist of ``jwks_uri`` hosts. ``None``
-            permits any host.
-        roles_claim: The claim naming the principal's roles.
-        scope_claims: The claims carrying the credential's granted scopes.
-        http_get: An injectable async ``(url) -> dict`` JWKS fetcher. Defaults to
-            an ``httpx`` client; tests inject a fake so no network is touched.
-        clock: The monotonic clock the JWKS cache reads (injectable for tests).
+    ``client_resource`` is the **inner** client resource whose service exposes
+    ``find_by_issuer``; ``None`` fails closed. ``identity_resource`` is the
+    ``ExternalIdentity`` resource; ``None`` keeps a credential-only posture.
+    ``http_get`` is injectable so tests touch no network.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -160,12 +137,8 @@ class OAuthAuthenticator(Authenticator):
     async def verify_token(self, token: str, client: Any) -> dict[str, Any] | None:
         """Verify an arbitrary token against ``client``'s JWKS; ``None`` on failure.
 
-        The public seam shared with :meth:`authenticate`'s bearer-token path:
-        signature, ``iss`` / ``aud`` / ``exp`` / ``nbf``, and ``alg`` pinned to
-        the row's allowlist, reusing the same JWKS cache. A caller that must
-        verify a token the request-time bearer path never sees — e.g. the login
-        callback's OIDC **ID token** — uses this instead of re-implementing (or
-        worse, skipping) verification.
+        The public seam for a token the request-time bearer path never sees —
+        e.g. the login callback's OIDC ID token.
         """
         return await self._verify(token, client)
 
@@ -187,9 +160,8 @@ class OAuthAuthenticator(Authenticator):
     async def _verify(self, token: str, client: Any) -> dict[str, Any] | None:
         """Verify the token's signature, algorithm, and registered claims.
 
-        Returns the claims on success, ``None`` on any failure. The algorithm
-        allowlist comes from the client row, never the token header, so an
-        ``alg``-confusion attack is rejected before any signature is trusted.
+        The algorithm allowlist comes from the client row, never the token header,
+        so an ``alg``-confusion attack is rejected before any signature is trusted.
         """
         jwks_uri = getattr(client, "jwks_uri", None)
         if not jwks_uri:
@@ -243,8 +215,7 @@ class OAuthAuthenticator(Authenticator):
         issuer = str(claims.get("iss"))
         user_id = await self._resolve_user_id(issuer, subject)
         if user_id is None and self.identity_resource is not None:
-            # A configured mapping with no entry is fail-closed: a first-seen
-            # external principal is rejected unless the app auto-provisions.
+            # A configured mapping with no entry is fail-closed.
             return None
         roles = roles_from_credential(claims.get(self.roles_claim)) | roles_from_credential(
             getattr(client, "roles", None)
@@ -316,10 +287,8 @@ def _presented_token(request: Request) -> str | None:
 def _unverified_issuer(token: str) -> str | None:
     """Decode the token's ``iss`` claim **without verifying** (for row selection).
 
-    Reading the issuer before verification is safe: the value is used only to
-    *select* which keys to verify against, and the signature / ``iss`` are
-    re-checked against that row's JWKS afterwards. A malformed token yields
-    ``None``.
+    The value is used only to *select* which keys to verify against; the
+    signature and ``iss`` are re-checked against that row's JWKS afterwards.
     """
     parts = token.split(".")
     if len(parts) != 3:
@@ -337,9 +306,8 @@ def _unverified_issuer(token: str) -> str | None:
 def _claims_valid(claims: dict[str, Any], client: Any) -> bool:
     """Validate ``iss`` / ``aud`` / ``exp`` / ``nbf`` against the client row.
 
-    ``decode`` verifies the signature and algorithm but does **not** enforce the
-    registered claims, so they are checked here with joserfc's registry. An
-    ``aud`` of ``None`` on the row skips the audience check.
+    ``decode`` does **not** enforce the registered claims, so they are checked
+    here with joserfc's registry.
     """
     now = int(time.time())
     kwargs: dict[str, Any] = {}
@@ -372,9 +340,8 @@ def _provenance_claims(
 ) -> dict[str, str]:
     """The remaining scalar claims, for provenance only.
 
-    Structural claims (``sub`` / ``iss`` / ``exp`` / …) and the roles / scopes
-    claims are dropped — they are surfaced on the principal's dedicated fields,
-    which are decision inputs, not provenance.
+    Structural claims and the roles / scopes claims are dropped — they are
+    surfaced on the principal's dedicated fields, which are decision inputs.
     """
     excluded = _STRUCTURAL_CLAIMS | {roles_claim} | set(scope_claims)
     return {

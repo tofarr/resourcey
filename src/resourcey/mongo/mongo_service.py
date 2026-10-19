@@ -1,21 +1,14 @@
 """``MongoService`` — the action layer of the Mongo backend (issue #80).
 
-Implements the eight standard actions against a duck-typed async collection
-(``insert_one``, ``find_one``, ``find``, ``find_one_and_update``, ``delete_one``,
-``count_documents``, ``create_index``) so ``mongomock`` substitutes for ``motor``
-in tests. A document is the DTO's fields, with the identifier stored under
-Mongo's ``_id``; ``UUID`` values are stored as their string form (bson cannot
-encode a native ``UUID`` without a configured representation) and coerced back
-by Pydantic on read.
+Implements the eight standard actions against a duck-typed async collection, so
+``mongomock`` substitutes for ``motor`` in tests. A document is the DTO's fields,
+with the identifier stored under Mongo's ``_id``; ``UUID`` values are stored as
+their string form and coerced back by Pydantic on read.
 
-``search`` implements keyset (seek) cursor pagination ordered by the identifier
-by default, or by a validated ``sort`` field with ``_id`` appended as a stable
-tie-breaker. The cursor is the shared, tamper-proof
-:mod:`resourcey.util.cursor` codec, so a cursor reused under a different sort
-is rejected rather than applied against the wrong field. Mongo's fixed NULL
-ordering (nulls first ascending, last descending) is what the in-memory
-:meth:`AttrSortOrder.compare` reference expects, so the keyset predicate needs no
-NULL special-casing beyond that.
+``search`` implements keyset cursor pagination ordered by the identifier by
+default, or by a validated ``sort`` field with ``_id`` appended as a stable
+tie-breaker. The cursor is the shared, tamper-proof codec, so a cursor reused
+under a different sort is rejected.
 
 This module imports no code outside the framework.
 """
@@ -86,11 +79,9 @@ def _encode_value(value: Any) -> Any:
 class MongoService(Service[T, K]):
     """The standard actions over a Mongo collection, with keyset cursor pagination.
 
-    Holds the call-scoped ``ctx`` and the collection (instance state, not a
-    per-call parameter). Motor manages its own connection pool, so — unlike the
-    SQL service — there is no per-request session to commit or close: each
-    operation is atomic at the document level. The ``ctx`` is still adopted and
-    exposed so a caller can share call-scoped state, matching the SQL seam.
+    Motor manages its own connection pool, so — unlike the SQL service — there is
+    no per-request session to commit or close: each operation is atomic at the
+    document level.
     """
 
     def __init__(
@@ -120,8 +111,7 @@ class MongoService(Service[T, K]):
     async def create(self, payload: T) -> T:
         """Insert a DTO, filling omitted fields from create defaults; return the DTO.
 
-        A duplicate identifier (or a unique index declared in ``get_indexes``)
-        is translated from pymongo's ``DuplicateKeyError`` to
+        A duplicate key is translated from pymongo's ``DuplicateKeyError`` to
         :class:`ConflictError`, so the transport's ``409`` mapping does not need
         to know the driver.
         """
@@ -148,16 +138,12 @@ class MongoService(Service[T, K]):
     async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
         """Apply an update DTO (whose id field names the document); return the DTO or ``None``.
 
-        Supplied (non-``MISSING``) fields are written; omitted fields with an
-        update default take it, and an omitted field with no update default is
+        Supplied fields are written; an omitted field with no update default is
         left unchanged (PATCH semantics). The id is never written.
 
-        ``condition`` is an optional :class:`SearchFilter` tree the stored
-        document must satisfy for the write to apply. It is merged into the
-        update's query filter, so the check and the write are one atomic
-        document operation. ``None`` means no document was written — an absent
-        id or a failed condition — so the two are indistinguishable and a failed
-        condition never leaks that the document exists.
+        ``condition`` is ``$and``-merged into the update's query filter, so the
+        check and the write are one atomic document operation. ``None`` means no
+        document was written — an absent id or a failed condition.
         """
         id_field = self._resource.get_id_field()
         values = _payload_values(payload)
@@ -181,11 +167,8 @@ class MongoService(Service[T, K]):
     async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
         """Delete by id; return whether a document was deleted.
 
-        ``condition`` is an optional :class:`SearchFilter` tree the stored
-        document must satisfy for the delete to apply. ``False`` means no
-        document was deleted — an absent id or a failed condition — so the two
-        are indistinguishable and a failed condition never leaks that the
-        document exists.
+        ``False`` means no document was deleted — an absent id or a failed
+        ``condition``.
         """
         query = await self._write_query(id, condition)
         deleted = await self._collection.find_one_and_delete(query)
@@ -200,13 +183,9 @@ class MongoService(Service[T, K]):
     ) -> Page[T]:
         """Return up to ``limit`` documents, with keyset pagination via ``cursor``.
 
-        ``sort_order`` is the validated ordering (``None`` for the default
-        identifier order); ``_id`` is appended as a stable tie-breaker by the
-        sort converter. ``search_filter`` is a standard :class:`SearchFilter`
-        tree (an object filter is lowered first) and is pushed into the query
-        before the page is taken. The next cursor is derived from the *same*
-        ``sort_order`` the page was ordered and sought by, so it can never be
-        rejected by the predicate that follows it.
+        The filter is pushed into the query before the page is taken, and the
+        next cursor is derived from the *same* ``sort_order`` the page was
+        ordered and sought by.
         """
         query = await self._filter_query(search_filter)
         if query is _UNCONVERTIBLE:
@@ -252,15 +231,9 @@ class MongoService(Service[T, K]):
     async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply each :class:`Edit`; results align positionally with ``edits``.
 
-        A create / update yields the resulting DTO, a delete yields ``None``
-        (nothing to return), and a miss (an absent id on update / delete) also
-        yields ``None``.
-
-        A create / update / delete is refused with :class:`InvalidInputError`
-        unless the resource *declares* the matching action, so a batch can never
-        reach an action the resource does not expose (the transport narrows the
-        body the same way; this is the backend's own guard for direct service
-        callers).
+        A create / update yields the resulting DTO; a delete or a miss yields
+        ``None``. A node is refused unless the resource *declares* the matching
+        action.
         """
         supported = self._resource.get_supported_actions()
         results: list[T | None] = []
@@ -288,11 +261,9 @@ class MongoService(Service[T, K]):
         """Translate ``search_filter`` into a Mongo query (all-or-nothing).
 
         Returns ``None`` for no restriction, a query dict, or the
-        :data:`_UNCONVERTIBLE` sentinel when the filter cannot be pushed down and
-        the resource has opted into the in-memory iteration fallback. An
-        unconvertible filter without that opt-in raises
-        :class:`UnsupportedFilterError`, since silently scanning every document
-        behind a public ``GET`` is a DoS.
+        :data:`_UNCONVERTIBLE` sentinel when the resource opted into the in-memory
+        fallback. Without that opt-in an unconvertible filter raises, since
+        silently scanning every document behind a public ``GET`` is a DoS.
         """
         if search_filter is None:
             return None
@@ -309,12 +280,8 @@ class MongoService(Service[T, K]):
     async def _write_query(self, id_value: Any, condition: SearchFilter[Any] | None) -> Query:
         """The query for a conditional write: the id, ``$and``-merged with ``condition``.
 
-        The condition is part of the update / delete's own query filter, so the
-        check and the write are a single atomic document operation. The
-        in-memory iteration fallback is **refused** here even when the resource
-        opted into it: materialising matching ids and then writing would open a
-        TOCTOU window (and scan unboundedly), so an unconvertible condition
-        fails closed with :class:`UnsupportedFilterError`.
+        The in-memory fallback is **refused** here even when the resource opted
+        into it: materialising ids and then writing would open a TOCTOU window.
         """
         query: Query = {"_id": _encode_value(id_value)}
         if condition is None:
@@ -389,9 +356,7 @@ class MongoService(Service[T, K]):
         """The keyset query for ``cursor``, bound to the request's sort.
 
         A cursor built for a different ``(sort field, direction)`` is rejected
-        rather than applied against the wrong field. The sort-order fields
-        (``attribute`` / ``descending``) are read through ``getattr`` so a
-        declared non-``AttrSortOrder`` node that carries them still binds.
+        rather than applied against the wrong field.
         """
         if cursor is None:
             return None
@@ -482,17 +447,11 @@ def _keyset_query(field: str, cursor_key: Any, cursor_id: Any, ascending: bool) 
     """Build the Mongo query that seeks past the cursor document.
 
     Ordering is ``(sort_key, _id)`` with the sort key in the requested direction
-    and ``_id`` *always ascending* (the tie-breaker the sort converter appends).
-    Ascending keeps ``sort_key > cursor_key``, or an equal key with a greater
-    ``_id``; descending keeps ``sort_key < cursor_key``, or an equal key with a
-    greater ``_id`` — only the sort-key comparison mirrors, never the tie-breaker.
+    and ``_id`` *always ascending*. Only the sort-key comparison mirrors for
+    descending, never the tie-breaker.
 
-    Mongo places ``null`` first ascending and last descending (the ordering
-    :meth:`AttrSortOrder.compare` expects), so a ``None`` cursor key sits in the
-    null block: ascending rows after it are the non-null rows then a greater
-    ``_id`` within the null block; descending rows after it are only a greater
-    ``_id`` within the null block, and a non-null key additionally keeps the
-    null block (which sorts last).
+    Mongo places ``null`` first ascending and last descending, so a ``None``
+    cursor key sits in the null block and is seeked past within that block.
     """
     if ascending:
         if cursor_key is None:

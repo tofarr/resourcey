@@ -1,33 +1,24 @@
 """Translate a standard :class:`SearchFilter` tree into a Mongo query (issue #80).
 
 Mirrors :mod:`resourcey.sql.filter_converter`: it consumes only the *standard*
-filter tree (an object filter lowers itself first), dispatches through **three
-registries** (logical / attribute / operator) with an import-time completeness
-assert, and registers a ``(positive, negated)`` pair per operator. Because the
-node set is a discriminated union the registries are enumerable, so a new leaf
-added without a handler fails at import rather than at request time.
+filter tree, dispatches through three registries (logical / attribute /
+operator) with an import-time completeness assert, and registers a
+``(positive, negated)`` pair per operator.
 
-A Mongo query is a plain ``dict`` (``None`` = no restriction, matching every
-document). Unlike the SQL converter there is no column object: an attribute
-resolves to a *field name* (the identifier maps to Mongo's ``_id``), and each
-value leaf produces a self-contained ``{field: condition}`` fragment. Logical
-nodes compose fragments under ``$and`` / ``$or`` / ``$nor``.
+A Mongo query is a plain ``dict`` (``None`` = no restriction). An attribute
+resolves to a *field name* (the identifier maps to ``_id``), and each value leaf
+produces a self-contained ``{field: condition}`` fragment. Logical nodes compose
+fragments under ``$and`` / ``$or`` / ``$nor``.
 
 Negation is the exact complement
 --------------------------------
-The in-memory :meth:`SearchFilter.matches` complement is the contract. Mongo's
-``$ne`` is *not* that complement for a non-None value: ``{f: {"$ne": v}}`` also
-matches documents where ``f`` is absent or null, but a ``NotFilter`` around an
-``EqFilter`` should match exactly the documents where ``matches`` is false — and
-for an absent / null field ``EqFilter.matches`` is already false, so the
-complement is true. The negated form is therefore the query-level ``$nor`` of the
-positive fragment, which matches *every* document the positive fragment does not
-— absent and null rows included. A test pins that the negated form and
-``matches``' complement agree on an absent / null field.
+Mongo's ``$ne`` is *not* the in-memory ``matches`` complement for a non-None
+value: ``{f: {"$ne": v}}`` also matches documents where ``f`` is absent or null,
+but ``EqFilter.matches`` is already false for those, so the complement is true.
+The negated form is therefore the query-level ``$nor`` of the positive fragment.
 
-All-or-nothing pushdown: an unconvertible node raises
-:class:`~resourcey.core.errors.UnsupportedFilterError` unless the resource set
-``allow_filter_iteration`` (the same unbounded-scan guard the SQL backend uses).
+An unconvertible node raises :class:`~resourcey.core.errors.UnsupportedFilterError`
+unless the resource set ``allow_filter_iteration``.
 
 This module imports no code outside the framework.
 """
@@ -65,21 +56,16 @@ Query = dict[str, Any] | None
 LogicalHandler = Callable[["MongoFilterConverter", SearchFilter[Any]], Query]
 OperatorHandler = Callable[["MongoFilterContext", str, Any], Query]
 
-# A query that matches no document. ``{"$nor": [{}]}`` negates the
-# matches-everything empty document, so it matches nothing unconditionally —
-# including a document whose ``_id`` is itself null (a client-supplied nullable
-# identifier), which ``{"_id": None}`` would wrongly match. Mongo has no
-# dedicated "false" literal.
+# A query that matches no document. ``{"$nor": [{}]}`` matches nothing
+# unconditionally, including a document whose ``_id`` is itself null — which
+# ``{"_id": None}`` would wrongly match.
 _MATCH_NONE: Query = {"$nor": [{}]}
 
 
 def _encode(value: Any) -> Any:
     """Encode a value for a Mongo query (``UUID`` -> string, datetimes to UTC).
 
-    Documents store ``UUID`` as its string form (bson cannot encode a native
-    ``UUID`` without a configured representation), so a filter value must be
-    encoded the same way. An aware datetime is normalised to UTC for parity with
-    the stored value.
+    Filter values must be encoded the same way the documents store them.
     """
     if isinstance(value, UUID):
         return str(value)
@@ -293,12 +279,8 @@ _assert_registries_are_complete()
 class MongoFilterContext:
     """Everything a conversion handler needs, passed as one frozen object.
 
-    Args:
-        fields: DTO attribute name -> the Mongo field it maps to. Only the
-            resource's *queryable* fields are present, so a field projected away
-            from the read model cannot be filtered (``?secret__eq=`` discloses a
-            value the outside world never sees).
-        id_field: The DTO's identifier field, whose Mongo field is ``_id``.
+    ``fields`` holds only the resource's *queryable* fields, so a field projected
+    away from the read model cannot be filtered.
     """
 
     fields: Mapping[str, str]
@@ -315,11 +297,7 @@ class MongoFilterContext:
 
 
 class MongoFilterConverter:
-    """Convert a standard filter tree into a Mongo query.
-
-    ``resolve()`` is the only phase that may do IO (no handler needs it today);
-    ``condition`` / ``apply`` are pure query building over the resolved context.
-    """
+    """Convert a standard filter tree into a Mongo query."""
 
     def __init__(self, ctx: MongoFilterContext) -> None:
         self.ctx = ctx

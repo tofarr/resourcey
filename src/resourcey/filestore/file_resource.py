@@ -1,40 +1,29 @@
 """``FileResource`` / ``FileService`` -- the ``files`` surface over a ``FileStore`` (issue #158).
 
-Replaces the earlier ``file_metadata`` design (a SQL metadata row tracking a
-synthetic ``pending`` / ``ready`` status): there is **no metadata table**
-anymore. "Does the medium have the bytes" is the only source of truth for a
-file's existence, so this resource is served directly over the
-:class:`~resourcey.filestore.file_store.FileStore` seam -- ``read`` / ``search``
-resolve against the medium's own ``head`` / ``list_objects``, uniformly across
-every medium (Local / SQL / S3).
+There is **no metadata table**: "does the medium have the bytes" is the only
+source of truth for a file's existence, so this resource is served directly over
+the :class:`~resourcey.filestore.file_store.FileStore` seam — ``read`` /
+``search`` resolve against the medium's own ``head`` / ``list_objects``.
 
-``create`` *is* the upload (case 2 of the upload-design discussion): the
-transport (:mod:`resourcey.filestore.file_routes`) parses a
-``multipart/form-data`` body, reads ``name`` / ``content_type`` off the upload
-itself, and hands the raw bytes to :meth:`FileService.create` as the DTO's
-internal-only ``content`` field -- ``size`` / ``checksum`` are computed here
-from those bytes, never a client declaration. Because there is no
-pre-signed-URL handshake, ``Action.CREATE`` is not in this resource's
-declared action set (mirroring how ``Action.UPDATE`` was already absent): the
-generic JSON create-request / batch-edit ``Create`` kind do not apply to a
-multipart upload, so ``register_file_routes`` mounts the real ``POST
-{resource}`` route by hand, same as it already did for ``download`` /
-``content``. Authorization is unaffected -- ``AuthorizedService.create()``
-checks the ``Action.CREATE`` policy regardless of what a resource declares.
+``create`` *is* the upload: the transport
+(:mod:`resourcey.filestore.file_routes`) parses a ``multipart/form-data`` body,
+reads ``name`` / ``content_type`` off the upload, and hands the raw bytes to
+:meth:`FileService.create` as the DTO's internal-only ``content`` field.
+``size`` / ``checksum`` are computed here, never a client declaration. Because
+the generic JSON create request and batch-edit ``Create`` kind do not apply to a
+multipart upload, ``Action.CREATE`` is not in this resource's declared action
+set; ``register_file_routes`` mounts the real ``POST {resource}`` route by hand.
+Authorization is unaffected — ``AuthorizedService.create()`` checks the
+``Action.CREATE`` policy regardless of what a resource declares.
 
 Action surface: ``read``, ``delete``, ``search``, ``count``, ``batch_read``,
-``batch_edit`` (narrowed by ``normalize_actions`` to the ``Delete`` kind
-only -- a JSON batch body cannot carry file bytes, so batch creation is not
-offered). **No ``update``**: a file's bytes are immutable once uploaded --
-"changing" a file means delete the old id and create a new one.
+``batch_edit`` (narrowed to the ``Delete`` kind only). **No ``update``**: a
+file's bytes are immutable once uploaded.
 
-``search`` / ``count`` have no filter or sort surface: a medium's cheap listing
-call (``list_objects`` / ``count_objects``) cannot filter or sort by declared
-metadata (S3's ``ListObjectsV2`` is the limiting case), so this resource does
-not pretend otherwise -- only the default, keyset-by-identifier order is
-offered. ``search`` also omits ``name`` / ``content_type`` / ``checksum``
-(available from ``read`` only) for the same reason: ``ListObjectsV2`` cannot
-report per-object user metadata.
+``search`` / ``count`` have no filter or sort surface, and ``search`` omits
+``name`` / ``content_type`` / ``checksum``: a medium's cheap listing call
+(S3's ``ListObjectsV2`` is the limiting case) cannot filter, sort, or report
+per-object user metadata.
 
 This module imports no code outside the framework.
 """
@@ -79,9 +68,8 @@ if TYPE_CHECKING:
 T = TypeVar("T", bound=BaseModel)
 K = TypeVar("K")
 
-# Fields the server owns entirely: never client input, never a factory
-# default (their only source of truth is the medium). They *are* available in
-# the create response -- ``create`` is the upload, so the medium has already
+# Server-owned: never client input, never a factory default. They *are* in the
+# create response, since ``create`` is the upload and the medium has already
 # reported them by the time it returns.
 _SERVER_OWNED = DtoField(
     in_create_request=False,
@@ -89,9 +77,8 @@ _SERVER_OWNED = DtoField(
     in_update_response=False,
 )
 
-# A field that exists only to carry data between the transport and the
-# service, in-process, for the lifetime of one ``create`` call -- never
-# projected onto any of the six REST shapes.
+# Carries the bytes between transport and service for one ``create`` call;
+# never projected onto any of the six REST shapes.
 _INTERNAL_ONLY = DtoField(
     in_create_request=False,
     in_create_response=False,
@@ -106,17 +93,9 @@ class FileDTO(DTO):
     """The ``files`` DTO: a medium-native existence record, not a stored row.
 
     ``id`` *is* the medium's opaque storage key (a server-assigned hex string,
-    not a UUID -- so the ``core`` UUID-id convention does not auto-generate it;
-    :meth:`FileService.create` assigns it explicitly). ``created_at`` /
-    ``updated_at`` collapse into the single ``updated_at`` (a key is written
-    once and never rewritten, so there is nothing a second timestamp would
-    distinguish). ``name`` / ``content_type`` / ``size`` / ``checksum`` are all
-    server-derived from the upload (never client input, so none is in the
-    create request) -- there is no create request left to speak of for this
-    resource; see :mod:`resourcey.filestore.file_routes` for the hand-written
-    multipart route. ``content`` is not a medium-native field at all: it is the
-    one-request-lifetime carrier for the uploaded bytes between the transport
-    and :meth:`FileService.create`, excluded from every REST shape.
+    not a UUID, so the ``core`` UUID-id convention does not generate it).
+    ``updated_at`` doubles as the creation time: a key is written once and never
+    rewritten.
     """
 
     id: str
@@ -145,14 +124,13 @@ class FileResource(DefaultCacheStrategyMixin, Resource[T, K]):
     """The ``files`` resource: ``FileDTO`` served directly over a ``FileStore``.
 
     Args:
-        store: The medium the bytes (and, for Local / SQL, the metadata) live
-            in. The same instance must be entered through the manifest's
-            ``managers`` slot.
+        store: The medium the bytes live in. The same instance must be entered
+            through the manifest's ``managers`` slot.
         path: An explicit REST path segment (default ``"files"``).
         max_size: An optional cap on an upload's size, in bytes (default:
-            :attr:`~resourcey.filestore.file_config.FileStoreConfig.max_size`).
+            ``FileStoreConfig.max_size``).
         download_url_ttl_seconds: The download-capability TTL (default:
-            :attr:`~resourcey.filestore.file_config.FileStoreConfig.download_url_ttl_seconds`).
+            ``FileStoreConfig.download_url_ttl_seconds``).
     """
 
     def __init__(
@@ -196,11 +174,9 @@ class FileResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def get_resource_path(self) -> str:
         return self._path.lstrip("/")
 
-    # get_cache_strategy is inherited from DefaultCacheStrategyMixin: ``files``
-    # advertises writes (create/delete), so it is not read-only; ``updated_at``
-    # is on the read model, so the default is LastModifiedCacheStrategy -- a
-    # file's row never changes once it exists (there is no update action), so
-    # a validator over its one write time is accurate.
+    # ``files`` advertises writes, so it is not read-only; ``updated_at`` is on
+    # the read model, so the default is LastModifiedCacheStrategy — accurate
+    # because a file never changes once it exists.
 
     def get_queryable_fields(self) -> frozenset[str]:
         """Empty: no medium offers a cheap filter surface over its listing."""
@@ -299,8 +275,8 @@ def file_resource(
 class FileService(Service[T, K]):
     """The ``files`` action layer: every action resolves against ``store``.
 
-    Holds no storage of its own (the medium is the storage); entering only
-    marks the lifecycle guard, mirroring :class:`~resourcey.list.list_service.ListService`.
+    Holds no storage of its own (the medium is the storage); entering only marks
+    the lifecycle guard.
     """
 
     def __init__(
@@ -331,10 +307,9 @@ class FileService(Service[T, K]):
     async def create(self, payload: Any) -> Any:
         """Commit the uploaded bytes to the medium; ``create`` *is* the upload.
 
-        ``payload`` carries ``name`` / ``content_type`` as read off the
-        upload by the transport, plus the raw bytes in ``content``. ``size`` /
-        ``checksum`` are computed here, from those bytes -- never a client
-        declaration to trust or verify.
+        ``payload`` carries ``name`` / ``content_type`` as read off the upload,
+        plus the raw bytes in ``content``. ``size`` / ``checksum`` are computed
+        here, never a client declaration to trust.
         """
         self._require_entered()
         values = _values(payload)
@@ -440,9 +415,7 @@ class FileService(Service[T, K]):
         )
 
     def _search_dto(self, obj: StoredObject) -> Any:
-        """Only the medium-listing fields (``name`` / ``content_type`` /
-        ``checksum`` stay ``MISSING``, dropped by the transport's projection
-        onto ``search_response``, which does not declare them)."""
+        """Only the medium-listing fields; the rest stay ``MISSING``."""
         return self._dto_type()(
             id=obj.key,
             size=obj.size,
@@ -455,8 +428,7 @@ class FileService(Service[T, K]):
     # ------------------------------------------------------------------
 
     def _reject_filter(self, search_filter: SearchFilter[Any] | None) -> None:
-        """Defense in depth for a direct service caller (the transport already
-        rejects any ``field__op`` param -- the query surface is empty)."""
+        """Defense in depth for a direct service caller (the query surface is empty)."""
         if search_filter is not None:
             raise UnsupportedFilterError(
                 f"{type(self._resource).__name__} has no filter surface: a medium's listing "
@@ -464,13 +436,7 @@ class FileService(Service[T, K]):
             )
 
     def _reject_condition(self, condition: SearchFilter[Any] | None) -> None:
-        """Refuse a conditional delete: files have no query surface to condition on.
-
-        A condition names ``<field>__<op>`` predicates, but a medium's operations
-        cannot filter by declared metadata (S3's ``ListObjectsV2`` is the limiting
-        case), so the surface is empty -- the same reason ``search`` / ``count``
-        have no filter surface. Fail loudly rather than silently ignoring it.
-        """
+        """Refuse a conditional delete: files have no query surface to condition on."""
         if condition is not None:
             raise UnsupportedFilterError(
                 f"{type(self._resource).__name__} has no filter surface: a conditional "

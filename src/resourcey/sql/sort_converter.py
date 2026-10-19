@@ -1,11 +1,8 @@
 """Translate a standard :class:`SortOrder` into SQLAlchemy ordering (issue #97).
 
-This is the only file that imports SQLAlchemy for sorting. Dispatch is a
-single registry keyed on the :class:`SortOrder` type, mirroring
-``sql/filter_converter.py``: because the node set is a discriminated union
-the registry is enumerable, and the module asserts at import time that every
-standard node has a handler — a new node added without one fails at startup, not
-per request.
+This is the only file that imports SQLAlchemy for sorting. Dispatch is a single
+registry keyed on the :class:`SortOrder` type, and the module asserts at import
+time that every standard node has a handler.
 
 :meth:`SqlSortConverter.apply` appends the identifier as a tie-breaker to every
 ordering (``<sort> asc/desc, id asc``), so keyset paging is a total order even
@@ -36,9 +33,8 @@ def _attr_order(ctx: SqlSortContext, node: SortOrder[Any]) -> ColumnElement[Any]
     """Order by one column, ascending or descending (``node`` is an ``AttrSortOrder``).
 
     NULLs are placed explicitly (first ascending, last descending) so the order
-    matches ``AttrSortOrder.compare``'s "``None`` sorts first" reference and the
-    keyset predicate's null-block handling, rather than depending on the SQL
-    dialect's default NULL placement.
+    matches ``AttrSortOrder.compare`` and the keyset predicate's null-block
+    handling, rather than depending on the dialect's default placement.
     """
     column = ctx.column_for(node.attribute)  # type: ignore[attr-defined]
     if node.descending:  # type: ignore[attr-defined]
@@ -71,12 +67,9 @@ _assert_registry_is_complete()
 class SqlSortContext:
     """Everything a sort handler needs, passed as one frozen object.
 
-    Args:
-        columns: DTO attribute name -> the table column it maps to. Only the
-            resource's *sortable* fields are present, so a field projected away
-            from the read model cannot be sorted on (``?sort=secret`` would leak
-            the hidden value's relative order).
-        id_column: The identifier column, appended as the stable tie-breaker.
+    ``columns`` holds only the resource's *sortable* fields, so a field projected
+    away from the read model cannot be sorted on. ``id_column`` is appended as
+    the stable tie-breaker.
     """
 
     columns: Mapping[str, Column[Any]]

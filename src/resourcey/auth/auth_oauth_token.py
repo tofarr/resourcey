@@ -1,39 +1,30 @@
 """The OAuth token table and its service — the refresh lifecycle (issue #151).
 
 This is the one **durable** OAuth storage tier. Client / IdP config is the
-config-or-DB resource (:mod:`resourcey.auth.auth_oauth_client`); ephemeral flow
-state (``state``, PKCE verifier, code) is carried in a short-TTL JWE, not a
-table; the tokens themselves live here, **encrypted at rest** through
-:class:`~resourcey.encryption.encryption_service.EncryptionService`.
+config-or-DB resource; ephemeral flow state (``state``, PKCE verifier, code) is
+carried in a short-TTL JWE, not a table; the tokens themselves live here,
+**encrypted at rest**.
 
 The cookie is never the token: the refresh token lives only, encrypted, in this
-table, and a session cookie carries an opaque handle the server maps back to the
-row. Encoding a provider credential into a cookie or an API key is explicitly
+table. Encoding a provider credential into a cookie or an API key is explicitly
 out.
 
 Refresh serialization (the hard part)
 -------------------------------------
-Some providers **rotate** the refresh token on every use (the old one is
-invalidated) and some allow a refresh token to be used **only once** (a second
-concurrent use fails, or invalidates the whole grant). A cluster running several
-processes can therefore race: both read the same refresh token, both refresh,
-and the loser holds an invalidated token. The refresh must be serialized across
-**processes**, not just within one event loop.
+Some providers **rotate** the refresh token on every use and some allow it to be
+used **only once**, so two processes refreshing concurrently would leave the
+loser holding an invalidated token. The refresh is therefore serialized across
+**processes**.
 
 The lock is a **lease / compare-and-swap column**, not ``SELECT … FOR UPDATE``:
-SQLite (the unit-test database) accepts ``with_for_update()`` and silently drops
-the clause, and Mongo has no row lock at all, so the guarantee cannot rest on it.
-Each row carries ``lease_owner`` + ``lease_until`` and a refresh is claimed with
-a conditional ``UPDATE``; the affected row count tells the caller whether it won.
-The winner refreshes and persists the new (and rotated) token **atomically with
-releasing the lease**; a loser polls the row briefly and, once ``expires_at`` is
-in the future, uses the new access token — no second refresh is issued. The lease
-TTL bounds the wait and self-heals a crashed claimer (an expired lease is
-reclaimable). ``FOR UPDATE`` may be layered on as a Postgres-only optimization,
-never as the contract.
+SQLite silently drops the clause and Mongo has no row lock. Each row carries
+``lease_owner`` + ``lease_until`` and a refresh is claimed with a conditional
+``UPDATE``; the affected row count tells the caller whether it won. A loser polls
+the row briefly and observes the new access token — the lease TTL bounds the wait
+and self-heals a crashed claimer.
 
 A refresh failure (a rotated-and-invalidated token) marks the row **revoked** and
-requires re-authentication, rather than retrying forever.
+requires re-authentication.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
 """
@@ -60,10 +51,7 @@ from resourcey.sql.sql_service import SqlService
 if TYPE_CHECKING:
     from resourcey.auth.auth_oauth_provider import CredentialProvider
 
-# The provider's client row type is duck-typed: any object exposing ``id`` /
-# ``token_url`` / ``refresh_url`` / ``client_id`` / ``client_secret`` /
-# ``refresh_rotates_token`` / ``refresh_is_single_use`` works, so the token
-# service never branches on the config-vs-DB rung.
+# The client row is duck-typed, so this never branches on the config-vs-DB rung.
 
 # How long a caller polls for the winning refresher before giving up, and the
 # poll interval. Both are small: the winner's exchange is a single round trip.
@@ -83,15 +71,10 @@ class OAuthTokenBase(DeclarativeBase):
 class OAuthToken(OAuthTokenBase):
     """A stored OAuth token pair, encrypted at rest.
 
-    ``principal_id`` is **our** internal ``uuid.UUID`` (never the provider
-    subject). ``client_id`` is the :class:`OAuthClient` it was issued for. The
-    pair is unique, so a principal has at most one token per client.
-
-    ``access_token`` / ``refresh_token`` are :class:`~pydantic.SecretStr` columns
-    holding JWE ciphertext (the service encrypts before binding). ``expires_at``
-    drives our session ``exp``; ``refresh_expires_at`` is the optional
-    provider-side refresh-token life. ``lease_owner`` / ``lease_until`` are the
-    refresh lease (compare-and-swap, not a row lock).
+    ``principal_id`` is **our** internal id (never the provider subject), and the
+    pair is unique, so a principal has at most one token per client. The secret
+    columns hold JWE ciphertext; ``lease_owner`` / ``lease_until`` are the refresh
+    lease (compare-and-swap, not a row lock).
     """
 
     __tablename__ = "oauth_tokens"
@@ -119,8 +102,7 @@ class StoredToken(BaseModel):
     """A token pair with **plaintext** credentials, the shape the service returns.
 
     The row stores ciphertext; :class:`OAuthTokenService` decrypts at the
-    boundary, so a caller (the outbound provider, the session cookie mint) works
-    with usable values.
+    boundary.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -143,12 +125,9 @@ def _as_utc(value: datetime) -> datetime:
 class OAuthTokenService(SqlService[Any, Any]):
     """Store / get / revoke / refresh for the token table.
 
-    Wraps :class:`~resourcey.encryption.encryption_service.EncryptionService` for
-    the encrypt-at-rest boundary and owns the refresh lifecycle (lease / CAS
-    serialization, rotation-aware atomic persist). The generic ``read`` /
-    ``search`` actions (used by the debug-only exposed resource) return the
-    ciphertext columns unchanged — the secret fields are projected away by
-    :func:`~resourcey.auth.auth_oauth_client.oauth_token_view` anyway.
+    Wraps the encryption service for the encrypt-at-rest boundary and owns the
+    refresh lifecycle. The generic ``read`` / ``search`` actions return the
+    ciphertext columns unchanged; ``oauth_token_view`` projects them away.
     """
 
     def __init__(
@@ -182,16 +161,10 @@ class OAuthTokenService(SqlService[Any, Any]):
     ) -> StoredToken:
         """Upsert the ``(principal_id, client_id)`` token pair (encrypted at rest).
 
-        The access / refresh tokens are encrypted before binding, so the row
-        never holds a usable provider credential. An existing pair is replaced
-        (a re-login or a refresh), and the lease is cleared.
-
-        The initial insert (no row yet) is attempted inside a ``SAVEPOINT``: a
-        concurrent first-time store for the same ``(principal_id, client_id)``
-        (e.g. a double-submitted login) can race the read-then-insert and hit
-        the ``uq_oauth_token`` unique constraint. Rather than surface that as an
-        unhandled ``IntegrityError``, the savepoint rolls back and the loser
-        falls back to updating the row the winner just inserted.
+        An existing pair is replaced (a re-login or a refresh), and the lease is
+        cleared. The initial insert runs inside a ``SAVEPOINT``: a concurrent
+        first-time store can hit the unique constraint, so the loser falls back to
+        updating the row the winner just inserted.
         """
         session = self._active_session()
         table = self._resource.table
@@ -271,13 +244,9 @@ class OAuthTokenService(SqlService[Any, Any]):
     ) -> StoredToken:
         """Return a usable access token, refreshing under a lease if stale.
 
-        The correctness contract: at most one refresher runs at a time per
-        ``(principal, client)``; the rest observe the result. A still-fresh token
-        is returned as-is. Otherwise the row is claimed with a conditional update
-        (the lease); the winner performs the exchange and persists the new (and
-        rotated) token atomically with releasing the lease, while a loser polls
-        briefly for the winner's result. A refresh failure marks the row revoked
-        and raises :class:`~resourcey.core.errors.InvalidInputError`.
+        At most one refresher runs at a time per ``(principal, client)``; the rest
+        observe the result. A refresh failure marks the row revoked and raises
+        :class:`~resourcey.core.errors.InvalidInputError`.
         """
         current = await self.get(principal_id, client.id)
         if current is None:
@@ -314,9 +283,8 @@ class OAuthTokenService(SqlService[Any, Any]):
         """Try to win the refresh lease with a conditional update (the CAS).
 
         The ``WHERE`` clause admits the row only when it is unleased or its lease
-        has expired, so a crashed claimer self-heals. The affected row count is
-        the whole answer — no ``FOR UPDATE``, so the primitive works on SQLite
-        and Mongo alike.
+        has expired, so a crashed claimer self-heals. The affected row count is the
+        whole answer.
         """
         session = self._active_session()
         table = self._resource.table
