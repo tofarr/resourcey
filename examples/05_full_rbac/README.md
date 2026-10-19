@@ -96,7 +96,23 @@ curl -H 'X-API-Key: viewer-key' localhost:8085/messages
 
 # an author reads every message but updates only its own
 curl -H 'X-API-Key: author-key' localhost:8085/messages
+
+# who am I? — the caller's own stored row, OIDC UserInfo shaped
+curl -H 'X-API-Key: viewer-key' localhost:8085/me
+# {"sub":"00000000-...-0000000000b0","kind":"service","roles":[],"scopes":[],
+#  "email":"viewer@example.com","preferred_username":"viewer"}
 ```
+
+## The `me` endpoint (who am I?)
+
+`register_me_routes` mounts `GET` / `POST /me` **after** `create_app`, reading
+the same authenticator the builder uses. The body is an
+[OIDC UserInfo](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo)
+object: `sub` is the caller's internal principal id, plus `kind` / `roles` /
+`scopes` and — via the caller's own `users` row — `email` / `preferred_username`.
+The row is read through the resource's own service, **not** the `users` policy,
+so it resolves even though the served `users` table is admin-gated. An absent or
+invalid credential is a `401`.
 
 ## Tests
 

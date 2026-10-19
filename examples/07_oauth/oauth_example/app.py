@@ -53,6 +53,7 @@ from oauth_example.models import Message, Thread
 from oauth_example.user import user_resource, user_view
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
 from resourcey.auth.auth_cookie import CookieAuthenticator
+from resourcey.auth.auth_me_routes import register_me_routes
 from resourcey.auth.auth_oauth_config import IdpConfig
 from resourcey.auth.auth_oauth_setup import RUNG_CONFIG, OAuthSetup, configure_oauth
 from resourcey.auth.auth_policy import AllowAll, Owner, ReadOnly
@@ -173,6 +174,11 @@ def build_app(
     # resource. ``http_post`` is injected in tests; production wires the default
     # httpx poster.
     setup.register_routes(app, http_post=http_post)
+    # The `me` endpoint (issue #150) exposes the authenticated principal in the
+    # OIDC UserInfo shape, reading the same composite authenticator the builder
+    # uses (cookie *or* provider bearer). The local user store enriches the body
+    # with the caller's own profile claims.
+    register_me_routes(app, authenticator=builder.authenticator, user_resource=users_inner)
     return manifest, app, setup
 
 

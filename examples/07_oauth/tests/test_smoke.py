@@ -161,3 +161,32 @@ async def test_the_served_surfaces_are_narrowed(client: AsyncClient) -> None:
     assert set(paths["/users/{id}"]) == {"get"}
     # Debug-only token resource is deliberately absent from the manifest.
     assert not any("oauth-tokens" in path for path in paths)
+
+
+async def test_me_returns_the_authenticated_principal(client: AsyncClient) -> None:
+    """`GET /me` answers "who am I?" in the OIDC UserInfo shape (issue #150).
+
+    The provider bearer token resolves to the seeded local user, so `sub` is the
+    internal id (not the provider subject) and the local row enriches the body
+    with profile claims.
+    """
+    token = make_dev_token(subject=USER_SUBJECT)
+    resp = await client.get("/me", headers=_bearer(token))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["sub"] == str(USER_ID)
+    assert body["external_id"] == USER_SUBJECT
+    assert body["kind"] == "user"
+    # The roles come off the client row (APP_OAUTH_CLIENTS_0_ROLES).
+    assert body["roles"] == ["USER"]
+    # The caller's own row supplies the profile claims.
+    assert body["email"] == "user@example.com"
+    assert body["preferred_username"] == "user"
+
+
+async def test_me_requires_a_credential(client: AsyncClient) -> None:
+    """`me` has no anonymous meaning — an absent credential is a 401 even though
+    reads of the board are public under the OPTIONAL posture, and an invalid one
+    is a 401 too."""
+    assert (await client.get("/me")).status_code == 401
+    assert (await client.get("/me", headers=_bearer("not-a-jwt"))).status_code == 401

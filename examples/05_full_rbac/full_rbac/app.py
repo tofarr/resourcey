@@ -43,8 +43,9 @@ from resourcey.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
 from resourcey.auth.auth_config import ApiKeysConfig
+from resourcey.auth.auth_me_routes import register_me_routes
 from resourcey.auth.auth_policy import AllowAll, Owner, ReadOnly
-from resourcey.auth.auth_rbac import rbac_resource_paths, rbac_resources
+from resourcey.auth.auth_rbac import User, rbac_resource_paths, rbac_resources
 from resourcey.auth.auth_rbac_resolver import RbacPolicyResolver
 from resourcey.auth.auth_rbac_store import SqlRbacStore
 from resourcey.core.manifest import Manifest
@@ -163,7 +164,14 @@ def build_app(
     resources.extend(rbac_resources(session_manager=manager))
 
     manifest = Manifest(resources=resources, managers=[manager])
-    return manifest, create_app(manifest, dependency_builder=builder)
+    app = create_app(manifest, dependency_builder=builder)
+    # The `me` endpoint (issue #150) exposes the authenticated principal in the
+    # OIDC UserInfo shape. It reads the caller's own `users` row directly (not
+    # through the `users` policy, whose surface here is admin-only), enriching
+    # the body with the stored email / username.
+    me_user_resource = SqlResource(User, session_manager=manager)
+    register_me_routes(app, authenticator=builder.authenticator, user_resource=me_user_resource)
+    return manifest, app
 
 
 manifest, app = build_app()

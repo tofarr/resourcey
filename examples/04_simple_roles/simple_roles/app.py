@@ -50,6 +50,7 @@ from resourcey.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
 from resourcey.auth.auth_config import ApiKeysConfig
+from resourcey.auth.auth_me_routes import register_me_routes
 from resourcey.auth.auth_policy import AllowAll, Owner, ReadOnly
 from resourcey.auth.auth_role import AppRole, RolePolicyResolver
 from resourcey.core.manifest import Manifest
@@ -169,7 +170,13 @@ def build_app(
         ],
         managers=[manager],
     )
-    return manifest, create_app(manifest, dependency_builder=builder)
+    app = create_app(manifest, dependency_builder=builder)
+    # The `me` endpoint (issue #150) exposes the authenticated principal in the
+    # OIDC UserInfo shape, reading the caller's own row from the same user store
+    # the authenticator validates — so a USER that cannot read the admin-only
+    # `/users` surface can still read its own `me`.
+    register_me_routes(app, authenticator=builder.authenticator, user_resource=users_inner)
+    return manifest, app
 
 
 manifest, app = build_app()

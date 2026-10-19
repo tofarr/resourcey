@@ -86,6 +86,12 @@ TOKEN=$(uv run --env-file .env python -c \
   "from oauth_example.dev_idp import make_dev_token; print(make_dev_token(subject='dev-user'))")
 curl -H "Authorization: Bearer $TOKEN" localhost:8087/threads
 
+# who am I? — the OIDC UserInfo shape (issue #150)
+curl -H "Authorization: Bearer $TOKEN" localhost:8087/me
+# {"sub":"<internal user id>","external_id":"dev-user","kind":"user",
+#  "roles":["USER"],"scopes":[],"email":"user@example.com",
+#  "preferred_username":"user"}
+
 # a USER may create a message and edit only its own
 curl -H "Authorization: Bearer $TOKEN" -X POST localhost:8087/messages \
      -H 'Content-Type: application/json' -d '{"thread_id":1,"text":"hi"}'
@@ -93,6 +99,33 @@ curl -H "Authorization: Bearer $TOKEN" -X POST localhost:8087/messages \
 
 A token for an **unmapped** subject is rejected (fail-closed), and a token whose
 local user is disabled is rejected too — the local store wins.
+
+## The `me` endpoint (who am I?)
+
+In the BFF posture the browser holds our session cookie and knows nothing about
+the internal user it maps to. `register_me_routes` mounts `GET` / `POST /me`
+**after** `create_app`, reading the **same** composite authenticator the builder
+uses — so it accepts our session cookie *or* a provider bearer token with no
+extra wiring.
+
+The body is an [OIDC UserInfo](https://openid.net/specs/openid-connect-core-1_0.html#UserInfo)
+object (OpenID Connect Core §5.3):
+
+* `sub` — **REQUIRED**, and our internal principal id (a UUID string). This is
+  the *local* user the `ExternalIdentity` map resolves to — the same value the
+  session cookie's `sub` claim carries — **not** the provider's opaque subject.
+* `external_id` — the provider subject (`auth0|abc`, a numeric Google id, …),
+  carried alongside; present only for an external-IdP caller.
+* `kind` / `roles` / `scopes` — the framework's extension over the OIDC claim
+  set, straight off the `Principal`.
+* profile claims (`email`, `preferred_username`, …) — added from the caller's
+  **own** `users` row. An unavailable claim is **omitted**, never `null`.
+
+`me` reads that row through the resource's own service, **not** the `users`
+policy, so it resolves even though the served `users` surface is admin-gated —
+and it can only ever return the id the credential already proved. An absent or
+invalid credential is a `401`: `me` uses the strict dependency, so it has no
+anonymous meaning even though reads here run under the `OPTIONAL` posture.
 
 ## Run it
 

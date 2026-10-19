@@ -366,6 +366,7 @@ def test_the_auth_files_exist_without_an_init():
         "auth_authorized_service.py",
         "auth_config.py",
         "auth_cookie.py",
+        "auth_me_routes.py",
         "auth_oauth.py",
         "auth_oauth_client.py",
         "auth_oauth_config.py",

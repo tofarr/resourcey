@@ -99,3 +99,17 @@ async def test_seeded_admin_resolves_and_reads(client: AsyncClient) -> None:
     resp = await client.get("/threads", headers={"X-API-Key": "admin-key"})
     assert resp.status_code == 200
     assert resp.json()["items"] == []
+
+
+async def test_me_reads_the_callers_own_stored_row(client: AsyncClient) -> None:
+    """`me` (issue #150) reads the caller's own `users` row directly, enriched
+    with the stored email / username, independent of the `users` policy."""
+    body = (await client.get("/me", headers={"X-API-Key": "viewer-key"})).json()
+    assert body["sub"] == str(VIEWER_USER)
+    assert body["email"] == "viewer@example.com"
+    assert body["preferred_username"] == "viewer"
+
+
+async def test_me_requires_a_credential(client: AsyncClient) -> None:
+    assert (await client.get("/me")).status_code == 401
+    assert (await client.get("/me", headers={"X-API-Key": "nope"})).status_code == 401
