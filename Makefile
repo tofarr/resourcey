@@ -46,6 +46,8 @@ specs:
 	quint test specs/sorting.qnt --main=sorting --match "^(law1_totalOrder|law2_keysetAgreement|law3_descendingIsTheMirror|law4_cursorSortBinding)$$"
 	quint typecheck specs/cache_defaults.qnt
 	quint test specs/cache_defaults.qnt --main=cache_defaults --match "^(readOnlyIsOptimistic|writeActionForcesValidator|writableWithUpdatedAtGetsLastModified|writableWithoutUpdatedAtGetsEtag|readOnlyDefaultHasPositiveWindow|readOnlyWindowIsPrivate|selectionIsTotal|invariantsHold)$$"
+	quint typecheck specs/cache_freshness.qnt
+	quint test specs/cache_freshness.qnt --main=cache_freshness --match "^(emptyCacheAlwaysReads|optimisticFreshDoesNotRead|optimisticStaleReads|optimisticIsPureTimeCheck|validatorStrategiesAlwaysRead|decisionIsMonotonic|selectionIsTotal|invariantsHold)$$"
 	quint typecheck specs/rbac.qnt
 	quint test specs/rbac.qnt --main=rbac --match "^(allowAllMatchesEveryRow|denyAllMatchesNothing|readOnlyMatchesReadLike|creatorScopesToOwnedRows|groupMemberMatchesOwnGroups|aclMatchesItsIds|resolutionWalksGroupsToRolesToPermissions|resourceScopingFiltersOtherResources|scopedQueryIsComplete|unknownUserIsFailClosed|emptyPermissionSetIsFailClosed|multipleRolesUnionTheirGrants|denyDoesNotOverrideAGrant|aclsUnionToOneSet|setLeafMatchesTheJoin|thresholdBoundsMembershipChange|callerScopingIsDerivedFromPolicies|invariantsHold)$$"
 	quint typecheck specs/filestore.qnt

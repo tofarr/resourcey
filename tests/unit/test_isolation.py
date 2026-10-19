@@ -437,7 +437,10 @@ def test_the_cache_files_exist_without_an_init():
     assert names == {
         "cache_defaults.py",
         "cache_header.py",
+        "cache_store.py",
         "cache_strategy.py",
+        "cached_resource.py",
+        "cached_service.py",
     }
     assert not (cache / "__init__.py").exists()
 
