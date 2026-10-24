@@ -1,45 +1,78 @@
 ---
 name: testing
-description: Hermetic test conventions — in-memory SQLite, savepoint transaction isolation, coverage requirements, and how to run tests efficiently. Load before writing or modifying tests, or running the suite.
-version: "1.0.0"
+description: Hermetic test conventions — in-memory SQLite, savepoint isolation, fixtures, coverage gate, and how to run the suite efficiently. Load before writing or modifying tests, or running the suite.
+version: "2.0.0"
 ---
 
 # Testing
 
-* Unit tests use an **in-memory SQLite** database (aiosqlite) by default for
-  speed and hermeticity. Integration tests against PostgreSQL may be added
-  later under `tests/integration/` — keep them separate from the unit suite.
+## Conventions
+
+* Unit tests use **in-memory SQLite** (aiosqlite) — fast and hermetic.
+  Integration tests against PostgreSQL, if added, go under `tests/integration/`
+  and stay separate from the unit suite.
 * Tests must be hermetic and parallelizable. Per-test isolation uses
   **savepoint transactions**: the `engine` fixture begins an outer transaction
-  on a fresh connection, and all DB access goes through the same connection.
-  `session.commit()` only releases a savepoint — data is visible within the
-  test but rolled back after it.
-* Test public behavior, not implementation details. Avoid mocks where a real
-  dependency (DB, httpx transport) can be used in-process.
+  on a fresh connection and all DB access goes through that connection, so
+  `session.commit()` only releases a savepoint — data is visible within the test
+  and rolled back after it.
+* Test public behavior, not implementation details. Do not use mocks unless
+  strictly necessary: a real in-process dependency (SQLite, `mongomock`, an
+  `httpx` `ASGITransport`) is almost always available and gives a real code
+  path.
 * Every public service function needs at least one happy-path and one
   error-path test.
-* Coverage >= 90% is enforced via `make test` (the `--cov-fail-under=90`
-  gate). Do not lower the gate; add tests instead.
+* Coverage ≥ 90% is enforced (`--cov-fail-under=90`). Do not lower the gate;
+  add tests instead.
 
-## Running tests — output discipline
+## Layout
 
-A full suite run can be verbose. For agent contexts, redirect output to a file
-and read only the result:
+`tests/unit/` mirrors the framework: one file per module or feature area
+(`test_isolation.py` pins the layer ranks and the `core` file set; the rest
+cover services, backends, auth, cache, filestore, jobs, tasks, triggers,
+realtime, config). Example apps have their own `tests/` and run under their own
+`.venv`.
 
+## Running
+
+```bash
+make test-fast                      # parallel, no coverage — for iteration
+make test                           # full suite + coverage gate (-n 0)
+uv run pytest tests/unit -k create  # keyword filter
+uv run pytest tests/unit/test_sql_service.py -x -q
 ```
-uv run python -m pytest tests/unit/ > /tmp/test.log 2>&1
-echo "exit $?"
-tail -3 /tmp/test.log
+
+`make test` disables xdist (`-n 0`) so coverage attribution is deterministic —
+that is why it is the gate and `test-fast` is not.
+
+In an agent context a full run is verbose; redirect and read the tail:
+
+```bash
+uv run pytest tests/unit > /tmp/test.log 2>&1; echo "exit $?"; tail -5 /tmp/test.log
 ```
 
-### Iteration: scope to what changed
+Run the full gate **once**, at the end, before opening the PR — not on every
+edit.
 
-A full suite run is expensive. For fast feedback during iteration, scope to
-the touched files:
+## Testing a resource over HTTP
 
-* `make test-fast ARGS=tests/unit/test_resource_service.py` — parallelized,
-  no coverage gate.
-* `uv run pytest tests/unit -k create` — keyword-filter within a path.
+The pattern most tests use: build a `Manifest`, `create_app` it, and drive it
+with an `httpx.AsyncClient` over `ASGITransport`:
 
-Run the full suite (and the 90% coverage gate via `make test`) **once**, at
-the end, before opening the PR — not on every edit.
+```python
+async with (
+    manifest,
+    httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client,
+):
+    ...
+```
+
+Entering the manifest is what starts managers (engines, stores, channels), so
+tests exercise the real lifecycle rather than a stubbed one.
+
+## Testing cache behaviour
+
+Assert on the emitted headers (`ETag`, `Cache-Control`, `Expires`) and on a
+conditional request returning `304`. For a caller-scoped resource, assert
+`Cache-Control` starts with `private` — that is the authorization guarantee, not
+a nicety.

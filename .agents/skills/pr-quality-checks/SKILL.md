@@ -1,43 +1,60 @@
 ---
 name: pr-quality-checks
-description: Required lint, type, coverage, and spec checks to run before opening or updating a pull request. Call this skill before creating or pushing a PR branch.
-version: "1.0.0"
+description: The lint, type, coverage, and spec gates to run before opening or updating a pull request. Call this before creating or pushing a PR branch.
+version: "2.0.0"
 ---
 
-# Code quality gates (enforced in CI)
+# Quality gates
 
-* `ruff check .` and `ruff format --check .` clean.
-* `mypy --strict` clean (no `Any` without explicit `# type: ignore` + reason).
-* Unit coverage >= 90%. New code without tests blocks merge.
-* Quint specs compile and pass.
+## The gates (mirrored by `.github/workflows/ci.yml`)
 
-If a change can't meet a gate, flag it explicitly rather than silently bypassing it.
+```bash
+make lint      # ruff check . && ruff format --check .
+make type      # mypy src/resourcey
+make test      # pytest tests/unit --cov=resourcey --cov-fail-under=90 -n 0
+make specs     # quint typecheck + quint test over the spec set
+```
 
-## Pre-PR verification — run locally before opening a PR
+`make lint` and `make type` do not take `uv run` — the targets already wrap it.
+`mypy` is configured strict for `src/resourcey`; examples are excluded from the
+root config and linted as standalone projects.
 
-Do not push a branch and rely on CI to catch failures. Run these locally and
-ensure they are green *before* opening (or updating) a pull request:
+Run all four **locally before pushing**. Do not open a PR and fix CI reactively.
+If an environment genuinely cannot run a step, say so in the PR description
+rather than skipping it silently.
 
-1. **lint-type-coverage** (mirrors CI):
-   ```
-   uv run ruff check .
-   uv run ruff format --check .
-   uv run mypy
-   make test
-   ```
-   `make test` runs the full suite with coverage and the 90% gate (xdist
-   disabled for deterministic coverage attribution). For fast iteration
-   *before* this gate, use `make test-fast` (coverage-free, parallelized).
+## Iteration vs. the gate
 
-2. **specs** (only when behavior changed, per the `quint-specs` skill):
-   ```
-   scripts/install_quint_evaluator.sh   # pre-seed the Rust evaluator; see quint-specs
-   quint typecheck specs/*.qnt
-   quint test specs/<spec>.qnt --main=<spec>
-   ```
-   (`make specs` runs the same set.) The pre-seed avoids the CLI's
-   unauthenticated, rate-limited GitHub API download of its evaluator binary.
+* `make test-fast` — parallel (`-n auto`), **no** coverage gate. Use it while
+  iterating.
+* `make test` — `-n 0` so coverage attribution is deterministic. This is the
+  gate; run it once at the end.
 
-If any step fails, fix it before opening the PR — do not open the PR and
-address CI failures reactively. If the environment cannot run a step, say so
-explicitly in the PR description rather than skipping it silently.
+## Specs
+
+Run `make specs` when behaviour with a spec changed (see the `quint-specs`
+skill). The target pre-seeds the Quint evaluator via
+`scripts/install_quint_evaluator.sh`, which fetches from GitHub's direct
+release-download URL instead of the rate-limited API.
+
+## Examples
+
+The ten example apps are separate `uv` projects. A change to a shared framework
+module can break one without breaking the root suite. When your change touches
+anything an example uses (resources, routes, config, auth, filestore, triggers,
+realtime, jobs), run that example's suite:
+
+```bash
+cd examples/06_filestore && uv run pytest
+```
+
+CI runs each example's `uv run pytest` as its own job, so a broken example is a
+red PR.
+
+## Definition of done
+
+* All four gates green.
+* New public behaviour has tests (happy path + error path).
+* A behaviour change with a spec has the spec updated.
+* No `openhands` import added to `util`.
+* No `__all__` added.
