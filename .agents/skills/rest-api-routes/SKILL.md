@@ -1,92 +1,139 @@
 ---
 name: rest-api-routes
-description: REST API conventions — resource actions, naming, verbs, batch endpoints, and error shapes. Load when designing or modifying REST routes.
-version: "1.0.0"
+description: REST wire conventions — action-to-route mapping, path naming, cursor paging, the filter/sort query surface, batch bodies, and error codes. Load when designing or changing what a client sees.
+version: "2.0.0"
 ---
 
-# REST API routes
+# REST wire conventions
 
-Every generated resource service exposes the **standard actions** over REST:
+The implementation lives in the `transport` skill; this is the contract a client
+sees.
 
-| Action | Method | Path | Body | Returns |
+## Actions
+
+| Action | Method | Path | Body | Status |
 |---|---|---|---|---|
-| `create` | POST | `/{resource}` | create payload | created entity |
-| `read` | GET | `/{resource}/{id}` | — | entity |
-| `update` | PATCH | `/{resource}/{id}` | partial payload | updated entity |
-| `delete` | DELETE | `/{resource}/{id}` | — | 204 |
-| `search` | GET | `/{resource}` | query params | page of entities |
-| `count` | GET | `/{resource}/count` | filter query params (same as `search`) | bare integer |
-| `batch_read` | GET | `/{resource}/batch-read` | repeated `id` query params (`?id=foo&id=bar`) | list of entities |
-| `batch_edit` | POST | `/{resource}/batch-edit` | list of edits | list of entities |
+| `create` | POST | `/{resource}` | `create_request` | 201 + `create_response` |
+| `read` | GET | `/{resource}/{id}` | — | 200 + `read_response` |
+| `update` | PATCH | `/{resource}/{id}` | `update_request` (partial) | 200 + `update_response` |
+| `delete` | DELETE | `/{resource}/{id}` | — | 204, no body |
+| `search` | GET | `/{resource}` | query params | 200 + page |
+| `count` | GET | `/{resource}/count` | filter query params | 200 + bare integer |
+| `batch_read` | GET | `/{resource}/batch-read` | repeated `?id=` | 200 + list |
+| `batch_edit` | POST | `/{resource}/batch-edit` | edit union | 200 + list |
 
-## Conventions
+A route exists **only** for a declared action. A write against a read-only
+resource is a `405`, not a handler that raises.
 
-* All URL paths use **dashes**, never underscores. The `{resource}` segment
-  is plural, lower-case, kebab-case (from `get_resource_path()`); action
-  sub-paths are dash-separated too (`batch-read`, `batch-edit`, `count`).
-  Python method names stay snake_case (`batch_read`, `batch_edit`) — only
-  the URL is dash-separated.
-* `batch_read` is a `GET` (a pure read with no side-effects), so its ids are
-  passed as repeated `id` query parameters (`?id=1&id=2&id=3`) rather than a
-  request body.
-* `search` uses **cursor-based (keyset) pagination** with query parameters
-  for filtering, sorting, and paging:
-  `?limit=20&cursor=<opaque>&sort=size&desc=true&field__eq=value`.
-  - `cursor` is an opaque, encrypted keyset cursor from a previous page's
-    `next_cursor`; omitted/empty on the first request. It encodes the sort
-    key (and id, for stable tie-breaking) of the last row on the previous
-    page **plus the `(sort_field, ascending)` it was built for**, encrypted
-    via the `EncryptionService` (JWE `dir` + `A256GCM`) so it is tamper-proof.
-    The sort field/direction are validated on decode: a cursor reused under a
-    different `sort` / `desc` (or no sort) returns `400 invalid_input` rather
-    than silently applying the key against the wrong column. A malformed or
-    tampered cursor also returns `400 invalid_input`.
-  - `limit` is capped (default 20, max 100). There is no `offset`.
-  - The response `Page` carries `items`, `limit`, and `next_cursor`
-    (`None` when the page is the last). There is no `total` on the page —
-    counting is a separate `count` action.
-  - Filter operators follow the `field__op=value` convention (`eq`, `ne`,
-    `lt`, `lte`, `gt`, `gte`, `contains`, `in`).
-* `count` returns the matching row count for a filter as a bare integer
-  (e.g. `42`), decoupled from paging and sort. It accepts the **same filter
-  query params** as `search` but no `sort` / `limit` / `cursor` (ordering and
-  paging are meaningless for a count). Permission reuses `search` — counting
-  is not a separate privilege from listing.
-* `update` is a partial merge (PATCH semantics), never a full replace.
-* `batch_edit` and `batch_read` accept an array and return an array
-  positionally aligned with the input: each position `i` carries a result for
-  the `i`-th input, or `null` when there is nothing to return (an absent id, or
-  a delete). The response length always equals the input length.
-* `batch_edit`'s body is a **`kind`-discriminated union** so one batch can mix
-  operations: `{"kind": "Create", "item": <create body>}`,
-  `{"kind": "Update", "item": {<id>, ...partial body}}`, and
-  `{"kind": "Delete", "<id>": <id>}`. A `Create` / `Update` yields the entity
-  (projected onto the create / update response respectively); a `Delete` yields
-  `null` (nothing to return), as does an `Update` / `Delete` for an absent id.
-  The union is **narrowed to the actions the resource declares**: a resource
-  that does not expose `create` / `delete` admits only the `Update` kind (the
-  declaration is the single source of truth, so a batch cannot reach an action
-  the resource never exposed).
-* All actions are permission-checked before execution (see `auth-rbac` skill).
+## Path naming
 
-## Error shapes
+* `{resource}` is plural, lower-case, kebab-case, from
+  `get_resource_path()` (default: `pluralize(camel_to_kebab(DTO name))`).
+* Action sub-paths are dash-separated (`batch-read`, `batch-edit`, `count`).
+  Python method names stay snake_case (`batch_read`) — only the URL uses dashes.
+* `{id}` is the DTO's identifier (`id` unless `id_field_name` says otherwise).
 
-Errors use a consistent envelope:
+## Search
 
-```json
-{"error": {"code": "not_found", "message": "Resource ... not found"}}
+```
+GET /{resource}?limit=20&cursor=<opaque>&sort=size&desc=true&size__gt=10&name__contains=foo
 ```
 
-* `400` — validation error (`invalid_input`)
-* `401` — unauthenticated (`unauthenticated`)
-* `403` — permission denied (`forbidden`)
-* `404` — resource not found (`not_found`)
-* `409` — conflict / uniqueness violation (`conflict`)
-* `422` — pydantic validation failure (FastAPI default)
-* `500` — unexpected server error (`internal_error`)
+* **Cursor (keyset) pagination, no `offset`.** `cursor` is an opaque, encrypted
+  keyset cursor from the previous page's `next_cursor`; omitted on the first
+  request. It encodes the sort key and identifier of the last row on the
+  previous page **plus the `(sort_field, ascending)` it was built for**,
+  encrypted (JWE) so it is tamper-proof.
+* A cursor reused under a different `sort` / `desc` (or no sort) is
+  `400 invalid_input` rather than silently applying the key against the wrong
+  column. A malformed or tampered cursor is also 400.
+* `limit` defaults to `20` (`DEFAULT_LIMIT`).
+* `sort` names a **sortable** field (derived from the read model); `desc=true`
+  flips it. With no `sort`, the identifier order is used and `desc` is ignored.
+* An unknown or non-sortable `sort` is `400`.
+* The page body is `{"items": [...], "limit": 20, "next_cursor": "..." | null}`.
+  There is **no `total`** — counting is the separate `count` action.
 
-## Escape hatches
+### Filter operators
 
-A generated service can be overridden: define a route at the same path and the
-framework yields to it. You can also call the repository or session directly
-from a custom route when the standard actions are insufficient.
+`?<attribute>__<op>=<value>`. The set available on a field is derived from its
+type:
+
+| Base type | Operators |
+|---|---|
+| `bool` | `eq`, `in` |
+| `int` / `float` / `Decimal` / `datetime` / `date` / `time` | `eq`, `in`, `gt`, `ge`, `lt`, `le` |
+| `str` / `UUID` | the above plus `contains` |
+| `dict` / `list` / `set` / Pydantic model | none (not scalarly comparable) |
+
+Multiple filter params are AND-ed. `in` takes a comma-separated list (capped at
+500 values). A field is filterable exactly when the read model exposes it, so a
+projected-away field is not filterable — and an unknown `field__op` key is
+`400 invalid_input`, never silently ignored.
+
+There is no `ne` operator; express inequality as the complement you actually
+need, or filter client-side.
+
+## Count
+
+Returns the matching row count as a bare integer, decoupled from paging and
+sort. It accepts the **same filter params** as `search` but no
+`sort` / `limit` / `cursor` (meaningless for a count). It reuses the `search`
+permission — counting is not a separate privilege from listing.
+
+## Batch endpoints
+
+Both return a list **positionally aligned** with the input: position `i` carries
+the result for input `i`, or `null` when there is nothing to return. The
+response length always equals the input length.
+
+* `batch_read` is a `GET` (a pure read), so ids are repeated query params:
+  `?id=a&id=b`. A miss is `null`.
+* `batch_edit`'s body is a **`kind`-discriminated union**, so one batch can mix
+  operations:
+
+```json
+[
+  {"kind": "Create", "item": {"label": "a"}},
+  {"kind": "Update", "item": {"id": 1, "label": "b"}, "condition": {"kind": "AttrFilter", ...}},
+  {"kind": "Delete", "id": 2}
+]
+```
+
+A `Create` yields the entity projected onto the create response (so a
+one-time-reveal field survives); an `Update` onto the update response; a
+`Delete`, an absent id, or a failed `condition` yields `null`. The union is
+narrowed to the actions the resource declares, so a batch cannot reach an action
+the resource never exposed.
+
+## Errors
+
+```json
+{"error": {"code": "not_found", "message": "..."}}
+```
+
+| Status | `code` |
+|---|---|
+| 400 | `invalid_input` |
+| 401 | *(FastAPI default: `{"detail": ...}` + `WWW-Authenticate`)* |
+| 403 | `forbidden` |
+| 404 | `not_found` |
+| 409 | `conflict` |
+| 422 | *(FastAPI default: pydantic request validation)* |
+| 500 | `internal_error` |
+| 501 | `unsupported_filter` |
+
+401 and 422 are FastAPI's own shapes — assert on the status (and the
+`WWW-Authenticate` header for 401), not on `error.code`.
+
+## Semantics worth remembering
+
+* `update` is a partial merge (PATCH), never a full replace. An omitted field
+  with no update default is left unchanged.
+* A row outside the caller's policy scope is a `404` on read / update / delete
+  (existence is not leaked) and simply absent from search results.
+* A denied `create` is a `403`; a denied `search` / `count` is an empty page /
+  `0`, never an error.
+* `ETag` / `Last-Modified` / `Cache-Control` are emitted when the resource's
+  cache strategy provides them; a conditional `GET` / `HEAD` short-circuits to
+  `304`.

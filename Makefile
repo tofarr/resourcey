@@ -62,6 +62,7 @@ specs:
 	quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$$"
 	quint typecheck specs/me.qnt
 	quint test specs/me.qnt --main=me --match "^(absentIsUnauthenticatedTest|invalidIsUnauthenticatedTest|authenticatedGetsOkTest|subIsAlwaysPresentTest|profileClaimOmissionTest|selfOnlyTest|notGatedByUsersGrantTest|invariantsHold)$$"
+	quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
 
 clean:
 	rm -rf .mypy_cache .ruff_cache .pytest_cache .coverage htmlcov coverage.xml

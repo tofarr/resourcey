@@ -26,63 +26,11 @@ jobs:
         with:
           node-version: "20"
       - run: npm install -g @informalsystems/quint
-      - name: Install the Quint Rust evaluator
-        # `quint test` / `quint run` download this binary via the unauthenticated
-        # GitHub releases API, which rate-limits shared runner IPs. Fetch it from
-        # the direct release URL instead and pre-seed the CLI's cache.
-        run: scripts/install_quint_evaluator.sh
-      - name: Typecheck all specs
-        run: |
-          for f in specs/*.qnt; do
-            echo "::group::typecheck $f"
-            quint typecheck "$f"
-            echo "::endgroup::"
-          done
-      - name: Run Quint tests
-        run: quint test specs/resource_actions.qnt --main=resource_actions --match "^(createThenRead|createUpdateDelete|batchReadAndEdit|searchEmptyFilterMatchesAll|searchEqualityPredicate|searchInPredicate|searchEmptyInMatchesNothing|searchAndCombinesPredicates|searchNoFilterDeclaredRejectsNonEmptyFilter|readOnlyResourceExposesReadSubset|writableResourceExposesAllActions|readOnlyResourceServesReads|defensiveReadIsolated|nonDefensiveServesStore)$"
-      - name: Run conditional-write spec tests
-        run: quint test specs/conditional_write.qnt --main=conditional_write --match "^(updateWithHoldingConditionApplies|updateWithFailingConditionIsAbsentAndUnchanged|conditionMissMatchesAbsentTarget|deleteWithHoldingConditionRemoves|deleteWithFailingConditionIsFalseAndUnchanged|policyScopeGatesTheWrite|policyScopeNarrowsNeverWidens|neverConditionIsAlwaysAbsent|batchEditAlignsConditionalResults)$"
-      - name: Run permissions spec tests
-        run: quint test specs/permissions.qnt --main=permissions --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|enforcementMatrix|enforcementAllowsEverything|allowAllGrantsAccess|denyAllBlocksAccess|emptyPoliciesDenies|readOnlyGrantsReadNotCreate|denyDoesNotOverrideGrant|unionCombinesGrants|invariantsHold)$"
-      - name: Run roles spec tests
-        run: quint test specs/roles.qnt --main=roles --match "^(allowAllIsAllForEveryAction|denyAllIsNoneForEveryAction|readOnlyGrantsReadLikeAndDeniesTheRest|normalizeActionReducesDerivedMembers|ownerPolicyScoping|unknownRoleGrantsNothing|unroledCallerUsesTheClosedDefault|perResourceScoping|readsAllOfXOwnRowsOfY|multipleRolesUnionTheirGrants|denyRoleDoesNotOverrideAGrant|invariantsHold)$"
-      - name: Run exposure spec tests
-        run: quint test specs/exposure.qnt --main=exposure --match "^(selfIsTheDefault|hiddenRegistersNoRoutesTest|wrapperHidesAnExposedResource|wrapperNarrowsTheQuerySurface|delegatedWrapperWouldLeak|builderDoesNotChangeExposure|narrowingIsAllowedWideningIsRejected|batchEditAdmitsOnlyDeclaredActions|batchActionsRequireTheirSingularTest|defaultBuilderIsIdentityTest|wrappedBuilderPreservesTheActionContractTest|invariantsHold)$"
-      - name: Run DTO-defaults spec tests
-        run: quint test specs/dto_defaults.qnt --main=dto_defaults --match "^(bareUuidIdIsGenerated|customIdentifierStaysClientSupplied|explicitIntentIsHonouredVerbatim|columnDefaultWins|timestampsAreFrameworkOwnedTest|contradictoryDefaultsAreRejected|invariantsHold)$"
-      - name: Run API-key spec tests
-        run: quint test specs/api_key.qnt --main=api_key --match "^(keyIsAbsentFromTheWriteModels|keyIsAbsentFromTheReadModel|onlyCreateDisclosesTheKey|querySurfaceExcludesTheKey|storedValueIsOnlyTheDigest|createRevealsTheStoredKey|presentedKeyAuthenticatesByDigest|updateCannotRotateTheKey|invariantsHold)$"
-      - name: Run auth spec tests
-        run: quint test specs/auth.qnt --main=auth --match "^(emptyStoreDeniesEverything|absentAndInvalidAreIndistinguishable|aValidKeyGrantsAccess|theCheckRunsBeforeTargetStorage|theKeyServiceOwnsItsOwnContext|invariantsHold)$"
-      - name: Run secret-serialization spec tests
-        run: quint test specs/secret_serialization.qnt --main=secret_serialization --match "^(defaultRedacts|exposeRevealsThePlaintext|encryptionTakesPrecedence|outputDependsOnlyOnTheContext|encryptionRoundTrips|invariantsHold)$"
-      - name: Run principal-store spec tests
-        run: quint test specs/principal_store.qnt --main=principal_store --match "^(unmatchedKeyIsInvalid|absentIsNotInvalidTest|enabledStoredPrincipalAuthenticates|disabledPrincipalIsRejected|missingPrincipalIsRejected|noStoreTrustsTheCredentialTest|invariantsHold)$"
-      - name: Run filtering spec tests
-        run: quint test specs/filtering.qnt --main=filtering --match "^(law1_normalisationPreserves|law2_nullSafeNegation|law3_nullSafeNegationGeneralises|law4_positivePushdownIsSound|law5_inFilterAgreesWithEqAndOr)$"
-      - name: Run sorting spec tests
-        run: quint test specs/sorting.qnt --main=sorting --match "^(law1_totalOrder|law2_keysetAgreement|law3_descendingIsTheMirror|law4_cursorSortBinding)$"
-      - name: Run cache-defaults spec tests
-        run: quint test specs/cache_defaults.qnt --main=cache_defaults --match "^(readOnlyIsOptimistic|writeActionForcesValidator|writableWithUpdatedAtGetsLastModified|writableWithoutUpdatedAtGetsEtag|readOnlyDefaultHasPositiveWindow|readOnlyWindowIsPrivate|selectionIsTotal|invariantsHold)$"
-      - name: Run rbac spec tests
-        run: quint test specs/rbac.qnt --main=rbac --match "^(allowAllMatchesEveryRow|denyAllMatchesNothing|readOnlyMatchesReadLike|creatorScopesToOwnedRows|groupMemberMatchesOwnGroups|aclMatchesItsIds|resolutionWalksGroupsToRolesToPermissions|resourceScopingFiltersOtherResources|scopedQueryIsComplete|unknownUserIsFailClosed|emptyPermissionSetIsFailClosed|multipleRolesUnionTheirGrants|denyDoesNotOverrideAGrant|aclsUnionToOneSet|setLeafMatchesTheJoin|thresholdBoundsMembershipChange|callerScopingIsDerivedFromPolicies|invariantsHold)$"
-      - name: Run filestore spec tests
-        run: quint test specs/filestore.qnt --main=filestore --match "^(handshakeReachesReady|completeRequiresAnObject|completeVerifiesSize|completeIsIdempotentOnce|downloadRequiresReady|uploadRequiresARow|keysAreUnique|capabilityIsBound|deleteRemovesTheObject|invariantsHold)$"
-      - name: Run background-task spec tests
-        run: quint test specs/background_tasks.qnt --main=background_tasks --match "^(matchesIsFieldConjunction|domDowOrRule|matchIsUnrestrictedWhenNeitherDayFieldIsSet|scheduleNoneNeverTicks|onlyEnabledTasksTick|selectionIsPerTask|aRaisingTaskDoesNotStopTheLoop|invariantsHold)$"
-      - name: Run oauth spec tests
-        run: quint test specs/oauth.qnt --main=oauth --match "^(failClosedOnNoClientTest|aValidTokenAuthenticates|issuerAndAudienceAreChecked|expiryIsChecked|algorithmIsPinnedNoConfusion|identityIsFailClosed|localUserStoreIsAuthoritativeTest|absentIsNotInvalidTest|refreshSerializesAcrossCallers|invariantsHold)$"
-      - name: Run triggers spec tests
-        run: quint test specs/triggers.qnt --main=triggers --match "^(editsOnlyFire|successOnly|alignmentTest|perOperationNotPerItemTest|perTriggerIsolationTest|backgroundNeverBlocksTest|exitSettlesEveryRunTest|invariantsHold)$"
-      - name: Run jobs spec tests
-        run: quint test specs/jobs.qnt --main=jobs --match "^(claimSingleWinner|claimNeedsRunnable|terminalSticky|completionOnlyIfOwner|attemptCap|staleRecoverable|scheduleAndRunnerGates)$"
-      - name: Run realtime spec tests
-        run: quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$"
-      - name: Run me spec tests
-        run: quint test specs/me.qnt --main=me --match "^(absentIsUnauthenticatedTest|invalidIsUnauthenticatedTest|authenticatedGetsOkTest|subIsAlwaysPresentTest|profileClaimOmissionTest|selfOnlyTest|notGatedByUsersGrantTest|invariantsHold)$"
-      - name: Check invariants
-        run: |
-          quint run specs/resource_actions.qnt --main=resource_actions --invariant=keysAreBelowCounter --max-steps=100
+      # The spec set, the per-spec run names, and the evaluator pre-seed all
+      # live in the Makefile's `specs` target only, so CI and a local
+      # `make specs` cannot drift apart.
+      - name: Typecheck and run all specs
+        run: make specs
 
   examples-e2e:
     runs-on: ubuntu-latest

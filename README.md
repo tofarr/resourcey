@@ -15,9 +15,9 @@ and nothing breaks.
 
 The guiding principles:
 
-* **Resource-oriented.** A resource is the central unit. Define it once with
-  rich metadata; derive Pydantic schemas, SQLAlchemy models, a REST service,
-  migrations, and permission checks from that single declaration.
+* **Resource-oriented.** A resource is the central unit. Define it once — for
+  SQL, by declaring your SQLAlchemy model — and derive the DTO, the REST
+  models, the service, and the permission checks from that single declaration.
 * **Progressive enhancement.** Each layer is opt-in. Use the generated
   service, or write your own route that calls the repository directly, or
   query SQLAlchemy yourself. The layers compose; they don't trap you.
@@ -28,11 +28,16 @@ The guiding principles:
 
 Declaring a resource produces:
 
-* **Pydantic models** for request/response validation, derived from the
-  resource's field metadata.
-* **SQLAlchemy models** for persistence, derived from the same metadata.
-* **A service** exposing the standard actions over REST:
+* **A REST service** exposing the standard actions:
   `create`, `read`, `update`, `delete`, `search`, `count`, `batch_read`, `batch_edit`.
+* **Pydantic models** for request/response validation, projected from the
+  resource's DTO declaration — create / update / read / search shapes, never
+  hand-written.
+* **Persistence**, from whichever backend you declared it against. For SQL the
+  workflow is **model-first**: your SQLAlchemy model is the schema of record and
+  the DTO is inferred from it, so the mapping you already write stays
+  authoritative (and Alembic autogenerates from that same metadata). The Mongo
+  and list backends are DTO-first, since they have no schema of record.
 * **Search filtering** — `search` and `count` accept `<field>__<op>` query
   params (`?title__contains=ali&id__gt=5`). A field is filterable exactly when
   the read model exposes it, so a hidden field is rejected `400`; a resource can
@@ -40,9 +45,10 @@ Declaring a resource produces:
   storage-agnostic tree and are pushed into the SQL `WHERE` clause; an
   unconvertible filter fails loudly unless the resource opts into an in-memory
   fallback.
-* **Migrations** — Alembic autogeneration from the current models (driven
-  directly against the SQLAlchemy metadata), so you can derive schema changes
-  from your resource declarations.
+* **Sorting and cursor paging** — `?sort=<field>&desc=true` over any sortable
+  (i.e. readable) field, with opaque keyset cursors instead of `offset`.
+* **Caching** — an `ETag` / `Last-Modified` strategy chosen from the resource's
+  shape, marked `private` whenever a response is caller-scoped.
 * **Authorization** — pluggable `Policy` rules reduce a principal to a
   per-action filter: API-key / cookie authentication, per-app roles, and a
   stored users / groups / roles RBAC store.
@@ -54,9 +60,12 @@ paging, sort, filters, and cache headers are identical across all three.
 
 | Backend | Base class | Storage |
 |---|---|---|
-| SQL | `resourcey.sql.SqlResource` | SQLAlchemy 2 (async) table |
-| Mongo | `resourcey.mongo.MongoResource` | an async `motor` collection |
-| List | `resourcey.list.ListResource` | an in-process list of Pydantic objects |
+| SQL | `resourcey.sql.sql_resource.SqlResource` | SQLAlchemy 2 (async) table |
+| Mongo | `resourcey.mongo.mongo_resource.MongoResource` | an async `motor` collection |
+| List | `resourcey.list.list_resource.ListResource` | an in-process list of Pydantic objects |
+
+(There are no `__init__.py` re-exports, so import from the module that defines
+the class — `from resourcey.sql.sql_resource import SqlResource`.)
 
 A **list-backed** resource is read-only: it narrows its actions to
 `read` / `search` / `count` / `batch_read` and serves data already modelled as
@@ -68,6 +77,8 @@ no columns. The list *is* the storage, so there is no table and no migration.
 
 ```python
 from pydantic import BaseModel
+
+from resourcey.core.manifest import Manifest
 from resourcey.list.list_resource import ListResource
 
 
@@ -86,6 +97,10 @@ resource = ListResource(countries, path="countries")
 manifest = Manifest(resources=(resource,))
 ```
 
+That manifest serves `GET /countries` (search), `GET /countries/count`,
+`GET /countries/batch-read`, and `GET /countries/{id}` — and nothing else: a
+write route is never mounted, so a `POST` is a `405`.
+
 `defensive=True` is the default: every object the resource outputs is a deep
 copy of the stored object, so a caller cannot mutate the served collection
 through a result. Pass `defensive=False` to serve the stored objects directly.
@@ -93,34 +108,56 @@ through a result. Pass `defensive=False` to serve the stored objects directly.
 ## The `core` package — DTO, Resource, Service, Manifest
 
 `src/resourcey/core/` is a deliberately minimal package that states the
-architecture in terms of three constructs plus a manifest. It is the foundation
-every backend and transport layer is built on.
+architecture in terms of a **DTO**, a **Resource**, a **Service**, and a
+**Manifest**. It is the foundation every backend and transport layer is built
+on.
 
 The split separates **the DTO** (the data object you work with internally) from
 **the six REST models** (the wire shapes), which the older code entangled, and
 does away with six hand-written models per resource — those are now *derived*.
 
+Here is a whole manifest against the SQL backend — the ORM models are the only
+declarations:
+
 ```python
-from resourcey.core.dto import DTO
+from sqlalchemy import ForeignKey
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
 from resourcey.core.manifest import Manifest
-from resourcey.core.resource import SqlResource
+from resourcey.sql.sql_resource import SqlResource
 
 
-class Thread(DTO):
-    id: int
-    title: str
+class Base(DeclarativeBase):
+    pass
 
 
-class Message(DTO):
-    id: int
-    thread_id: int
-    body: str
+class Thread(Base):
+    __tablename__ = "threads"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str]
 
 
-manifest = Manifest(resources=[SqlResource(Thread), SqlResource(Message)])
+class Message(Base):
+    __tablename__ = "messages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    thread_id: Mapped[int] = mapped_column(ForeignKey("threads.id"))
+    body: Mapped[str]
+
+
+manifest = Manifest(resources=(SqlResource(Thread), SqlResource(Message)))
 ```
 
-The four files:
+From those two classes `create_app(manifest)` serves `POST /threads` and
+`GET /threads` (search), `GET|PATCH|DELETE /threads/{id}`, `GET /threads/count`,
+`GET /threads/batch-read`, and `POST /threads/batch-edit` — and the same set for
+`messages` — plus the OpenAPI docs.
+
+SQLAlchemy is the schema of record: the DTO and the six REST models are
+inferred from the ORM model, so a developer keeps the mapping they already
+write. The Mongo backend is DTO-first instead (there is no schema of record);
+see its section below.
+
+The five files:
 
 * **`dto.py`** — a `DTO` is a plain declaration class (not a Pydantic model).
   Fields carry ordinary Pydantic annotations plus a `DtoField` describing how
@@ -196,20 +233,26 @@ The four files:
   identifier stays client-supplied on create, e.g.
   `class Country(DTO, id_field_name="code")` with a `code: str` field.
 
-* **`resource.py`** — a `Resource` is derived from a DTO. `SqlResource` is the
-  first backend (a DTO-derived table over an injected async session factory or
-  a named connection from `SqlConfig`; the backend is chosen explicitly at
-  construction, not inferred from config). `get_service(ctx)` is **async** and
-  takes an optional call-scoped `MutableMapping`; awaiting it builds the
-  service (a backend may resolve a connection first) and the returned `Service`
-  is the async context manager that owns the storage, so the call site is
+* **`resource.py`** — `Resource` is a genuine ABC: every method is abstract, so
+  `core` holds no backend behaviour and a backend supplies the whole contract.
+  It is generic over the DTO and the identifier type (`Resource[T, K]`).
+  `get_service(ctx)` is **async** and takes an optional call-scoped
+  `MutableMapping`; awaiting it builds the service (a backend may resolve a
+  connection first) and the returned `Service` is the async context manager that
+  owns the storage, so the call site is
   `async with await resource.get_service(ctx)`. `get_supported_actions()` is the
   single action declaration (there is no `actions` property), and
   `get_exposed_resource()` composes on top of it — the exposed resource's
   declaration wins outright.
 * **`service.py`** — `Service` is generic over the DTO, declares the eight
   actions, and *is* the async context manager; a call before `__aenter__`
-  raises clearly. `Action` is the action enum.
+  raises clearly. `Action` is the action enum, `Edit` the
+  create/update/delete union, and `ForbiddenError` / `NotFoundError` /
+  `ServiceError` live here.
+* **`errors.py`** — the framework error base `ResourceyError` and the
+  storage-neutral errors a backend raises and the transport maps:
+  `ResourceyConfigError`, `InvalidInputError`, `UnsupportedFilterError`,
+  `ConflictError`.
 * **`manifest.py`** — the `Manifest` owns the resource set and its lifecycle
   (it may also own app-lifecycle managers, e.g. a `SqlSessionManager`, entered
   before the resources and exited after them),
@@ -227,18 +270,21 @@ can pre-seed storage (the escape hatch) and every resource in the call adopts
 it. `AppContext` (app-scoped) stays a separate concept. HTTP construction
 (`create_app`) is deliberately **not** part of `core` — it belongs to the
 transport layer, where the per-request service dependency is built through a
-configurable `DependencyBuilder` (its default opens the resource's own service
-over the request-scoped `ctx`). `util` is the bottom layer: an isolation test
-pins the layer ranks `util < core < {sql, mongo, list, view, filestore, http,
-config, cache, encryption, auth, tasks, triggers}`, so no module imports a
+configurable `DependencyBuilder` (its default, `OpenDependencyBuilder`, opens
+the resource's own service over the request-scoped `ctx` and applies no
+authentication). `util` is the bottom layer: an isolation test pins the layer
+ranks `util < core < {sql, mongo, list, view, filestore, http, config, cache,
+encryption, auth, jobs, tasks, triggers, realtime}`, so no module imports a
 higher layer at runtime.
 
 ### Configuration — env-driven edges
 
 `core` stays config-free (a service is built from the objects it is handed),
-while the two env-driven *edges* — SQL connections and encryption keys — are
-`BaseConfig` blocks that live with what they configure: `SqlConfig` in
-`sql/`, `EncryptionKeysConfig` in `encryption/`. All read the one
+while each env-driven *edge* is a `BaseConfig` block living with what it
+configures: `SqlConfig` in `sql/`, `EncryptionKeysConfig` in `encryption/`,
+`FileStoreConfig` in `filestore/`, `RealtimeConfig` in `realtime/`,
+`ApiKeysConfig` / `IdpConfig` / `SessionCookieConfig` in `auth/`,
+`BackgroundTasksConfig` in `tasks/`, `JobsConfig` in `jobs/`. All read the one
 process-wide prefix, `APP` by default, so connection `n` is
 `APP_SQL_CONNECTIONS_<n>_NAME` / `_URL` / `_PASSWORD` and the key is
 `APP_ENCRYPTION_KEY_ID` / `_VALUE` (plus `APP_DECRYPTION_KEYS_<n>_*` for
@@ -268,7 +314,9 @@ the same env namespace). Framework internals resolve their own block;
 `SqlResource` uses `get_encryption_service()` / `get_sql_session_manager()` by
 default and accepts an explicit `encryption_service=` / `session_factory=` to
 override. The framework does no `.env` loading — use `uvicorn --env-file` or a
-wrapper script to populate the environment.
+wrapper script to populate the environment. A pluggable medium or channel is
+chosen by name with a `LazyField` (`APP_MEDIUM_CLASS`, `APP_CHANNEL_CLASS`), so
+swapping the implementation needs no code change.
 
 ## Stack
 
