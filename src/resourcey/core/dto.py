@@ -1,40 +1,27 @@
 """DTOs — the single field-level declaration a resource is derived from.
 
-A :class:`DTO` is a plain *declaration* class, not a Pydantic model: a
-subclass annotates its fields (ordinary Pydantic annotations, so schema
-validation works) and tags each with a :class:`DtoField` that says how the
-field projects into each of the six REST shapes. One declaration is the
-source of field truth; the REST models are derived from it, never hand
-written.
-
-Three things are generated from a declaration, at subclass-creation time:
+A :class:`DTO` is a plain *declaration* class, not a Pydantic model: a subclass
+annotates its fields and tags each with a :class:`DtoField` saying how the field
+projects into each of the six REST shapes. Three things are generated from a
+declaration at subclass-creation time:
 
 * the **DTO model** — a Pydantic model in which every field is widened to
   ``ann | Missing`` and defaults to :data:`MISSING`, so an omitted field is
   distinguishable from an explicitly supplied ``None``;
-* the **REST models** — six field-selection views (create/update request +
-  response, read response, search response) built from the :class:`DtoField`
-  ``in_*`` flags. A create request carries concrete defaults; an update request
-  keeps the :data:`MISSING` sentinel on the wire boundary so PATCH can tell
-  "omitted" from "explicitly ``null``";
-* the resolved **operation-scoped defaults** — the value used when a client
-  omits a field, with precedence *client value -> default for that operation
-  ->* ``MISSING``. Create applies ``default_for_create`` /
-  ``default_factory_for_create``; update applies ``default_for_update`` /
-  ``default_factory_for_update``; a field with no default for the operation is
-  left untouched.
+* the **REST models** — six field-selection views built from the ``in_*`` flags;
+* the resolved **operation-scoped defaults** — precedence is *client value ->
+  default for that operation ->* ``MISSING``.
 
-Conventions (``id`` is not client-supplied; ``created_at`` is created once and
-never touched on update; ``updated_at`` is set on create *and* re-set on every
-update; a conventional ``UUID`` ``id`` is generated server-side) are applied in
+Conventions (the identifier is not client-supplied and is immutable;
+``created_at`` is written once; ``updated_at`` is re-set on every update; a
+conventional ``UUID`` ``id`` is generated server-side) are applied in
 :meth:`DTO.__init_subclass__` because ``__set_name__`` does not fire for
 ``Annotated`` metadata. One rule governs them all: an expressed intent wins — an
 explicit ``DtoField`` is honoured verbatim, and (in the SQL path) a column-level
 default beats a convention-generated factory.
 
-This module is part of the ``core`` layer: it imports only ``util`` (the
-``Missing`` sentinel) besides Pydantic and the standard library — ``core``
-imports no other project package.
+This module is part of the ``core`` layer: besides Pydantic and the standard
+library it imports only ``util``, and no other project package.
 """
 
 from __future__ import annotations
@@ -80,47 +67,34 @@ _RESERVED_NAMES = frozenset({"metadata", "id_field_name"})
 class DtoField:
     """How a DTO field projects into the six REST shapes, plus its defaults.
 
-    Every ``in_*`` flag defaults to ``True``. They supersede the older
-    ``creatable`` / ``updatable`` / ``readable`` triple: ``in_read_response``
-    and ``in_search_response`` split what ``readable`` conflated, and
-    ``in_create_response`` / ``in_update_response`` are new — together they
-    express a one-time-reveal field (present in the create response and
-    nowhere else).
+    Every ``in_*`` flag defaults to ``True``. Together the response flags
+    express a one-time-reveal field (present in the create response and nowhere
+    else).
 
-    ``default_for_create`` / ``default_factory_for_create`` and
-    ``default_for_update`` / ``default_factory_for_update`` are the values used
-    when the client omits the field, scoped to the operation (distinct from
-    ``MISSING``); precedence is client value -> default for that operation ->
-    ``MISSING``. A create and an update do not want the same default: an
-    omitted update field with no update default is *left unchanged*, while an
-    ``in_update_request=False`` field is always omitted and so always takes its
-    update default (the "always overwrite" case).
+    ``default_for_*`` / ``default_factory_for_*`` are the values used when the
+    client omits the field, scoped to the operation. An omitted update field with
+    no update default is *left unchanged*, while an ``in_update_request=False``
+    field is always omitted and so always takes its update default.
 
-    ``request_type`` replaces the field's wire type in the **request** REST
-    models only (create / update request); the response models keep the
-    declaration's own type. It is how a field whose *accepted input set* is
-    narrower than its *representable output set* is declared — e.g. a job's
-    ``status`` accepts only ``PENDING`` / ``SCHEDULED`` / ``CANCELLED`` on the
-    wire while a read still reports the runner-set ``RUNNING`` /
-    ``COMPLETED`` / ``ERROR``. ``_UNSET`` (the default) means "no override, use
-    the declaration's type". A narrowing projection (``ResourceView``) sets it
-    through a field override; ``core`` never interprets the value.
+    ``request_type`` replaces the field's wire type in the **request** models
+    only (create / update request); the response models keep the declaration's
+    own type. It is how a field whose *accepted input set* is narrower than its
+    *representable output set* is declared — e.g. a job's ``status`` accepts only
+    ``PENDING`` / ``SCHEDULED`` / ``CANCELLED`` on the wire while a read still
+    reports the runner-set ``RUNNING`` / ``COMPLETED`` / ``ERROR``. ``_UNSET``
+    means "no override". ``core`` never interprets the value.
 
     ``metadata`` is free-form: a general-purpose store for extra data a
-    downstream layer wants to attach to the field (a UI label,a column hint,
-    a validation rule). ``core`` never reads it; it is there so extensions
-    do not need a new ``DtoField`` attribute each.
+    downstream layer wants to attach to the field. ``core`` never reads it.
 
-    ``references`` names the resource this field points at — the **singular resource
-    name** (e.g. ``"thread"``, never the plural REST path ``"threads"``).
-    It is a **tri-state** value: ``_UNSET`` (the default) means the field is a
-    *candidate* for auto-derivation — an FK column's target table name,
-    singularised (SQL only; DTO-first backends have no automatic source, so
-    ``_UNSET`` simply means "no reference" there); an explicit string is used
-    verbatim (never overridden or derived); and ``None`` *suppresses* derivation
-    for an FK column whose target is not exposed as a resource. It is **not** a
-    REST wire field — it exists so the manifest can fail fast when a reference
-    does not resolve to a served resource. ``core`` never reads it.
+    ``references`` names the resource this field points at — the **singular
+    resource name** (e.g. ``"thread"``, never the plural REST path ``"threads"``).
+    It is tri-state: ``_UNSET`` means the field is a *candidate* for
+    auto-derivation from an FK column's target table (SQL only); an explicit
+    string is used verbatim; and ``None`` suppresses derivation for an FK column
+    whose target is not exposed as a resource. It is **not** a REST wire field —
+    it exists so the manifest can fail fast when a reference does not resolve.
+    ``core`` never reads it.
     """
 
     in_create_request: bool = True
@@ -139,9 +113,7 @@ class DtoField:
 
     def __post_init__(self) -> None:
         # A value and a factory for the same operation are mutually exclusive:
-        # which one wins would be arbitrary. Both are *supplied* rather than
-        # inferred, so the contradiction is a declaration error, not a
-        # convention one.
+        # which one wins would be arbitrary.
         for operation in ("create", "update"):
             value, factory = self._default_parts(operation)
             if value is not _UNSET and factory is not None:
@@ -204,32 +176,21 @@ class RestModels:
 class DTO:
     """Base class for a DTO declaration.
 
-    Subclass it and annotate fields; tag a field with
-    ``Annotated[T, DtoField(...)]``, or leave it bare and let the conventions
-    apply::
+    Subclass it and annotate fields, tagging each with
+    ``Annotated[T, DtoField(...)]``::
 
         class MyStoredKey(DTO, metadata={"table": "stored_keys"}):
             id: Annotated[UUID, DtoField(in_create_request=False, in_update_request=False,
                                          default_factory_for_create=uuid4)]
             key: Annotated[str, DtoField(in_read_response=False, metadata={"label": "Key"})]
-            description: Annotated[str | None, DtoField(default_for_create=None)]
             created_at: Annotated[datetime, DtoField(in_create_request=False,
                                                      in_update_request=False,
                                                      default_factory_for_create=utc_now)]
-            updated_at: Annotated[datetime, DtoField(in_create_request=False,
-                                                     in_update_request=False,
-                                                     default_factory_for_create=utc_now,
-                                                     default_factory_for_update=utc_now)]
 
-    ``Annotated`` is the canonical Pydantic mechanism (the one the earlier
-    already uses for ``ResourceyField``). It keeps the real field type, unlike
-    the assignment form (``key: str = DtoField(...)``), which is a type error
-    under ``mypy --strict``. No explicit ``| Missing`` is needed: the generator
-    widens every field itself.
-
-    ``metadata`` is free-form extra data, inherited and merged down the MRO; a
-    subclass may pass ``metadata=`` as a class keyword or declare a ``metadata``
-    attribute in its body. See :attr:`metadata`.
+    ``Annotated`` is the canonical form: it keeps the real field type, unlike the
+    assignment form (``key: str = DtoField(...)``), which is a type error under
+    ``mypy --strict``. No explicit ``| Missing`` is needed — the generator widens
+    every field itself.
     """
 
     __dto_fields__: ClassVar[dict[str, tuple[Any, DtoField]]]
@@ -367,10 +328,10 @@ def _assert_id_field_exists(cls: type[DTO], fields: Mapping[str, tuple[Any, DtoF
 def _collect_dto_fields(cls: type[DTO]) -> dict[str, tuple[Any, DtoField]]:
     """Resolve ``cls``'s declared fields into ``(annotation, DtoField)`` pairs.
 
-    Walks the MRO base-first so a subclass override replaces an inherited
-    field while preserving declaration order. Underscore-prefixed names,
-    ``ClassVar`` attributes, and the reserved declaration names are
-    infrastructure, not fields.
+    Walks the MRO base-first so a subclass override replaces an inherited field
+    while preserving declaration order. Underscore-prefixed names, ``ClassVar``
+    attributes, and the reserved declaration names are infrastructure, not
+    fields.
     """
     fields: dict[str, tuple[Any, DtoField]] = {}
     for klass in reversed(cls.__mro__):
@@ -427,30 +388,22 @@ def _apply_conventions(
 ) -> DtoField:
     """Apply the id / timestamp conventions the author did not set explicitly.
 
-    An explicit ``DtoField`` is honoured verbatim — the conventions never alter
-    declared flags or defaults (the developer's intent wins outright). Only a
-    bare field (no ``DtoField``) is decorated. ``id_field_name`` is the resolved
-    identifier, so a caller that knows it (the SQL path, from the primary key)
-    does not have to synthesize a declaration, and
-    ``identifier_is_backend_managed`` lets that caller report a database-owned
-    key so no application-side factory is generated.
+    An explicit ``DtoField`` is honoured verbatim. ``identifier_is_backend_managed``
+    lets a caller report a database-owned key so no application-side factory is
+    generated.
     """
     if explicit:
         return config
     if name == id_field_name:
-        # The conventional ``id`` is server-generated, so it is never client
-        # input. A *custom* identifier is the author's own key (a natural key),
-        # so it stays available on create — the client supplies it — but is
-        # still immutable, so it is excluded from updates either way.
+        # A *custom* identifier is the author's own key (a natural key), so it
+        # stays client-supplied on create, but is immutable either way.
         overrides: dict[str, Any] = {"in_update_request": False}
         if name == DEFAULT_ID_FIELD_NAME:
             overrides["in_create_request"] = False
         config = config.with_overrides(**overrides)
-        # A UUID identifier is generated server-side by the application (never
-        # by a database default), so an omitted create gets a fresh ``uuid4``.
-        # Deliberately narrow: a UUID under a *custom* ``id_field_name`` (a
-        # natural key), a non-UUID id, or a column that already declares its own
-        # default (the expressed intent — a column default wins) is left alone.
+        # Only a conventional UUID ``id`` is generated application-side: a UUID
+        # under a *custom* ``id_field_name`` (a natural key), a non-UUID id, or a
+        # column that already declares its own default is left alone.
         if (
             name == DEFAULT_ID_FIELD_NAME
             and _is_uuid_annotation(annotation)
@@ -460,9 +413,7 @@ def _apply_conventions(
             config = config.with_overrides(default_factory_for_create=uuid4)
         return config
     if name in ("created_at", "updated_at"):
-        # Neither is client input. ``created_at`` is written once (no update
-        # default, so an omitted update leaves it alone); ``updated_at`` is
-        # re-set on every update, so it carries an update default too.
+        # ``created_at`` is written once; ``updated_at`` is re-set on every update.
         config = config.with_overrides(in_create_request=False, in_update_request=False)
         if not config.has_default_for("create"):
             config = config.with_overrides(default_factory_for_create=utc_now)
@@ -511,9 +462,8 @@ def _strip_annotated(annotation: Any) -> Any:
 def _is_uuid_annotation(annotation: Any) -> bool:
     """Whether ``annotation`` is exactly ``UUID`` (an ``Annotated`` wrapper allowed).
 
-    Deliberately narrow: only the bare ``UUID`` type qualifies. ``str`` /
-    ``CHR(36)`` uuid columns, unions, and ``Any`` do not — the issue scopes
-    server-side generation to the ``UUID`` type only.
+    Deliberately narrow: ``str`` / ``CHAR(36)`` uuid columns, unions, and ``Any``
+    do not qualify.
     """
     return _strip_annotated(annotation) is UUID
 
@@ -559,14 +509,9 @@ def _secret_field_names(
 def _secret_base(secret_names: set[str]) -> type[BaseModel]:
     """Build a transient base class carrying secret serializers / validators.
 
-    For each name in ``secret_names`` a ``field_serializer`` (dump via
-    :func:`dump_secret_str`) and a ``before`` ``field_validator`` (load via
-    :func:`load_secret_str`, rewrapped in :class:`SecretStr`) are attached.
-    ``check_fields=False`` lets the decorators be defined on the base class
-    before the fields exist (they are added by ``create_model``). The base class
-    is fresh per call so distinct generated models never share decorator
-    bindings. With no secret fields the plain :class:`BaseModel` is returned, so
-    a model without a secret is byte-for-byte what it was before.
+    ``check_fields=False`` lets the decorators be defined before the fields exist
+    (they are added by ``create_model``). The base class is fresh per call so
+    distinct generated models never share decorator bindings.
     """
     if not secret_names:
         return BaseModel
@@ -666,14 +611,10 @@ def _build_create_request_model(
 ) -> type[BaseModel]:
     """A create request: the ``in_create_request`` fields with their create defaults.
 
-    Optionality comes *only* from a declared ``default_for_create`` /
-    ``default_factory_for_create`` (or the field being excluded): a nullable
+    Optionality comes *only* from a declared create default: a nullable
     annotation with no create default is required, so a PATCH can always tell
-    "not specified" from "set to ``null``". A factory default becomes Pydantic's
-    ``default_factory`` (so it is actually used) rather than a concrete ``None``.
-
-    A field's ``request_type`` replaces its wire type here only (see
-    :attr:`DtoField.request_type`).
+    "not specified" from "set to ``null``". A field's ``request_type`` replaces
+    its wire type here only.
     """
     model_fields: dict[str, Any] = {}
     secret_names: set[str] = set()
@@ -704,13 +645,8 @@ def _build_update_request_model(
     """An update request: the ``in_update_request`` fields, every one optional.
 
     Each field defaults to the :data:`MISSING` sentinel so a PATCH that omits it
-    is distinguishable from one that sends an explicit ``None`` — the sentinel
-    lives on the wire boundary here, unlike the create request's concrete
-    defaults. A non-nullable field still rejects ``null``. Defaults for update
-    are applied by the service (operation-scoped), not materialised here.
-
-    A field's ``request_type`` replaces its wire type here only (see
-    :attr:`DtoField.request_type`).
+    is distinguishable from one that sends an explicit ``None``. Defaults for
+    update are applied by the service, not materialised here.
     """
     model_fields: dict[str, Any] = {
         field_name: (
@@ -735,31 +671,25 @@ def derive_dto(
 ) -> type[DTO]:
     """Derive a new DTO declaration from ``dto`` with per-field overrides applied.
 
-    Every field of ``dto`` is re-declared with its *resolved* :class:`DtoField`
-    (from :meth:`DTO.get_fields`) made explicit, then merged with that field's
-    override mapping via :meth:`DtoField.with_overrides`. Because each field is
-    now explicit, the :class:`DTO` conventions do **not** re-run — a bare ``id``
-    is not given a fresh ``uuid4`` factory and timestamps are not re-decorated,
-    so the derived declaration projects exactly what the source declared plus
-    the requested changes. This is the mechanism behind a ``ResourceView``'s
+    Every field is re-declared with its *resolved* :class:`DtoField` made
+    explicit, then merged with that field's override mapping. Because each field
+    is now explicit, the :class:`DTO` conventions do **not** re-run, so the
+    derived declaration projects exactly what the source declared plus the
+    requested changes. This is the mechanism behind a ``ResourceView``'s
     ``exposed_field_overrides``.
 
     The stored annotation is reduced to its base type before the merged
-    ``DtoField`` is attached. A declaration in the ``Annotated[T, DtoField(...)]``
-    form stores a ``DtoField`` *inside* its annotation, and Pydantic flattens
-    nested ``Annotated``, so wrapping that annotation directly would leave the
-    source field's ``DtoField`` ahead of the merged one and :func:`_config_from`
-    (which takes the first) would silently ignore every override. Reducing first
-    makes the merged field the only one.
+    ``DtoField`` is attached: Pydantic flattens nested ``Annotated``, so wrapping
+    a ``Annotated[T, DtoField(...)]`` annotation directly would leave the source
+    field's ``DtoField`` ahead of the merged one and the overrides would be
+    silently ignored.
 
     Args:
         dto: The declaration to derive from.
         field_overrides: ``{field_name: {DtoField attribute: value}}``. A partial
             mapping: unmentioned attributes keep the source field's value, so an
-            override cannot *silently* re-widen a flag the source had turned off
-            (a full ``DtoField(...)`` replacement would reset the rest to their
-            ``True`` defaults). A ``request_type`` override is expressed here
-            like any other attribute. An unknown field name raises ``KeyError``.
+            override cannot *silently* re-widen a flag the source had turned off.
+            An unknown field name raises ``KeyError``.
         name: The derived class name (defaults to ``<dto name>View``).
 
     The identifier (``id_field_name``) and class ``metadata`` are carried across
@@ -795,11 +725,8 @@ def apply_operation_defaults(
     """Fill omitted fields of ``data`` from the DTO's defaults for ``operation``.
 
     A field the storage owns has no default for the operation, so nothing is
-    supplied and the storage generates it; a field with a factory default is
-    filled by the application. An omitted field with no default for the
-    operation is left untouched (so an update with no update default preserves
-    the stored value). Shared by every backend's create / update path so the
-    default precedence is defined once.
+    supplied and the storage generates it. An omitted field with no default for
+    the operation is left untouched (so an update preserves the stored value).
     """
     for name, (_ann, config) in dto.__dto_fields__.items():
         if name in data:
@@ -815,8 +742,7 @@ def request_to_dto(dto_model: type[BaseModel], payload: BaseModel) -> BaseModel:
 
     Uses ``model_dump(exclude_unset=True)`` so only client-supplied fields carry
     over and everything else stays :data:`MISSING`. This form is load-bearing:
-    a plain ``model_dump`` raises (or leaks the sentinel) because the request
-    field is concretely typed, and ``exclude_none=True`` would drop an explicit
-    ``None`` (so a PATCH could never clear a field).
+    a plain ``model_dump`` leaks the sentinel, and ``exclude_none=True`` would
+    drop an explicit ``None`` (so a PATCH could never clear a field).
     """
     return dto_model.model_validate(payload.model_dump(exclude_unset=True))

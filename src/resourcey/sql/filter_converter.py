@@ -1,45 +1,25 @@
 """Translate a standard :class:`SearchFilter` tree into SQLAlchemy conditions (issue #79).
 
-This is the only file that imports SQLAlchemy for filtering. It consumes
-only the *standard* filter tree (:mod:`resourcey.util.search_filter`); an
-object filter has already lowered itself, so a custom filter needs no handler
-here — it lowers to standard nodes and is converted like any other.
+This is the only file that imports SQLAlchemy for filtering. It consumes only
+the *standard* filter tree; an object filter has already lowered itself.
 
-Three registries, not one
--------------------------
-Dispatch is split by what each node needs, which keeps the dispatcher trivial
-and makes a structural mistake detectable:
+Dispatch is split across three registries by what each node needs:
 
-* **Logical** — ``AllFilter``, ``NoMatchFilter``, ``AndFilter``, ``OrFilter``,
-  ``NotFilter``. Converted with no column; they recurse.
-* **Attribute** — ``AttrFilter``. Its one job is to resolve an attribute name to
-  a column and bind it for the subtree below.
-* **Operator** — ``EqFilter`` / ``GtFilter`` / ``GeFilter`` / ``LtFilter`` /
-  ``LeFilter`` / ``ContainsFilter``. Only reachable *with a bound column*; the
-  handler signature is ``(ctx, column, value) -> ColumnElement[bool]``. A value
-  leaf reached with no column is a detected structural impossibility, not a
-  per-handler bug.
+* **Logical** — ``AllFilter`` / ``NoMatchFilter`` / ``AndFilter`` / ``OrFilter``
+  / ``NotFilter``: no column, they recurse.
+* **Attribute** — ``AttrFilter``: resolves an attribute name to a column and
+  binds it for the subtree below.
+* **Operator** — the value leaves, reachable only *with* a bound column.
 
-Registration is keyed on the filter type (``register_operator`` /
-``register_logical``). Because the node set is a discriminated union, the
-registries are enumerable, and the module asserts at import time that every
-standard leaf has a handler — the same trick the manifest uses to catch a
-mistyped ``Action``.
+The module asserts at import time that every standard leaf has a handler.
 
 NULL-safe negation
 ------------------
 SQL ``NOT (col = 'x')`` compiles to ``col != 'x'``, which is *unknown* for a
-NULL row, so a NULL row matches neither ``EqFilter('x')`` nor its negation and
-silently vanishes from both branches. Every operator therefore registers a
-``(positive, negated)`` pair; the negated form is NULL-safe (``IS DISTINCT
-FROM`` for equality, ``col IS NULL OR <complement>`` for the rest), so it agrees
-with the in-memory :meth:`SearchFilter.matches` complement on every row.
-
-Purity / IO split
------------------
-:class:`SqlFilterConverter` splits into ``resolve()`` (the only place a handler
-may do IO; empty today) and ``apply()`` (pure statement building). The common
-path is a pure, trivially testable builder.
+NULL row, so a NULL row would match neither ``EqFilter('x')`` nor its negation
+and vanish from both branches. Every operator therefore registers a
+``(positive, negated)`` pair; the negated form is NULL-safe, so it agrees with
+the in-memory :meth:`SearchFilter.matches` complement on every row.
 
 This module imports no code outside the framework.
 """
@@ -79,17 +59,16 @@ LogicalHandler = Callable[["SqlFilterConverter", SearchFilter[Any]], "ColumnElem
 # A converter handler for a value leaf: ``(ctx, column, value) -> condition``.
 OperatorHandler = Callable[["SqlFilterContext", Column[Any], Any], ColumnElement[bool]]
 
-# ``condition | None``: ``None`` means "no restriction" (matches every row), the
-# same convention ``v1`` used so ``AllFilter`` and an unset object filter are
-# uniform.
+# ``condition | None``: ``None`` means "no restriction" (matches every row), so
+# ``AllFilter`` and an unset object filter are uniform.
 
 
 def _naive(value: Any) -> Any:
     """Normalise an aware datetime to UTC before binding it to a column.
 
-    All ORM timestamp columns use ``DateTime(timezone=True)`` (timestamptz).
-    Comparing an aware datetime with a non-UTC offset against such a column
-    raises an asyncpg offset mismatch that is not obvious from the call site.
+    Comparing an aware datetime with a non-UTC offset against a timestamptz
+    column raises an asyncpg offset mismatch that is not obvious from the call
+    site.
     """
     if isinstance(value, datetime) and value.tzinfo is not None:
         return value.astimezone(UTC)
@@ -324,11 +303,7 @@ register_operator(InFilter, _in_positive, _in_negated)
 
 
 def _assert_registries_are_complete() -> None:
-    """Fail at import time if a standard node has no handler.
-
-    The registries are the single place a standard node becomes SQL, so a new
-    leaf added without a handler is caught here rather than at request time.
-    """
+    """Fail at import time if a standard node has no handler."""
     standard_logical = {AllFilter, NoMatchFilter, AndFilter, OrFilter, NotFilter}
     standard_operators = {
         EqFilter,
@@ -361,16 +336,11 @@ _assert_registries_are_complete()
 class SqlFilterContext:
     """Everything a conversion handler needs, passed as one frozen object.
 
-    Args:
-        columns: DTO attribute name -> the table column it maps to. Only the
-            resource's *queryable* fields are present, so a field projected away
-            from the read model cannot be filtered (``?secret__eq=`` discloses a
-            value the outside world never sees).
-        session: The live session, available to handlers that need more than one
-            statement (empty today, but it keeps handler signatures stable).
-        allow_iteration: Whether an unconvertible filter may fall back to an
-            in-memory scan. Off by default: a silent full-table scan behind a
-            public ``GET`` is a DoS and voids the keyset-pagination guarantee.
+    ``columns`` holds only the resource's *queryable* fields, so a field
+    projected away from the read model cannot be filtered. ``session`` is
+    available to handlers that need more than one statement. ``allow_iteration``
+    permits the in-memory fallback — off by default, since a silent full-table
+    scan behind a public ``GET`` is a DoS.
     """
 
     columns: Mapping[str, Column[Any]]

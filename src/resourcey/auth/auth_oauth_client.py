@@ -1,39 +1,23 @@
 """The OAuth client resources and the ``ExternalIdentity`` mapping (issue #151).
 
-Modeled on the API-key dual-source pattern
-(:mod:`resourcey.auth.auth_api_key_resource`): one declaration of full storage
-truth, two backends, a narrowing
-:class:`~resourcey.view.resource_view.ResourceView`.
-
-===========================  ==========================  ==========================
-                             config rung                 DB rung
-===========================  ==========================  ==========================
-model                        ``OAuthClientConfig`` list  ``OAuthClient`` ORM
-resource                     ``ListResource`` (read-only) ``SqlResource``
-source                       ``APP_OAUTH_CLIENTS_<n>_*``  ``oauth_clients`` table
-exposed                      ``oauth_client_view``       ``oauth_client_view``
-===========================  ==========================  ==========================
+Modeled on the API-key dual-source pattern: one declaration of full storage
+truth, two backends (a config ``ListResource`` and a DB ``SqlResource``), and a
+narrowing :class:`~resourcey.view.resource_view.ResourceView`.
 
 :class:`OAuthAuthenticator` takes the **inner** resource and never branches on
 which rung is in play, mirroring ``ApiKeyAuthenticator.key_resource``.
 
-Field split (load-bearing): the *verification* fields (``issuer``,
-``jwks_uri``, ``audience``, ``algorithms``) are what ``authenticate`` reads per
-request; the *flow* fields (``auth_url``, ``token_url``, ``refresh_url``,
-``client_secret``, ``redirect_uri``, ``scopes``) are what the *app* reads. The
-two roles must not be conflated.
+The *verification* fields (``issuer``, ``jwks_uri``, ``audience``,
+``algorithms``) are what ``authenticate`` reads per request; the *flow* fields
+(``auth_url``, ``token_url``, ``refresh_url``, ``client_secret``,
+``redirect_uri``, ``scopes``) are what the *app* reads.
 
-``client_secret`` is a :class:`~pydantic.SecretStr` hidden from every response
-and the query surface (the ``KEY_QUERY_SURFACE_HIDDEN`` idiom).
-
-The DB-backed client resource is a **privilege surface** — writing a row (or its
-``issuer`` / ``jwks_uri``) lets an attacker point token validation at a JWKS
-they control — so access to it must be restricted to administrators, the same
-warning ``ApiKey`` carries.
+The DB-backed client resource is a **privilege surface** — writing a row's
+``issuer`` / ``jwks_uri`` lets an attacker point token validation at a JWKS they
+control — so access must be restricted to administrators.
 
 ``ExternalIdentity`` links a provider ``(issuer, subject)`` pair to our internal
-``user_id``, so a principal can be correlated **across providers** (the same
-human via two IdPs resolves to one internal user). Unique on the pair.
+``user_id``, so a principal can be correlated **across providers**.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
 """
@@ -56,25 +40,20 @@ from resourcey.list.list_resource import ListResource
 from resourcey.sql.sql_resource import SqlResource
 from resourcey.view.resource_view import ResourceView
 
-# ``JSON`` with a PostgreSQL ``JSONB`` variant, matching the RBAC permission
-# column, so a list column compares and de-duplicates on both dialects.
+# ``JSON`` with a PostgreSQL ``JSONB`` variant, so a list column compares and
+# de-duplicates on both dialects.
 JSON_LIST = JSON().with_variant(JSONB(), "postgresql")
 
 # The name of the client-secret field, shared with the service that hides it.
 CLIENT_SECRET_FIELD = "client_secret"
 
-# The projection both exposed client views share: the client secret is never
-# read, searched, updated, or client-supplied. Unlike an API key there is no
-# one-time reveal — the flow path reads the secret server-side, so it is simply
-# absent from every response and from the query surface (``?client_secret__eq=``
-# / ``?sort=client_secret`` are rejected).
+# The client secret is never read or searched. Unlike an API key there is no
+# one-time reveal — the flow path reads it server-side.
 CLIENT_QUERY_SURFACE_HIDDEN: dict[str, dict[str, Any]] = {
     CLIENT_SECRET_FIELD: {"in_read_response": False, "in_search_response": False},
 }
 
-# The token resource exposes no secret and no provider credential: every
-# secret-bearing field is projected away and the surface is read-only. The
-# service remains the only writer.
+# Every secret-bearing field is projected away; the service is the only writer.
 TOKEN_SECRET_FIELDS: tuple[str, ...] = ("access_token", "refresh_token", "lease_owner")
 TOKEN_QUERY_SURFACE_HIDDEN: dict[str, dict[str, Any]] = {
     field: {"in_read_response": False, "in_search_response": False} for field in TOKEN_SECRET_FIELDS
@@ -95,13 +74,10 @@ class ExternalIdentityBase(DeclarativeBase):
 
 
 class OAuthClient(OAuthBase):
-    """A stored OAuth / OIDC client row.
+    """A stored OAuth / OIDC client row (the model-first counterpart of ``OAuthClientConfig``).
 
-    See :class:`~resourcey.auth.auth_oauth_config.OAuthClientConfig` for the
-    field semantics; this is the model-first counterpart. ``issuer`` is
-    **unique** (not just indexed): it is the sole selector ``find_by_issuer``
-    uses to pick which row's JWKS a presented token is verified against, so two
-    rows sharing an issuer would make that selection ambiguous.
+    ``issuer`` is **unique**: it is the sole selector ``find_by_issuer`` uses to
+    pick which row's JWKS a presented token is verified against.
     """
 
     __tablename__ = "oauth_clients"
@@ -134,10 +110,8 @@ class OAuthClient(OAuthBase):
 class ExternalIdentity(ExternalIdentityBase):
     """A provider ``(issuer, subject)`` pair mapped to our internal ``user_id``.
 
-    ``subject`` is always a string: a provider's subject is opaque
-    (``auth0|abc``, a numeric Google id, a DN) and must never be assumed
-    parseable. Unique on ``(issuer, subject)``; indexed on ``user_id`` so a
-    principal's linked identities can be listed.
+    ``subject`` is always a string: a provider's subject is opaque and must
+    never be assumed parseable.
     """
 
     __tablename__ = "external_identities"
@@ -198,12 +172,7 @@ def stored_oauth_client_resource(
 
 
 class ConfigOAuthClient(BaseModel):
-    """A served config client: the declaration with the secret carried as a secret.
-
-    The verifier reads ``issuer`` / ``jwks_uri`` / ``audience`` / ``algorithms``;
-    the flow path reads the rest. ``client_secret`` is a
-    :class:`~pydantic.SecretStr` and is hidden by the exposed view.
-    """
+    """A served config client: the declaration with the secret carried as a secret."""
 
     id: str
     provider: str | None = None
@@ -262,9 +231,7 @@ def config_oauth_client_resource(
 def oauth_client_view(inner: Resource[Any, Any]) -> ResourceView[Any, Any]:
     """The exposed client view: ``client_secret`` is absent from every response.
 
-    The DB-backed client surface stays writable (a client is configured through
-    the REST surface), so only the secret is projected away. The resource is a
-    privilege surface — restrict access to administrators.
+    The resource is a privilege surface — restrict access to administrators.
     """
     return ResourceView(inner, exposed_field_overrides=CLIENT_QUERY_SURFACE_HIDDEN)
 
@@ -273,8 +240,7 @@ def oauth_token_view(inner: Resource[Any, Any]) -> ResourceView[Any, Any]:
     """The exposed token view: read-only, every secret-bearing field projected away.
 
     Debuggability is the reason the token table is a resource at all; not
-    exposing it is the production default. A deployment hides it entirely (leave
-    it out of the manifest's exposed set, or gate it admin-only).
+    exposing it is the production default.
     """
     return ResourceView(
         inner,
@@ -293,8 +259,7 @@ def external_identity_resource(
     """The ``ExternalIdentity`` resource (the ``(issuer, subject) -> user_id`` map).
 
     A plain model-first resource, so the mapping can be seeded / administered
-    over the ordinary REST surface. It links external principals to internal
-    users and is admin-only in a production deployment.
+    over REST. It is admin-only in a production deployment.
     """
     return ExternalIdentityResource(
         ExternalIdentity,

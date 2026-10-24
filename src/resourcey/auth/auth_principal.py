@@ -1,33 +1,29 @@
 """The authenticated principal and the authentication seam (issue #131).
 
 Authentication answers *who is the caller*; authorization (the ``Policy`` /
-``AuthorizedService`` half of :mod:`resourcey.auth`) answers *what may they
-do*. This module is the authentication half and the one broad code path every
-method shares, so a new method (cookie, and later OAuth / password) plugs in
-without the policy tier changing.
+``AuthorizedService`` half of :mod:`resourcey.auth`) answers *what may they do*.
+This module is the authentication half and the one code path every method
+shares, so a new method plugs in without the policy tier changing.
 
 Vocabulary — three layers that must not be conflated:
 
 * **claims** — what the *credential says* (``sub``, ``exp``, ``email``, …).
-  Provenance, minted by whoever issued the credential. Never the direct basis of
-  an authorization decision; an app that wants to interpret one promotes it to a
-  role or scope explicitly.
+  Provenance, never the direct basis of an authorization decision.
 * **scopes** — what *this credential* may do. A ceiling the issuer can narrow
   (delegation), intersected with — never a substitute for — the policy.
-* **roles** — who/what the *principal* is part of. The identity attribute a
-  :class:`~resourcey.auth.auth_policy.PolicyResolver` sources into a policy.
+* **roles** — who/what the *principal* is part of, sourced into a policy by a
+  :class:`~resourcey.auth.auth_policy.PolicyResolver`.
 
 :class:`Principal.roles` is the **simple-roles representation**: populated only
 when roles are few and credential-carried. The store-backed (RBAC) rung leaves
 it empty and looks roles up per request from the principal's ``id``.
 
 :class:`Authenticator` is a :class:`~resourcey.util.models.DiscriminatedUnionMixin`,
-so a method is selected by ``kind`` (config / discriminated union), and its
+so a method is selected by ``kind``, and its
 :meth:`~Authenticator.authenticate` returns an :class:`AuthResult` — which keeps
 *absent* and *invalid* distinguishable. One result therefore yields both a
-**lenient** dependency (anonymous on absent, ``401`` on present-but-invalid) and
-a **strict** one (``401`` unless authenticated), via
-:func:`optional_principal` / :func:`required_principal`.
+**lenient** and a **strict** dependency, via :func:`optional_principal` /
+:func:`required_principal`.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
 """
@@ -66,9 +62,9 @@ PRINCIPAL_CTX_KEY = "resourcey_principal"
 class PrincipalKind(StrEnum):
     """The kind of authenticated caller.
 
-    ``USER`` is a human principal (a key's owner, a cookie's ``sub``);
-    ``SERVICE`` is a machine principal (a bare configured key); ``ANONYMOUS`` is
-    the absence of a principal (:attr:`Principal.id` is ``None``).
+    ``USER`` is a human principal; ``SERVICE`` is a machine principal;
+    ``ANONYMOUS`` is the absence of a principal (:attr:`Principal.id` is
+    ``None``).
     """
 
     USER = "user"
@@ -79,25 +75,12 @@ class PrincipalKind(StrEnum):
 class Principal(BaseModel):
     """The authenticated caller; ``id is None`` means anonymous.
 
-    Attributes:
-        id: The principal's identifier, or ``None`` for anonymous. This is the
-            ``user_id`` a policy reduction scopes against, and — in the
-            store-backed rung — the key a roles / groups lookup resolves.
-        kind: Whether this is a human, a machine, or anonymous.
-        external_id: The identity provider's subject for the credential in play
-            (an OAuth / OIDC ``sub``), when the principal authenticated through
-            an external IdP. A provider subject is an opaque string (``auth0|abc``,
-            a numeric Google id, a DN), so it is carried *alongside* the internal
-            :attr:`id` rather than coerced into it; ``None`` for a first-party
-            credential. Correlation across providers is the ``ExternalIdentity``
-            mapping's job.
-        roles: The principal's roles. **Simple-case only**: populated when roles
-            are few and carried on the credential; deliberately empty in the
-            store-backed rung, which resolves roles per request.
-        scopes: The ceiling on the *credential* (a downscoped credential), not
-            the principal's full rights. Intersected with the policy.
-        claims: The credential's remaining assertions, carried for provenance /
-            audit / an app hook. Never the direct basis of a decision.
+    ``id`` is the ``user_id`` a policy reduction scopes against. ``external_id``
+    is the identity provider's opaque subject (``auth0|abc``, a numeric Google
+    id, a DN), carried *alongside* the internal id rather than coerced into it.
+    ``roles`` is the simple-roles representation, deliberately empty in the
+    store-backed rung; ``scopes`` is a ceiling on the credential; ``claims`` is
+    provenance only.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -129,14 +112,8 @@ class AuthResult(BaseModel):
     """One authentication attempt's outcome.
 
     A credential can be **absent** (no key / no cookie — anonymous) or
-    **invalid** (presented but not accepted); a caller must be able to tell them
-    apart, so both are carried explicitly rather than collapsed into a ``None``
-    principal.
-
-    Attributes:
-        principal: The authenticated principal, or ``None`` when unauthenticated.
-        credential_present: Whether a credential was presented at all.
-        credential_valid: Whether the presented credential authenticated.
+    **invalid** (presented but not accepted), so both are carried explicitly
+    rather than collapsed into a ``None`` principal.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -166,10 +143,8 @@ class AuthResult(BaseModel):
 class Authenticator(DiscriminatedUnionMixin, ABC):
     """Resolve a request's credential into an :class:`AuthResult`.
 
-    Concrete subclasses are selected by ``kind`` (config / discriminated union).
-    :meth:`authenticate` is the programmatic contract; :meth:`dependency`
-    returns the FastAPI dependency the transport uses, which caches the result
-    on the request so several consumers authenticate once.
+    :meth:`dependency` returns the FastAPI dependency the transport uses, which
+    caches the result on the request so several consumers authenticate once.
     """
 
     @abstractmethod
@@ -180,8 +155,8 @@ class Authenticator(DiscriminatedUnionMixin, ABC):
     def dependency(self) -> Callable[..., Awaitable[AuthResult]]:
         """A FastAPI dependency returning (and caching) this authenticator's result.
 
-        The default declares no OpenAPI security scheme — an authenticator with a
-        concrete scheme (e.g. the API-key one) overrides this to declare it.
+        The default declares no OpenAPI security scheme; an authenticator with a
+        concrete scheme overrides this to declare it.
         """
 
         async def dependency(request: Request) -> AuthResult:
@@ -192,10 +167,8 @@ class Authenticator(DiscriminatedUnionMixin, ABC):
     def challenge(self) -> str:
         """The ``WWW-Authenticate`` value sent with an authentication ``401``.
 
-        The generic :data:`AUTH_CHALLENGE` by default; an authenticator with a
-        concrete scheme returns a more specific one so a 401 names how to
-        authenticate. The same challenge is sent for absent and invalid
-        credentials, so a probe cannot tell them apart.
+        The same challenge is sent for absent and invalid credentials, so a probe
+        cannot tell them apart.
         """
         return AUTH_CHALLENGE
 
@@ -203,14 +176,10 @@ class Authenticator(DiscriminatedUnionMixin, ABC):
 class CompositeAuthenticator(Authenticator):
     """An ordered chain of authenticators, tried until one authenticates.
 
-    ``create_app`` / ``add_to_app`` take **one** ``dependency_builder``, so a
-    deployment offering several methods (e.g. API key *or* cookie) composes them
-    into one authenticator.
-
-    Semantics: the first method that authenticates wins; if no method
-    authenticates but at least one saw a credential, the result is *invalid*
-    (so the caller gets a ``401`` rather than being treated as anonymous); if no
-    method saw a credential, the result is *absent* (anonymous).
+    A deployment offering several methods (e.g. API key *or* cookie) composes
+    them into one authenticator. The first method that authenticates wins; if
+    none does but at least one saw a credential, the result is *invalid*; if none
+    saw a credential, the result is *absent*.
     """
 
     authenticators: list[Authenticator] = Field(default_factory=list)
@@ -230,9 +199,7 @@ class CompositeAuthenticator(Authenticator):
         """A dependency composing the children's dependencies (so their schemes stay visible).
 
         The signature is synthesised — one ``Depends(child.dependency())``
-        parameter per child — so each child's OpenAPI security scheme is
-        declared. Children are resolved by FastAPI before this runs, and the
-        combined result is cached.
+        parameter per child — so each child's OpenAPI security scheme is declared.
         """
         parameters = [
             inspect.Parameter(
@@ -266,9 +233,7 @@ def _combine(results: Iterable[AuthResult]) -> AuthResult:
 async def resolve_auth_result(request: Request, authenticator: Authenticator) -> AuthResult:
     """Authenticate ``request`` once per authenticator, caching on the request.
 
-    A request may reach the same authenticator through more than one dependency
-    (the builder's and an app route's); caching keeps it to a single
-    authentication.
+    A request may reach the same authenticator through more than one dependency.
     """
     cache: dict[int, AuthResult] | None = getattr(request.state, _AUTH_STATE_KEY, None)
     if cache is None:
@@ -283,9 +248,8 @@ async def resolve_auth_result(request: Request, authenticator: Authenticator) ->
 def store_auth_result(request: Request, result: AuthResult) -> None:
     """Record ``result`` for ``request`` so a downstream dependency reuses it.
 
-    The dependency builder stores the authenticated result before it yields the
-    service, so an app route's :func:`current_principal` reads the same result
-    rather than authenticating again.
+    The builder stores the result before it yields the service, so an app
+    route's :func:`current_principal` reads the same result.
     """
     setattr(request.state, _AUTH_RESULT_KEY, result)
 
@@ -311,11 +275,7 @@ def _unauthorized(challenge: str = AUTH_CHALLENGE) -> HTTPException:
 def optional_principal(
     authenticator: Authenticator,
 ) -> Callable[..., Awaitable[Principal | None]]:
-    """A lenient dependency: anonymous on an absent credential, 401 on an invalid one.
-
-    This is the dependency a read endpoint uses to allow anonymous callers while
-    still rejecting a *presented but bad* credential.
-    """
+    """A lenient dependency: anonymous on an absent credential, 401 on an invalid one."""
     authenticate = authenticator.dependency()
     challenge = authenticator.challenge()
 
@@ -335,7 +295,7 @@ def required_principal(authenticator: Authenticator) -> Callable[..., Awaitable[
     """A strict dependency: 401 unless the request is authenticated.
 
     Derives from the same :class:`AuthResult` as :func:`optional_principal`, so
-    the credential tier and the requirement tier stay one code path.
+    both tiers stay one code path.
     """
     authenticate = authenticator.dependency()
     challenge = authenticator.challenge()
@@ -352,8 +312,8 @@ def required_principal(authenticator: Authenticator) -> Callable[..., Awaitable[
 async def current_principal(request: Request) -> Principal | None:
     """The principal the dependency builder authenticated, if any.
 
-    Reads the result the builder stored on the request; ``None`` when the
-    request was not authenticated by a builder (or was anonymous).
+    ``None`` when the request was not authenticated by a builder (or was
+    anonymous).
     """
     stored = _stored_auth_result(request)
     return stored.principal if stored is not None else None
@@ -362,18 +322,12 @@ async def current_principal(request: Request) -> Principal | None:
 async def principal_is_active(user_resource: Any, principal: Principal) -> bool:
     """Whether ``principal`` is a live user in the configured principal store.
 
-    The shared principal-store check: with no ``user_resource`` every principal
-    is accepted (the credential-only posture), and a principal with no id (a
-    bare service principal) has nothing to look up. With a store, the id must be
-    found and pass its ``enabled`` flag — so a disabled user is rejected however
-    their credential was issued. A store row that does not carry an ``enabled``
-    attribute is treated as enabled (an identity-only store), while a *missing*
-    row is a rejection. The lookup runs over a **fresh ctx**, so it never adopts
-    (or is adopted by) the request's storage.
-
-    Every authenticator that can resolve a stored principal uses this — the
-    API-key and OAuth methods share one implementation so the store stays
-    authoritative over any external credential.
+    With no ``user_resource`` every principal is accepted (the credential-only
+    posture), and a principal with no id has nothing to look up. With a store,
+    the id must be found and pass its ``enabled`` flag, so a disabled user is
+    rejected however their credential was issued. A row without an ``enabled``
+    attribute is treated as enabled; a *missing* row is a rejection. The lookup
+    runs over a **fresh ctx**, so it never adopts the request's storage.
     """
     if user_resource is None or principal.id is None:
         return True

@@ -1,9 +1,7 @@
 """The ``Missing`` sentinel — the single unset-value marker in the framework.
 
-No ``__init__.py``: this is the bottom layer, a dependency-free leaf
-that every other layer may import. Keeping the sentinel here (rather than in
-``core``) means ``util`` imports no project package, so the layer ranks
-are a clean ``util < core < {sql, http, config, cache, encryption}``.
+It lives in ``util`` (rather than ``core``) so that the bottom layer imports no
+project package.
 """
 
 from __future__ import annotations
@@ -14,13 +12,10 @@ from typing import Any, ClassVar
 class Missing:
     """Singleton sentinel marking an unset value, usable in a type annotation.
 
-    Identity comparison (``value is MISSING``) is the supported test. The
-    class carries a Pydantic core schema so ``UUID | Missing`` (or any other
-    ``ann | Missing`` union) validates and serializes: only the singleton is
-    accepted as a value, and it dumps to ``null`` so a sentinel never reaches
-    the wire. This is what the older framework-level ``MISSING`` lacked —
-    without a core schema, ``UUID | Missing`` raised
-    ``PydanticSchemaGenerationError``.
+    Identity comparison (``value is MISSING``) is the supported test. The class
+    carries a Pydantic core schema so an ``ann | Missing`` union validates and
+    serializes: only the singleton is accepted, and it dumps to ``null`` so a
+    sentinel never reaches the wire.
     """
 
     _instance: ClassVar[Missing | None] = None

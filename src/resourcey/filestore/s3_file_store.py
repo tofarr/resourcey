@@ -1,33 +1,25 @@
 """``S3FileStore`` -- file bytes in an S3 bucket, uploaded through the API (issue #117, #158).
 
-The production medium. ``create`` is a direct ``multipart/form-data`` upload
-to the API (case 2 of the upload-design discussion, not a pre-signed-URL
-handshake), so the API process proxies the bytes to S3 via ``put_object`` --
-the trade-off deliberately made in exchange for the bytes genuinely existing
-by the time ``create`` returns (so a :class:`~resourcey.triggers.triggered_resource.TriggeredResource`
-fires only after a real upload). ``presign_get`` stays a purely local SigV4
-computation -- no network round trip -- so **download** still transfers
-directly against S3, unaffected by this trade-off.
+The production medium. ``create`` is a direct ``multipart/form-data`` upload to
+the API, so the API process proxies the bytes to S3 via ``put_object`` — the
+trade-off deliberately made in exchange for the bytes genuinely existing by the
+time ``create`` returns. ``presign_get`` stays a purely local SigV4 computation,
+so **download** still transfers directly against S3.
 
 ``name`` / ``checksum`` are stored as S3 object **user metadata**
-(``x-amz-meta-*``), readable only via ``HeadObject`` (i.e. only through
-``head``), never through ``ListObjectsV2`` (``list_objects``), which is why
-``list_objects`` below reports ``name`` / ``content_type`` / ``checksum`` as
-``None``: it is the cheapest common contract across the three media, made
-explicit rather than letting this medium be incidentally richer than it can
-actually list.
+(``x-amz-meta-*``), readable only via ``HeadObject``. ``list_objects`` therefore
+reports them as ``None``: it is the cheapest common contract across the three
+media, made explicit rather than letting this medium be incidentally richer than
+it can actually list.
 
-A single ``put_object`` call still means the upload is bound by
-``S3_MAX_PUT_BYTES`` (5 GiB, S3's own single-``PUT`` cap); streaming the
-upload straight into S3's multipart-upload API (so neither this process nor
-S3 ever needs the whole object in memory at once) is valuable future work,
-deliberately out of scope here.
+A single ``put_object`` call bounds the upload to ``S3_MAX_PUT_BYTES`` (S3's own
+single-``PUT`` cap); streaming into S3's multipart-upload API is valuable future
+work, deliberately out of scope.
 
-``boto3`` (and the ``s3`` extra, ``resourcey[s3]``) is imported **lazily**,
-only when a real client is built, so ``filestore`` imports cleanly without
-it. An explicit ``client=`` is the escape hatch: tests and callers may inject a
-stub exposing ``put_object`` / ``get_object`` / ``head_object`` /
-``delete_object`` / ``list_objects_v2`` / ``generate_presigned_url``.
+``boto3`` is imported **lazily**, only when a real client is built. An explicit
+``client=`` is the escape hatch: tests may inject a stub exposing
+``put_object`` / ``get_object`` / ``head_object`` / ``delete_object`` /
+``list_objects_v2`` / ``generate_presigned_url``.
 
 This module imports no code outside the framework.
 """
@@ -58,12 +50,8 @@ _META_CHECKSUM = "checksum"
 class S3FileStore(FileStore):
     """An S3-backed medium with native SigV4 pre-signed URLs.
 
-    Attributes:
-        bucket: The bucket bytes are stored in.
-        region: The bucket's region (optional; boto3's own resolution applies).
-        endpoint_url: A custom endpoint (e.g. MinIO); optional.
-        prefix: A key prefix (an S3-style partition) prepended to every key.
-        access_key_id / secret_access_key: Optional explicit credentials.
+    ``prefix`` is an S3-style partition prepended to every key;
+    ``endpoint_url`` supports a custom endpoint (e.g. MinIO).
     """
 
     bucket: str
@@ -148,11 +136,8 @@ class S3FileStore(FileStore):
     async def list_objects(self, *, after: str | None = None, limit: int) -> list[StoredObject]:
         """List via ``ListObjectsV2``, ascending by key (S3's native order).
 
-        ``name`` / ``content_type`` / ``checksum`` are reported as ``None``:
-        ``ListObjectsV2`` genuinely cannot return per-object user metadata (only
-        ``HeadObject`` can, at one call per key), so a list result here matches
-        every other medium's *cheapest common contract* rather than this one
-        being incidentally richer.
+        ``name`` / ``content_type`` / ``checksum`` are ``None``: only
+        ``HeadObject`` can return per-object user metadata.
         """
         client = self._get_client()
         kwargs: dict[str, Any] = {"Bucket": self.bucket, "MaxKeys": limit}
@@ -240,7 +225,7 @@ class S3FileStore(FileStore):
         return f"{self.prefix.strip('/')}/{key}"
 
     def _get_client(self) -> Any:
-        """The S3 client, building one lazily and raising an actionable error without ``boto3``."""
+        """The S3 client, built lazily (an actionable error without ``boto3``)."""
         if self._client is None:
             self._client = _build_client(self)
         return self._client

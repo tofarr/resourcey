@@ -3,25 +3,20 @@
 OAuth is used for two distinct jobs:
 
 * **inbound** — accept a credential issued by an external identity provider and
-  authenticate a caller to *us* (:class:`~resourcey.auth.auth_oauth.OAuthAuthenticator`);
+  authenticate a caller to *us*;
 * **outbound** — call an external service (GitHub, Google APIs, Slack) on a
-  user's (or the service's) behalf, where the provider is *not* our IdP and the
-  resulting token is an **outbound credential**.
+  user's behalf, where the resulting token is an **outbound credential**.
 
 The two paths stay distinct in code — inbound *verifies*, outbound *supplies* —
 but share one client-config resource and one token service, so the refresh
 lifecycle is implemented once.
 
 :class:`CredentialProvider` is the public surface an app calls before an
-outbound request: ``async access_token(principal, client) -> str``. The concrete
-:class:`OAuthCredentialProvider` implements it over the token service (returning
-a still-valid stored token, refreshing under the lease if stale) and performs the
-authorization-code / refresh exchanges at the provider's token endpoint. If the
-provider's token is itself a JWT we also accept inbound (the common "OIDC
-provider that is also an API" case), one client row serves both.
+outbound request: ``async access_token(principal, client) -> str``.
+:class:`OAuthCredentialProvider` implements it over the token service and
+performs the authorization-code / refresh exchanges.
 
-The HTTP client is injected (a duck-typed ``post`` returning an object with
-``json()``), so the exchanges are testable without a network.
+The HTTP client is injected, so the exchanges are testable without a network.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
 """
@@ -45,17 +40,8 @@ from resourcey.core.errors import InvalidInputError
 class TokenResponse(BaseModel):
     """A provider token-endpoint response, normalised.
 
-    Attributes:
-        access_token: The access token (plaintext).
-        id_token: The OIDC ID token (a JWT), when the provider returned one —
-            requesting the ``openid`` scope is what makes it appear. This, not
-            ``access_token``, is what OIDC guarantees carries ``iss`` / ``sub`` /
-            ``aud`` / ``exp`` for establishing *who signed in*; an access token's
-            format and contents are provider-defined and are frequently opaque.
-        refresh_token: The refresh token, if the provider returned one.
-        expires_at: When the access token expires (derived from ``expires_in``).
-        refresh_expires_at: The provider-side refresh-token life, if given.
-        scope: The granted scopes, if returned.
+    ``id_token`` is what OIDC guarantees carries ``iss`` / ``sub`` / ``aud`` /
+    ``exp``; an access token's format is provider-defined and often opaque.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -148,14 +134,8 @@ def authorize_url(
 ) -> str:
     """Build a provider's authorization URL from a client row / config entry.
 
-    ``response_type=code`` with the client id, redirect URI, and state; the
-    requested scopes are the client's configured scopes plus ``extra_scopes``
-    (de-duplicated, order-preserving), space-joined, and PKCE parameters are
-    added when a challenge is supplied. The interactive login route requests
-    ``openid`` through ``extra_scopes`` so the provider includes an ID token in
-    the token response (the BFF callback needs it to resolve identity); the
-    outbound-only path requests none. Raises
-    :class:`~resourcey.core.errors.InvalidInputError` when the client has no
+    Scopes are the client's configured ones plus ``extra_scopes``;
+    ``code_challenge`` adds PKCE parameters. Raises when the client has no
     ``auth_url``.
     """
     if not getattr(client, "auth_url", None):
@@ -179,12 +159,8 @@ def authorize_url(
 class OAuthCredentialProvider(CredentialProvider):
     """The concrete provider over the token service and a duck-typed HTTP client.
 
-    Args:
-        token_service: The service that stores / refreshes the token pair.
-        http_post: A callable ``(url, data, headers) -> response`` used for the
-            token exchanges. The response object must expose ``json()`` and
-            ``raise_for_status()``. Injected so the exchanges are testable
-            without a network; production wires an ``httpx``-based poster.
+    ``http_post`` is a ``(url, data, headers) -> response`` callable whose
+    response exposes ``json()`` and ``raise_for_status()``.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

@@ -1,29 +1,18 @@
 """``MongoClientManager`` — build and own the clients behind ``MongoConfig`` (issue #80).
 
-The manager turns a :class:`~resourcey.mongo.mongo_config.MongoConfig` into
-``(client, database_name)`` pairs on demand: a client is built **lazily** on
-first use of a connection and cached for the manager's life, and
-:meth:`__aexit__` closes every client it built. Entering is an **idempotent**
-marker, so a fresh ``TestClient`` per test case against one app works without an
-error; exiting clears the client cache so the next enter (or first use)
-rebuilds.
+Clients are built **lazily** on first use of a connection and cached for the
+manager's life; :meth:`__aexit__` closes every client it built. Entering is an
+**idempotent** marker, so a fresh ``TestClient`` per test case against one app
+works.
 
-It is the :class:`~resourcey.sql.session_manager.SqlSessionManager` analogue
-and extends the same storage-ownership story: a resource resolves its client
-through the manager, the manager owns the client's lifetime, and using an
-un-entered manager raises so a caller who forgets ``async with manifest`` fails
-loudly instead of leaking clients nobody closes.
+It is the :class:`~resourcey.sql.session_manager.SqlSessionManager` analogue: a
+resource resolves its client through the manager, the manager owns the client's
+lifetime, and using an un-entered manager raises.
 
 An ``embedded://<db>`` (or bare ``embedded``) URL builds the in-process
 :class:`~resourcey.mongo.embedded.AsyncEmbeddedClient`; any other URL builds a
 real ``motor`` client, and a missing ``motor`` raises an actionable
-:class:`ImportError` naming the ``resourcey[mongodb]`` extra rather than an
-opaque ``ModuleNotFoundError``.
-
-A module-level :func:`get_mongo_client_manager` (configured from
-:meth:`MongoConfig.get_instance`) is the global accessor ``MongoResource`` uses
-by default; :func:`clear_mongo_client_manager_cache` is the test-only reset,
-mirroring the SQL manager and ``BaseConfig.clear_instance_cache``.
+``ImportError`` naming the ``resourcey[mongodb]`` extra.
 
 This module imports no code outside the framework.
 """
@@ -55,9 +44,8 @@ def _require_motor() -> Any:
 def _build_embedded_client() -> Any:
     """Build the in-process ``mongomock`` client (imported lazily).
 
-    ``mongomock`` is a dev-only dependency (the embedded path is for tests and
-    local development), so importing it here keeps ``mongo`` import-safe when
-    only the ``mongodb`` extra is installed.
+    ``mongomock`` is a dev-only dependency, so importing it here keeps ``mongo``
+    import-safe when only the ``mongodb`` extra is installed.
     """
     from resourcey.mongo.embedded import AsyncEmbeddedClient
 
@@ -69,8 +57,7 @@ class MongoClientManager:
 
     Args:
         config: The named connections to serve. A lookup with no name uses the
-            first; an unknown name or an empty list raises
-            :class:`~resourcey.core.errors.ResourceyConfigError`.
+            first; an unknown name or an empty list raises.
     """
 
     def __init__(self, config: MongoConfig) -> None:
@@ -168,7 +155,7 @@ _cached_manager: MongoClientManager | None = None
 def get_mongo_client_manager() -> MongoClientManager:
     """The process-wide manager, built from ``MongoConfig.get_instance()``.
 
-    The instance is cached (clients are still built lazily per use); call
+    Cached (clients are still built lazily per use); call
     :func:`clear_mongo_client_manager_cache` to pick up a different config.
     """
     global _cached_manager
@@ -178,10 +165,6 @@ def get_mongo_client_manager() -> MongoClientManager:
 
 
 def clear_mongo_client_manager_cache() -> None:
-    """Drop the cached process-wide manager so the next call rebuilds it.
-
-    Test-only: clients are closed by the manager's own ``__aexit__``, so this
-    only forgets a manager built against a stale config.
-    """
+    """Drop the cached process-wide manager so the next call rebuilds it (test-only)."""
     global _cached_manager
     _cached_manager = None

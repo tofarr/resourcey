@@ -1,41 +1,24 @@
 """``Channel`` — the publish/fan-out seam a realtime publisher delivers through (issue #17).
 
-A :class:`Channel` carries :class:`~resourcey.realtime.realtime_event.ResourceEvent`
-values from the process that handled a write to every subscriber, wherever it
-lives. It is a :class:`~resourcey.util.models.DiscriminatedUnionMixin`, so a
-deployment selects a concrete channel by ``kind`` (the class name) with no code
-change -- exactly like every other pluggable seam (``DependencyBuilder``,
-``FileStore``, ``PolicyResolver``).
+A :class:`Channel` carries ``ResourceEvent`` values from the process that handled
+a write to every subscriber. It is a ``DiscriminatedUnionMixin``, so a deployment
+selects a concrete channel by ``kind`` with no code change.
 
-Two implementations:
+Two implementations: :class:`InMemoryChannel` (the single-process default) and
+``RedisChannel`` (clustered, over ``redis.asyncio`` pub/sub, imported lazily).
 
-* :class:`InMemoryChannel` -- the single-process default and the proof the seam
-  is transport-agnostic: a subscriber in the same process receives every
-  published event (an in-process fan-out). It is the dev / test path.
-* :class:`~resourcey.realtime.realtime_redis_channel.RedisChannel` -- the
-  clustered path over ``redis.asyncio`` pub/sub, imported lazily behind the
-  ``resourcey[redis]`` extra so ``realtime`` imports without the driver.
-
-The publisher is :class:`~resourcey.triggers.redis_trigger.RedisTrigger`
-despite the name of that concrete channel -- the *trigger* seam fires the
-publish after a successful write
-(:class:`~resourcey.triggers.triggered_service.TriggeredService`), and simply
-forwards the built event to whichever ``Channel`` it was configured with;
-``Channel`` itself knows nothing about triggers. The **same instance** must be
-passed to the publishing trigger and to
-:func:`~resourcey.realtime.realtime_routes.add_realtime` so a write in this
-process reaches this process's subscribers.
+The publisher is ``RedisTrigger`` despite the name: the *trigger* seam fires the
+publish after a successful write and forwards the built event to whichever
+``Channel`` it was configured with; ``Channel`` itself knows nothing about
+triggers. The **same instance** must be passed to the publishing trigger and to
+``add_realtime``.
 
 A channel is its own async context manager (entered through the manifest's
-``managers`` slot), so a channel that owns a client ties that client's
-lifetime to the app exactly as a ``SqlSessionManager`` / ``MongoClientManager``
-does.
+``managers`` slot), so a channel that owns a client ties that client's lifetime
+to the app.
 
-Delivery is **at-most-once** -- pub/sub drops an event for a subscriber that is
-down or briefly disconnected, and there is no replay. The reconnect reconcile
-is a normal REST ``search`` (with a cursor / ``updated_at__gt=``), which the
-framework already serves; the push channel is a latency optimisation, not the
-source of truth.
+Delivery is **at-most-once**; the reconnect reconcile is a normal REST
+``search``.
 
 This module is part of ``resourcey.realtime``; it imports only lower framework
 layers.
@@ -51,19 +34,12 @@ from typing import Any
 from resourcey.realtime.realtime_event import ResourceEvent
 from resourcey.util.models import DiscriminatedUnionMixin
 
-# The per-subscriber buffer bound for the in-memory channel. Drop-oldest on
-# overflow, so one slow subscriber cannot grow an unbounded server-side queue.
+# The per-subscriber buffer bound for the in-memory channel.
 DEFAULT_QUEUE_MAXSIZE = 100
 
 
 class Channel(DiscriminatedUnionMixin, ABC):
-    """The abstract publish / subscribe seam, discriminated by ``kind``.
-
-    A concrete channel implements :meth:`publish` and :meth:`subscribe`; both
-    are async, so a channel may own a network client. It is its own async
-    context manager, so the client lifecycle is tied to the app through the
-    manifest's ``managers`` slot.
-    """
+    """The abstract publish / subscribe seam, discriminated by ``kind``."""
 
     async def __aenter__(self) -> Channel:
         """Open the channel's client / connection (override to do real work)."""
@@ -77,36 +53,25 @@ class Channel(DiscriminatedUnionMixin, ABC):
     async def publish(self, event: ResourceEvent) -> None:
         """Deliver ``event`` to every subscriber (at-most-once, unordered).
 
-        Called by the publishing trigger only after the write it reports on
-        has committed (a rolled-back write never reaches a trigger -- see
-        ``resourcey.triggers.triggered_service``).
+        Called only after the write it reports on has committed.
         """
 
     @abstractmethod
     def subscribe(self) -> AsyncIterator[ResourceEvent]:
         """An async iterator of events published to this channel.
 
-        A subscriber iterates this; each subscriber gets its own iterator, so
-        several WebSocket clients fan out independently. The iterator ends
-        when the channel is closed.
+        Each subscriber gets its own iterator, so several WebSocket clients fan
+        out independently.
         """
 
 
 class InMemoryChannel(Channel):
     """The single-process default: an in-process fan-out of published events.
 
-    Each :meth:`subscribe` call returns a fresh :class:`asyncio.Queue`, and
-    :meth:`publish` offers the event to every live queue. The queue is
-    **bounded** (:data:`DEFAULT_QUEUE_MAXSIZE`), and a full queue drops its
-    **oldest** event (drop-oldest) so one slow subscriber cannot grow an
-    unbounded server-side buffer -- the dropped event is the one a client would
-    reconcile anyway with a REST ``search``.
-
-    It is the dev / test path: a write in this process reaches a subscriber in
-    this process with no external broker.
+    Each subscriber gets a fresh **bounded** queue that drops its **oldest**
+    event on overflow, so one slow subscriber cannot grow an unbounded buffer.
     """
 
-    # The per-subscriber buffer bound. Drop-oldest on overflow.
     queue_maxsize: int = DEFAULT_QUEUE_MAXSIZE
 
     def __init__(self, **data: Any) -> None:

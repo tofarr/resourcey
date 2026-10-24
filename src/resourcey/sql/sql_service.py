@@ -1,17 +1,13 @@
 """``SqlService`` — the action layer of the SQL backend (issue #78).
 
 The service holds the call-scoped ``ctx`` and the async session factory. On
-enter it adopts storage already present in ``ctx`` (owned by whoever put it
-there) or opens its own session and owns it; on exit it commits and closes only
-what it opened — the storage-ownership rule from ``core``.
+enter it adopts storage already present in ``ctx`` or opens its own session and
+owns it; on exit it commits and closes only what it opened.
 
-``search`` implements keyset (seek) cursor pagination ordered by the identifier
-field by default, or by a validated ``sort`` field (with the identifier as a
-stable tie-breaker) when one is requested. The cursor is encrypted
-(tamper-proof) by an injected
-:class:`~resourcey.encryption.encryption_service.EncryptionService` and
-encodes the sort it was built for, so a cursor reused under a different sort is
-rejected rather than applied against the wrong column.
+``search`` implements keyset cursor pagination ordered by the identifier by
+default, or by a validated ``sort`` field (with the identifier as a stable
+tie-breaker). The cursor encodes the sort it was built for, so a cursor reused
+under a different sort is rejected rather than applied against the wrong column.
 
 This module imports no code outside the framework.
 """
@@ -54,13 +50,7 @@ K = TypeVar("K")
 
 
 class SqlService(Service[T, K]):
-    """The standard actions over a SQL table, with keyset cursor pagination.
-
-    Holds the call-scoped ``ctx`` and the session factory. On enter it adopts
-    storage already present in ``ctx`` (owned by whoever put it there) or opens
-    its own session and owns it; on exit it commits and closes only what it
-    opened.
-    """
+    """The standard actions over a SQL table, with keyset cursor pagination."""
 
     def __init__(
         self,
@@ -137,14 +127,11 @@ class SqlService(Service[T, K]):
     async def update(self, payload: T, *, condition: SearchFilter[Any] | None = None) -> T | None:
         """Apply an update DTO (whose ``id`` field names the row); return the DTO or ``None``.
 
-        Supplied (non-``MISSING``) fields are written; omitted fields with an
-        update default take it, and an omitted field with no update default is
+        Supplied fields are written; an omitted field with no update default is
         left unchanged (PATCH semantics). The id is never written.
 
-        ``condition`` is an optional :class:`SearchFilter` tree the stored row
-        must satisfy for the write to apply. ``None`` means no row was written —
-        an absent id or a failed condition — so the two are indistinguishable
-        and a failed condition never leaks that the row exists.
+        ``None`` means no row was written — an absent id or a failed
+        ``condition`` — so the two are indistinguishable.
         """
         session = self._active_session()
         table = self._resource.table
@@ -175,10 +162,8 @@ class SqlService(Service[T, K]):
     async def delete(self, id: K, *, condition: SearchFilter[Any] | None = None) -> bool:  # noqa: A002
         """Delete by id; return whether a row was deleted.
 
-        ``condition`` is an optional :class:`SearchFilter` tree the stored row
-        must satisfy for the delete to apply. ``False`` means no row was deleted
-        — an absent id or a failed condition — so the two are indistinguishable
-        and a failed condition never leaks that the row exists.
+        ``False`` means no row was deleted — an absent id or a failed
+        ``condition`` — so the two are indistinguishable.
         """
         session = self._active_session()
         table = self._resource.table
@@ -198,14 +183,9 @@ class SqlService(Service[T, K]):
     ) -> Page[T]:
         """Return up to ``limit`` rows, with keyset pagination via ``cursor``.
 
-        ``sort_order`` is the validated ordering (``None`` for the default
-        identifier order); the identifier is appended as a stable tie-breaker by
-        the sort converter. ``search_filter`` is a standard
-        :class:`SearchFilter` tree (an object filter is lowered first) and is
-        pushed into the ``WHERE`` clause before the page is taken, so a filtered
-        keyset page stays correct. The next cursor is derived from the *same*
-        ``sort_order`` the page was ordered and sought by, so it can never be
-        rejected by the predicate that follows it.
+        The filter is pushed into the ``WHERE`` clause before the page is taken,
+        and the next cursor is derived from the *same* ``sort_order`` the page
+        was ordered and sought by.
         """
         session = self._active_session()
         table = self._resource.table
@@ -243,11 +223,8 @@ class SqlService(Service[T, K]):
     ) -> Any:
         """Push ``search_filter`` into ``stmt``'s WHERE clause (all-or-nothing).
 
-        ``search_filter`` is a standard filter tree; an object filter lowers
-        itself first, so a custom filter needs no backend handler. Conversion is
-        all-or-nothing per filter: an unconvertible node raises
-        :class:`UnsupportedFilterError` unless the resource opted into the in-memory
-        iteration fallback (which needs the live session), because silently
+        An unconvertible node raises :class:`UnsupportedFilterError` unless the
+        resource opted into the in-memory iteration fallback, because silently
         skipping a filter could leak every row of a permission scope.
         """
         if search_filter is None:
@@ -265,10 +242,9 @@ class SqlService(Service[T, K]):
     async def _apply_filters_by_iteration(self, stmt: Any, standard: Any) -> Any:
         """The opt-in fallback: materialise matching ids and constrain to them.
 
-        Applies ``matches`` in Python over the resource's rows, then restricts
-        the statement to the surviving identifiers. This is only used when a
-        resource explicitly sets ``allow_filter_iteration = True`` — an
-        unbounded scan behind a public GET is otherwise a DoS.
+        Only used when a resource explicitly sets
+        ``allow_filter_iteration = True`` — an unbounded scan behind a public GET
+        is otherwise a DoS.
         """
         session = self._active_session()
         rows = (await session.execute(select(self._resource.table))).mappings().all()
@@ -285,11 +261,10 @@ class SqlService(Service[T, K]):
     ) -> Any:
         """Push a write's ``condition`` into ``stmt``'s WHERE clause.
 
-        Unlike :meth:`_apply_filters`, the in-memory iteration fallback is
-        **refused** even when the resource opted into it: a write must decide
-        atomically, and materialising matching ids and then writing would open a
-        TOCTOU window (and scan unboundedly). An unconvertible condition raises
-        :class:`UnsupportedFilterError` so the caller fails closed.
+        Unlike :meth:`_apply_filters`, the in-memory fallback is **refused** even
+        when the resource opted into it: materialising ids and then writing would
+        open a TOCTOU window. An unconvertible condition raises, so the caller
+        fails closed.
         """
         standard = condition.create_standard_filter()
         converter = self._resource.build_filter_converter(session)
@@ -308,15 +283,10 @@ class SqlService(Service[T, K]):
     async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply each :class:`Edit`; results align positionally with ``edits``.
 
-        A create / update yields the resulting DTO, a delete yields ``None``
-        (nothing to return), and a miss (an absent id on update / delete) also
-        yields ``None``.
-
-        A create / update / delete is refused with :class:`InvalidInputError`
-        unless the resource *declares* the matching action, so a batch can never
-        reach an action the resource does not expose (the transport narrows the
-        body the same way; this is the backend's own guard for direct service
-        callers).
+        A create / update yields the resulting DTO; a delete or a miss yields
+        ``None``. A node is refused unless the resource *declares* the matching
+        action, so a batch can never reach an action the resource does not
+        expose.
         """
         supported = self._resource.get_supported_actions()
         results: list[T | None] = []
@@ -353,9 +323,7 @@ class SqlService(Service[T, K]):
         """The keyset ``WHERE`` clause for ``cursor``, bound to the request's sort.
 
         A cursor built for a different ``(sort field, direction)`` is rejected
-        rather than applied against the wrong column. The sort-order fields
-        (``attribute`` / ``descending``) are read through ``getattr`` so a
-        declared non-``AttrSortOrder`` node that carries them still binds.
+        rather than applied against the wrong column.
         """
         cursor_field, cursor_ascending, sort_key, id_value = self._decode(cursor)
         attribute = getattr(sort_order, "attribute", None)
@@ -384,13 +352,7 @@ class SqlService(Service[T, K]):
         )
 
     def _decode(self, cursor: str) -> tuple[str | None, bool, Any, Any]:
-        """Decrypt and validate a cursor, mapping malformed input to a 400.
-
-        A garbage or tampered cursor makes ``decrypt_value`` raise ``ValueError``
-        (and a payload missing a key makes ``json`` / the tuple unpack raise); both
-        are client errors, not server faults, so they surface as
-        :class:`InvalidInputError`.
-        """
+        """Decrypt and validate a cursor, mapping malformed input to a 400."""
         try:
             return decode_cursor(self._encryption(), cursor)
         except (ValueError, KeyError, TypeError) as exc:
@@ -399,7 +361,7 @@ class SqlService(Service[T, K]):
     def _next_cursor(self, row: Any, sort_order: SortOrder[Any] | None) -> str:
         """Encode the cursor pointing past ``row`` under the resolved ``sort_order``.
 
-        The sort state is read from ``sort_order`` (not the raw request) so the
+        The sort state is read from ``sort_order``, not the raw request, so the
         emitted cursor always matches the ordering the page was built with.
         """
         id_column = self._resource.id_column
@@ -433,10 +395,8 @@ class SqlService(Service[T, K]):
     def _to_columns(self, data: dict[str, Any]) -> dict[str, Any]:
         """Rename DTO field (attribute) keys to their table column names.
 
-        A :class:`~pydantic.SecretStr` value is unwrapped to its plaintext at this
-        storage boundary: the DBAPI cannot bind a ``SecretStr``, and the stored
-        value is the secret's at-rest form (a digest, or ciphertext when the
-        caller encrypted it).
+        A ``SecretStr`` value is unwrapped at this storage boundary: the DBAPI
+        cannot bind one.
         """
         return {
             self._resource._column_for_attr.get(name, name): _unbind_secret(value)
@@ -471,10 +431,9 @@ def _by_id(id_column: Any, value: Any) -> Any:
 
 
 def _rowcount(result: Any) -> int:
-    """The affected-row count of an ``UPDATE`` / ``DELETE`` (typed via ``CursorResult``).
+    """The affected-row count of an ``UPDATE`` / ``DELETE``.
 
     SQLAlchemy's generic ``Result`` does not declare ``rowcount``; only the
-    DML-returning ``CursorResult`` does. Narrowing here keeps the call sites
-    readable and mypy strict-clean.
+    DML-returning ``CursorResult`` does.
     """
     return int(cast("CursorResult[Any]", result).rowcount)

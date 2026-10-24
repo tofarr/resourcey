@@ -1,21 +1,18 @@
 """Embedded async Mongo client for tests and local development (issue #80).
 
 ``motor`` cannot wrap a ``mongomock`` client directly (it interprets the client
-as a host string). This module provides :class:`AsyncEmbeddedClient` — an async
-client backed by an in-process ``mongomock`` server that exposes the subset of
-the ``motor`` client/database/collection API that
-:class:`~resourcey.mongo.mongo_service.MongoService` uses.
+as a host string). :class:`AsyncEmbeddedClient` exposes the subset of the
+``motor`` client / database / collection API that
+:class:`~resourcey.mongo.mongo_service.MongoService` uses, backed by an
+in-process ``mongomock`` server.
 
 It is selected by a connection URL of ``embedded://<db>`` (or the bare
-``embedded`` marker), so the example and the tests need no external server. No
-external process is started; the client is not a real ``motor`` client, but it
-satisfies the duck-typed interface the service expects.
+``embedded`` marker), so the example and the tests need no external server.
 
 The cursor delegates ``sort`` / ``limit`` to the underlying ``mongomock`` cursor
-rather than re-sorting in Python, so Mongo's per-type NULL ordering (NULLs first
-ascending, last descending) and BSON comparison rules are reproduced exactly —
-which is what the keyset predicate and the in-memory ``compare`` reference must
-agree with.
+rather than re-sorting in Python, so Mongo's NULL ordering and BSON comparison
+rules are reproduced exactly — which the keyset predicate and the in-memory
+``compare`` reference must agree with.
 
 This module imports no code outside the framework.
 """
@@ -117,8 +114,7 @@ class AsyncEmbeddedClient:
     """Embedded async Mongo client backed by ``mongomock``.
 
     Drop-in for ``motor.motor_asyncio.AsyncIOMotorClient`` in tests and local
-    development. Exposes ``__getitem__`` to access a database, which in turn
-    exposes ``__getitem__`` to access a collection — matching motor's API.
+    development.
     """
 
     def __init__(self, *, tz_aware: bool = True) -> None:

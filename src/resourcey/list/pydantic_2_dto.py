@@ -1,29 +1,22 @@
 """Infer a DTO declaration from a plain Pydantic model (issue #116).
 
-The framework is DTO-first internally: a backend serves a
-:class:`~resourcey.core.dto.DTO` declaration and the six REST models derive
-from it. A plain Pydantic model is *not* a DTO, so the list backend needs a
-``pydantic_2_dto`` — the read-model analogue of
-:func:`~resourcey.sql.sqlalchemy_2_dto.sqlalchemy_2_dto`. It maps each
-Pydantic field (annotation + ``Field`` metadata) to a DTO field, keeping the
-declaration order and nullability, and carries the identifier across.
+A backend serves a :class:`~resourcey.core.dto.DTO` declaration, so the list
+backend needs the read-model analogue of ``sqlalchemy_2_dto``. It maps each
+Pydantic field to a DTO field, keeping declaration order and nullability, and
+carries the identifier across.
 
 A model author may override the inferred projection by attaching a
-:class:`~resourcey.core.dto.DtoField` to a field — either via an
-``Annotated`` tag or via ``Field(json_schema_extra={"dto_field": ...})``::
+:class:`~resourcey.core.dto.DtoField` to a field — either via an ``Annotated``
+tag or via ``Field(json_schema_extra={"dto_field": ...})``::
 
     class Country(BaseModel):
         id: str
         name: str
         internal_code: Annotated[str, DtoField(in_read_response=False)]
 
-The explicit ``DtoField`` is honoured verbatim (the ``core`` conventions
-leave it alone), so a model can hide a field from the read model exactly as a
-SQL column does via ``info["dto_field"]``. A field with no explicit
-``DtoField`` is left bare so the ``core`` conventions apply (the
-identifier's immutability, the ``created_at`` / ``updated_at`` rules); a list
-resource is read-only, so any create / update defaults those conventions emit
-are simply unused.
+A field with no explicit ``DtoField`` is left bare so the ``core`` conventions
+apply; a list resource is read-only, so any create / update defaults those
+conventions emit are unused.
 
 This module imports no code outside the framework.
 """
@@ -48,17 +41,9 @@ def pydantic_2_dto(
 ) -> type[DTO]:
     """Infer a DTO declaration from a plain Pydantic model.
 
-    The DTO's fields mirror the model's fields in declaration order. A field
-    carrying an explicit :class:`DtoField` (an ``Annotated`` tag or
-    ``Field(json_schema_extra={"dto_field": ...})``) uses it verbatim; every
-    other field is declared bare so the ``core`` conventions (identifier
-    immutability, the timestamp rules) apply.
-
-    Args:
-        model: A Pydantic ``BaseModel`` subclass.
-        name: The DTO class name (defaults to the model's name).
-        id_field_name: The identifier field (defaults to ``"id"``). The named
-            field must exist or ``DTO`` raises at declaration time.
+    A field carrying an explicit :class:`DtoField` uses it verbatim; every other
+    field is declared bare so the ``core`` conventions apply. The named
+    ``id_field_name`` must exist or ``DTO`` raises at declaration time.
     """
     annotations: dict[str, Any] = {}
     explicit: dict[str, DtoField] = {}
@@ -85,9 +70,8 @@ def pydantic_2_dto(
 def _explicit_dto_field(field: FieldInfo) -> DtoField | None:
     """The author-supplied ``DtoField`` for a field, or ``None``.
 
-    An ``Annotated[T, DtoField(...)]`` tag wins; otherwise a
-    ``Field(json_schema_extra={"dto_field": ...})`` entry is read. The two are
-    equivalent ways to express the same intent.
+    An ``Annotated[T, DtoField(...)]`` tag wins over a
+    ``Field(json_schema_extra={"dto_field": ...})`` entry.
     """
     for meta in field.metadata:
         if isinstance(meta, DtoField):

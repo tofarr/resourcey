@@ -1,14 +1,13 @@
 """``python -m resourcey tasks …`` — the background-task entry point (issue #15).
 
-Loads an app's ``Manifest`` by a uvicorn-style ``module:attr`` spec and can:
-
-* ``list`` every task with its cron schedule and enabled flag;
-* ``run`` one task by name, or all of them, **once**.
+Loads an app's ``Manifest`` by a uvicorn-style ``module:attr`` spec and can
+``list`` every task with its schedule and enabled flag, or ``run`` one task by
+name (or all of them) **once**.
 
 A one-shot ``run`` does **not** enter the manifest's own lifespan, so the
 scheduler's periodic loop never starts. It does enter the manifest's other
-managers (so a SQL / Mongo-backed task finds a live engine), then runs and
-exits — the external-cron / ``kubectl`` path.
+managers (so a SQL / Mongo-backed task finds a live engine) — the external-cron /
+``kubectl`` path.
 
 The framework does no ``.env`` loading of its own, so run it as
 ``uv run --env-file .env python -m resourcey tasks list app:manifest``.
@@ -26,8 +25,7 @@ from resourcey.util.import_paths import resolve_import_path
 if TYPE_CHECKING:
     import argparse
 
-# The manifest spec is ``module:attr`` (uvicorn's convention); ``resolve_import_path``
-# also accepts ``module.attr``, so both forms work.
+# ``resolve_import_path`` accepts ``module:attr`` and ``module.attr``.
 _MANIFEST_HELP = "The app's manifest as 'module:manifest' (e.g. 'myapp.app:manifest')."
 
 
@@ -82,8 +80,8 @@ async def _run(args: argparse.Namespace) -> int:
         print(format_tasks(scheduler))
         return 0
 
-    # A one-shot run: enter the manifest's managers *except* the scheduler, so a
-    # storage-backed task has a live engine but the periodic loop stays dormant.
+    # Enter every manager except the scheduler, so a storage-backed task has a
+    # live engine but the periodic loop stays dormant.
     async with AsyncExitStack() as stack:
         for manager in manifest.managers:
             if manager is scheduler:

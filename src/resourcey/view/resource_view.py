@@ -1,11 +1,9 @@
 """``ResourceView`` - a configured, narrowing wrapper over another resource.
 
-A view holds an inner :class:`~resourcey.core.resource.Resource` and exposes
-a **customized view** of it: a field-projection override (which fields appear in
-each of the six REST shapes) and an action override (which actions the outside
-world may reach). It is the successor to the earlier
-``WrapperResourceBase`` (issue #62), but *configuration-driven* rather than
-subclass-driven, so a projection can be built as an instance::
+A view holds an inner :class:`~resourcey.core.resource.Resource` and exposes a
+**customized view** of it: a field-projection override (which fields appear in
+each of the six REST shapes) and an action override. It is *configuration-driven*
+rather than subclass-driven, so a projection can be built as an instance::
 
     public_secrets = ResourceView(
         resource=secrets,
@@ -24,39 +22,16 @@ It is the general-purpose **least-privilege** tool: a resource is declared once
 with its full storage truth, and the public surface is narrowed without touching
 the storage class.
 
-What the view recomputes (and why)
-----------------------------------
-The premise "delegate everything except ``get_exposed_resource``" is *almost*
-right: field overrides force the whole exposed surface to be recomputed, because
-the query surface and the cache policy derive from the DTO / REST models and the
-action set.
-
-* **Field projection** - the DTO is re-derived from the inner declaration via
-  :func:`~resourcey.core.dto.derive_dto`, so the six REST models are the
-  view's.
-* **Query surface** - :meth:`get_queryable_fields`, :meth:`get_filter_operators`,
-  :meth:`get_sortable_fields`, and :meth:`resolve_sort_order` are recomputed from
-  the view's read model. This is load-bearing, not cosmetic: delegating them to
-  the inner would let ``?secret__eq=`` / ``?sort=secret`` pass the transport's
-  validation and reach the inner service, which pushes them down against the
-  inner's (wider) column set - leaking the hidden value or its relative order.
-* **Cache policy** - recomputed when the view narrows, so a view whose actions
-  become read-only selects the read-only (optimistic, ``private``) strategy
-  instead of inheriting a writable inner's shared-cacheable validator.
-* **Actions** - normalized (:func:`~resourcey.core.service.normalize_actions`)
-  so a batch action cannot outlive its singular action.
+The query surface and the cache policy are recomputed rather than delegated:
+delegating them to the inner would let ``?secret__eq=`` / ``?sort=secret`` pass
+the transport's validation and reach the inner service, which pushes them down
+against the inner's wider column set.
 
 A view may **narrow**, never widen: ``exposed_actions`` must be a subset of the
-inner's, and an override cannot re-widen a flag the inner had turned off (the
-override is merged onto the inner field, not substituted for it). Both are
-validated at construction.
+inner's, and an override cannot re-widen a flag the inner had turned off. Both
+are validated at construction.
 
-Registration
-------------
-Register the **view** in the manifest, not the inner: ``register_routes`` sees
-``view.get_exposed_resource() is view`` and mounts the view's routes, while
-:meth:`ResourceView.__aenter__` delegates to the inner so its lifecycle (e.g.
-``MongoResource.ensure_indexes()``) still runs. Registering both would
+Register the **view** in the manifest, not the inner: registering both would
 double-enter the inner and mount duplicate routes.
 
 This module imports no code outside the framework.
@@ -94,9 +69,7 @@ K = TypeVar("K")
 def _dto_declaration(resource: Resource[Any, Any]) -> type[DTO]:
     """The inner resource's DTO declaration, through its escape hatch.
 
-    Every backend that derives its REST models from a DTO exposes
-    ``get_dto_declaration()``. A resource that does not (a hand-written
-    ``Resource``) cannot be viewed, which is reported clearly.
+    A resource without one (a hand-written ``Resource``) cannot be viewed.
     """
     getter = getattr(resource, "get_dto_declaration", None)
     if getter is None:
@@ -113,10 +86,8 @@ def _merge_request_type_overrides(
 ) -> dict[str, dict[str, Any]]:
     """Fold the ``request_type`` sugar into the general field-override map.
 
-    A ``request_type`` is an ordinary :class:`~resourcey.core.dto.DtoField`
-    attribute, so it travels through the same merge path as every other flag;
-    this just lowers the sugar form. An explicit ``request_type`` in
-    ``field_overrides`` wins over the sugar for the same field.
+    An explicit ``request_type`` in ``field_overrides`` wins over the sugar for
+    the same field.
     """
     merged = {name: dict(overrides) for name, overrides in (field_overrides or {}).items()}
     for name, request_type in (request_type_overrides or {}).items():
@@ -132,24 +103,15 @@ class ResourceView(Resource[T, K], Generic[T, K]):
             derived models; its storage backs the service.
         exposed_field_overrides: ``{field_name: {DtoField attribute: value}}``.
             Each value is a *partial* mapping merged onto the inner field's
-            resolved :class:`~resourcey.core.dto.DtoField`, so unmentioned
-            flags keep the inner's value and an override can never silently
-            re-widen a field. A ``request_type`` override (narrowing a field's
-            client-writable values) is expressed here like any other attribute.
-            The identifier may not be overridden.
+            resolved :class:`~resourcey.core.dto.DtoField`, so unmentioned flags
+            keep the inner's value. The identifier may not be overridden.
         exposed_request_type_overrides: ``{field_name: annotation}`` — sugar that
-            lowers into ``exposed_field_overrides[name]["request_type"]``. It
-            replaces the field's wire type in the view's create / update
-            *request* models only (the response models keep the inner's type),
-            e.g. restricting a status field's client-writable set.
+            lowers into ``exposed_field_overrides[name]["request_type"]``,
+            replacing the field's wire type in the *request* models only.
         exposed_actions: The actions the view exposes. Defaults to the inner's
-            (normalized). Must be a subset of the inner's - a view narrows,
-            never widens - and is normalized so a batch action without its
-            singular action is dropped.
+            (normalized); must be a subset of the inner's.
         path: An explicit REST path segment (defaults to the inner's).
-        cache_strategy: An explicit cache policy - the escape hatch. When
-            omitted, the policy is recomputed from the view's models and actions
-            when the view narrows, and otherwise delegated to the inner.
+        cache_strategy: An explicit cache policy - the escape hatch.
     """
 
     def __init__(
@@ -215,9 +177,7 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         """Reject an override that turns an inner-``False`` projection flag back on.
 
         A view **narrows**, never widens — the same rule ``exposed_actions``
-        enforces. ``derive_dto`` merges an override onto the inner field, so an
-        override naming a flag the inner had turned off would otherwise
-        re-expose a field (or operation) the inner deliberately hid.
+        enforces.
         """
         inner_fields = inner_dto.get_fields()
         for field_name, override in self._field_overrides.items():
@@ -236,12 +196,8 @@ class ResourceView(Resource[T, K], Generic[T, K]):
     def _validate_declared_filter(self) -> None:
         """Fail loudly when field hiding meets a declared object-filter class.
 
-        The transport builds a *declared* filter's surface from the class's own
-        ``<attribute>__<op>`` fields, which still name the inner's full field
-        set. Hiding a field from the read model without also narrowing that class
-        would leave the hidden field filterable, so the combination is refused
-        rather than silently leaking. (Widening the read model is fine: the
-        declared filter already names every field.)
+        A declared filter's ``<attribute>__<op>`` fields still name the inner's
+        full field set, so hiding a read field would leave it filterable.
         """
         if not self._hides_read_fields():
             return
@@ -289,11 +245,7 @@ class ResourceView(Resource[T, K], Generic[T, K]):
     # ------------------------------------------------------------------
 
     def get_queryable_fields(self) -> frozenset[str]:
-        """Every field the view's read model exposes - the query surface.
-
-        Derived from the view's ``read_response``, so a field the view hides is
-        not filterable or sortable: the read model *is* the query surface.
-        """
+        """Every field the view's read model exposes - the query surface."""
         return frozenset(self.get_rest_models().read_response.model_fields)
 
     def get_filter_operators(self) -> Mapping[str, frozenset[str]]:
@@ -302,12 +254,7 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         return {name: operators_for_annotation(field.annotation) for name, field in fields.items()}
 
     def get_search_filter_type(self) -> type[SearchFilter[Any]] | None:
-        """The inner's declared object filter (validated at construction).
-
-        A declared filter is only carried across when the view does not narrow
-        the read model; :meth:`_validate_declared_filter` refuses the unsafe
-        combination at construction.
-        """
+        """The inner's declared object filter (validated at construction)."""
         return self._inner.get_search_filter_type()
 
     def get_sortable_fields(self) -> frozenset[str]:
@@ -321,10 +268,8 @@ class ResourceView(Resource[T, K], Generic[T, K]):
     def resolve_sort_order(self, sort: str | None, desc: bool) -> SortOrder[Any] | None:
         """Validate ``sort`` / ``desc`` against the *view's* sortable fields.
 
-        Re-implemented rather than delegated: the inner's own validation is
-        against the inner's (wider) sortable set, so delegating would let
-        ``?sort=secret`` through. An unknown or non-sortable field raises
-        :class:`~resourcey.core.errors.InvalidInputError`.
+        Re-implemented rather than delegated: the inner validates against its
+        wider set, so delegating would let ``?sort=secret`` through.
         """
         if not sort:
             return None
@@ -357,9 +302,8 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         """The view's cache policy.
 
         An explicit ``cache_strategy`` wins; otherwise the policy is recomputed
-        from the view's models and actions when the view narrows (so a view that
-        becomes read-only selects the optimistic, ``private`` strategy), and
-        delegated to the inner when the view is a pure pass-through.
+        when the view narrows (so a view that becomes read-only selects the
+        optimistic, ``private`` strategy) and delegated otherwise.
         """
         if self._explicit_cache_strategy is not None:
             return self._explicit_cache_strategy
@@ -379,10 +323,8 @@ class ResourceView(Resource[T, K], Generic[T, K]):
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """The inner service, wrapped so the view's action set is enforced.
 
-        The inner service reads/writes the inner storage and shapes results
-        through the inner DTO; the transport projects those onto the view's REST
-        models. The wrapper re-checks ``batch_edit`` against the view's actions,
-        so a direct service caller cannot reach a batch kind the view hides.
+        The transport projects the inner DTOs onto the view's REST models; the
+        wrapper re-checks ``batch_edit`` against the view's actions.
         """
         inner = await self._inner.get_service(ctx)
         return ViewService(inner, self._actions)

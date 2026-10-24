@@ -1,12 +1,9 @@
 """Infer a DTO declaration from a SQLAlchemy ORM model (issue #78/#89).
 
-This is the new direction of the SQL workflow: a developer defines the ORM
-model they already work with and the framework infers the DTO from it.
 :func:`sqlalchemy_2_dto` maps each mapped column back to the corresponding
-Python annotation, makes the primary key the DTO identifier
-(``id_field_name``), widens nullability to ``ann | None``, and re-expresses
-client-side defaults as operation-scoped defaults /
-``in_create_request=False``.
+Python annotation, makes the primary key the DTO identifier (``id_field_name``),
+widens nullability to ``ann | None``, and re-expresses client-side defaults as
+operation-scoped defaults.
 
 A column may override the inferred projection by placing a
 :class:`~resourcey.core.dto.DtoField` in its ``info`` mapping under the
@@ -16,22 +13,14 @@ A column may override the inferred projection by placing a
         String, info={"dto_field": DtoField(in_read_response=False)}
     )
 
-When no ``dto_field`` is supplied the projection is inferred from the column's
-generation behaviour (see :func:`_dto_field_for_column`).
+Otherwise the projection is inferred from the column's generation behaviour (see
+:func:`_dto_field_for_column`). A foreign-key column also gets
+``DtoField.references`` set to the singularised target table name
+(``thread_id`` -> ``"thread"``), unless the field already declares one.
 
-A foreign-key column additionally declares ``DtoField.references``:the
-singularised name of the referenced table (``thread_id`` -> ``"thread"``) is
-attached (when the field's ``references`` is still ``_UNSET``, so a layer
-downstream can validate that a referenced table is served by the same
-manifest. An explicit string is honoured verbatimand a ``None``
-*suppresses* derivation for a column whose target is not exposed as a
-resource.
-
-**Scope: plain columns only.** Every column projects as an ordinary scalar
-field (a foreign-key column such as ``thread_id`` becomes a plain ``int`` field
-and round-trips as a value). SQLAlchemy ``relationship()``s are **not**
-projected and are a documented limitation; nested / relationship projection is
-a separate future feature.
+**Scope: plain columns only.** A foreign-key column projects as an ordinary
+scalar field. SQLAlchemy ``relationship()``s are **not** projected — a documented
+limitation.
 
 This module imports no code outside the framework.
 """
@@ -75,11 +64,6 @@ DTO_FIELD_INFO_KEY = "dto_field"
 def sqlalchemy_2_dto(model: type[Any], *, name: str | None = None) -> type[DTO]:
     """Infer a DTO declaration from an ORM model.
 
-    The DTO's fields mirror the model's mapped columns (attribute order), with
-    the primary key as the DTO identifier. A column carrying a ``DtoField`` in
-    ``column.info["dto_field"]`` uses it verbatim; otherwise the field is
-    inferred from the column type and generation behaviour.
-
     Args:
         model: A mapped SQLAlchemy declarative class.
         name: The DTO class name (defaults to the model's name).
@@ -107,11 +91,8 @@ def sqlalchemy_2_dto(model: type[Any], *, name: str | None = None) -> type[DTO]:
 def _field_declarations(mapper: Mapper[Any]) -> dict[str, tuple[Any, DtoField]]:
     """The ``{field_name: (annotation, DtoField)}`` declarations for a mapper.
 
-    The column's own generation behaviour is the expressed intent and wins over
-    a convention-generated default: when the column declares a client-side
-    default the convention sees a create default already present and leaves it
-    alone, and when the column is backend-generated (``server_default`` /
-    auto-increment) the convention is told so and adds none.
+    The column's own generation behaviour wins over a convention-generated
+    default.
     """
     declarations: dict[str, tuple[Any, DtoField]] = {}
     id_field_name = _primary_key_attr(mapper)
@@ -151,8 +132,7 @@ def _column_generates_id(column: Any, mapper: Mapper[Any]) -> bool:
 def _fk_target_table(column: Any) -> str | None:
     """The referenced table's name for ``column``'s first foreign key, if any.
 
-    A column carries at most a few foreign keys; the first is a fine proxy for
-    the referenced table. ``target_fullname`` is ``"<table>.<column>"`` (or
+    ``target_fullname`` is ``"<table>.<column>"`` (or
     ``"<schema>.<table>.<column>"``), so the table is the second-to-last part.
     """
     fk = next(iter(column.foreign_keys), None)
@@ -167,14 +147,10 @@ def _fk_target_table(column: Any) -> str | None:
 def _dto_field_for_column(column: Any, mapper: Mapper[Any]) -> DtoField:
     """The ``DtoField`` inferred from a column's type and generation behaviour.
 
-    A client-side ``default`` becomes the create default and the field drops out
-    of create requests (the application supplies it); a client-side ``onupdate``
-    becomes the update default (so an update omitted by the client re-applies
-    it). A server-side default or an auto-increment primary key drops the field
-    from create requests *without* a default (the database supplies the value);
-    a nullable column with no default gets ``default_for_create=None``, which
-    preserves ORM ergonomics after optionality stopped coming from the
-    annotation.
+    A client-side ``default`` becomes the create default (and drops the field
+    from create requests); a client-side ``onupdate`` becomes the update default.
+    A server-side default or auto-increment key drops the field from create with
+    no default; a nullable column with no default gets ``default_for_create=None``.
     """
     create_overrides = _default_overrides(column.default, "create")
     update_overrides = _default_overrides(column.onupdate, "update")
@@ -186,8 +162,8 @@ def _dto_field_for_column(column: Any, mapper: Mapper[Any]) -> DtoField:
         # The database supplies the value: drop from create with no default.
         return DtoField(in_create_request=False, **update_overrides)
     if column.nullable:
-        # Optionality no longer comes from the annotation, so a nullable column
-        # with no default keeps ORM ergonomics via an explicit ``None`` default.
+        # Optionality comes only from a declared default, so a nullable column
+        # with none keeps ORM ergonomics via an explicit ``None`` default.
         return DtoField(default_for_create=None, **update_overrides)
     return DtoField(**update_overrides)
 
@@ -226,25 +202,18 @@ def _primary_key_attr(mapper: Mapper[Any]) -> str:
 def _annotation_for_column(column: Any, declared: Any = None) -> Any:
     """The Python annotation corresponding to a column (nullable widens it).
 
-    The column *type* is the schema of record, so it drives the annotation; the
-    one exception is a :class:`~pydantic.SecretStr` column, whose Python type
-    carries behaviour (redaction / encryption on serialization) the SQL type
-    cannot express. Such a column is recognized from the mapped attribute's
-    declared annotation and projects as ``SecretStr`` — the stored digest stays a
-    ``String``.
+    The column *type* drives the annotation, except for a ``SecretStr`` column,
+    whose Python type carries behaviour the SQL type cannot express.
     """
     if _is_secret_column(declared):
         annotation: Any = SecretStr
     elif isinstance(column.type, ModelType):
-        # A model-typed column (``ModelType``): the annotation is the model
-        # itself, recovered from the column type (SQLAlchemy erases the type
-        # parameter to ``Any``), so the field round-trips the model and the
-        # generated request models carry its schema.
+        # SQLAlchemy erases the type parameter to ``Any``, so the bound model is
+        # recovered from the column type itself.
         annotation = _model_type_of(column) or Any
     elif isinstance(column.type, JSON):
         # The SQL type says only "JSON"; the declared annotation carries the
-        # container shape (``list[str]``, ``dict``, ...), so prefer it when the
-        # column was annotated as a list / dict.
+        # container shape, so prefer it for a list / dict column.
         declared_container = _declared_annotation(declared)
         origin = get_origin(declared_container)
         annotation = declared_container if origin in (list, dict) else dict
@@ -256,9 +225,7 @@ def _annotation_for_column(column: Any, declared: Any = None) -> Any:
 def _model_type_of(column: Any) -> Any:
     """The Pydantic model a :class:`~resourcey.sql.model_type.ModelType` column binds.
 
-    Read from the column-type instance, which survives a SQLAlchemy ``copy`` (via
-    ``ModelType.copy``), so the DTO inference recovers the exact author-written
-    type even though SQLAlchemy erases the binding's type parameter to ``Any``.
+    Read from the column-type instance, which survives a SQLAlchemy ``copy``.
     """
     return getattr(column.type, "model", None)
 
@@ -266,8 +233,7 @@ def _model_type_of(column: Any) -> Any:
 def _declared_annotation(declared: Any) -> Any:
     """Reduce ``Mapped[T]`` / ``T | None`` to ``T`` for a container annotation.
 
-    Unlike :func:`_unwrap_mapped` (which only looks for ``SecretStr``), this
-    keeps the *whole* container type so a ``Mapped[list[str]]`` JSON column
+    Keeps the *whole* container type, so a ``Mapped[list[str]]`` JSON column
     projects as ``list[str]`` rather than ``dict``.
     """
     if declared is None:
@@ -285,10 +251,8 @@ def _declared_annotation(declared: Any) -> Any:
 def _resolved_hints(mapper: Mapper[Any]) -> dict[str, Any]:
     """The model's resolved annotations (``include_extras``), or ``{}`` if unresolved.
 
-    SQLAlchemy keeps ``Mapped[...]`` unresolved in ``__annotations__``, so the
-    hints are resolved to reach the inner type (``Mapped[SecretStr]`` ->
-    ``SecretStr``). A forward reference that cannot be resolved degrades to no
-    hints rather than failing the whole inference.
+    A forward reference that cannot be resolved degrades to no hints rather than
+    failing the whole inference.
     """
     try:
         return get_type_hints(mapper.class_, include_extras=True)
@@ -324,8 +288,7 @@ def _scalar_annotation(column_type: Any) -> Any:
     """Map a SQLAlchemy column type to a Python annotation.
 
     Ordered so subclasses resolve to their specific Python type: ``Enum`` is a
-    ``String`` subclass, ``Float`` is a ``Numeric`` subclass, and ``Uuid`` is an
-    emulated generic. Unknown types fall back to ``Any``.
+    ``String`` subclass and ``Float`` is a ``Numeric`` subclass.
     """
     if isinstance(column_type, SqlEnum):
         return column_type.enum_class if column_type.enum_class is not None else str

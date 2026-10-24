@@ -2,23 +2,19 @@
 
 The Manifest owns the resources an app serves and enters/exits their runtime
 lifecycle in declaration order / reverse. HTTP construction (``create_app``) is
-**not** part of ``core`` — it belongs to the transport layer — so the
-Manifest deliberately stays a plain container.
+**not** part of ``core`` — it belongs to the transport layer — so the Manifest
+deliberately stays a plain container.
 
-Construction validates the action declarations of every resource up front: a
-resource whose :meth:`~resourcey.core.resource.Resource.get_supported_actions`
-contains a non-:class:`~resourcey.core.service.Action` member (a typo in a
-dynamically built set) fails loudly at startup instead of silently dropping a
-route. It then calls :meth:`~resourcey.core.resource.Resource.on_register`
-(sync) on each resource, handing it the manifest so it can resolve sibling
-resources *lazily, later* (e.g. to verify foreign keys when a request needs it)
-— never from within the hook itself, since registration ordering is not a
-contract.
+Construction validates the action declarations of every resource up front, so a
+typo in a dynamically built set fails loudly at startup instead of silently
+dropping a route. It then calls
+:meth:`~resourcey.core.resource.Resource.on_register` on each resource, handing
+it the manifest so it can resolve sibling resources *lazily, later* — never from
+within the hook itself, since registration ordering is not a contract.
 
-This module is part of the ``core`` bottom layer: it imports no other
-``resourcey`` module.
-
-Refer to the ``DtoField.references`` docstring for the fail-fast reference check.
+This module is part of the ``core`` bottom layer: it imports no other project
+package. See the ``DtoField.references`` docstring for the fail-fast reference
+check.
 """
 
 from __future__ import annotations
@@ -36,16 +32,11 @@ from resourcey.util.naming import singularise
 def _validate_references(resources: tuple[Resource[Any, Any], ...]) -> None:
     """Fail loudly when a DTO field's ``references`` names an unserved resource.
 
-
-
-    A DTO field may declare ``DtoField.references`` — the **singular resource name**
-    the field points at (e.g. ``"thread"``, never the plural REST path
-    ``"threads"``). Runs when the manifest starts (see :meth:`Manifest.__aenter__`)
-    so an unknown target — a resource forgotten from the manifest, or a wrong
-    derived singularisation — fails loudly instead of surfacing as a confusing
-    runtime error when the FK is enforced. Resources without a DTO declaration
-    (e.g. a hand-written ``Resource``) are simply skipped: there is nothing
-    to validate. An unset or ``None`` reference carries no constraint.
+    Runs when the manifest starts, so an unknown target — a resource forgotten
+    from the manifest, or a wrong derived singularisation — fails loudly instead
+    of surfacing as a confusing runtime error when the FK is enforced. Resources
+    without a DTO declaration are skipped, and an unset or ``None`` reference
+    carries no constraint.
     """
     served = {singularise(resource.get_resource_path()) for resource in resources}
     for resource in resources:

@@ -1,30 +1,22 @@
 """The interactive OAuth flow routes — login / callback / refresh (issue #151).
 
-A companion mounted **after** :func:`~resourcey.http.app.create_app`, reading the
-same client resource — the ``06_filestore`` pattern (``register_file_routes`` +
-a metadata resource). It owns the interactive flow, which is genuinely not one of
-the eight :class:`~resourcey.core.service.Action` members::
+A companion mounted **after** ``create_app``. It owns the interactive flow, which
+is not one of the eight ``Action`` members::
 
     GET  .../oauth/login      redirect to the provider's auth_url (state + PKCE)
     GET  .../oauth/callback   exchange the code, persist the token, mint our session
     POST .../oauth/refresh    the token service's locked refresh
 
-**Session posture: BFF.** The callback mints **our own** session cookie
-(:class:`~resourcey.auth.auth_cookie.CookieAuthenticator` /
-``EncryptionService.create_jwe_token``); the browser presents *our* cookie, never
-the provider's access token. The provider's refresh token lives only, encrypted,
-in the token table; the cookie carries an opaque handle (the framework JWE with a
-``sub``) the server maps back to the stored token. Encoding a provider credential
-into a cookie or an API key is explicitly out.
+**Session posture: BFF.** The callback mints **our own** session cookie; the
+browser presents *our* cookie, never the provider's access token. The provider's
+refresh token lives only, encrypted, in the token table.
 
-**Expiry alignment.** Our session token's ``exp`` is the **same expiry as the
-external IdP token** — the provider is authoritative for session lifetime — and
-the browser cookie's ``Max-Age`` is clamped down to it, never longer than the
-provider grants.
+**Expiry alignment.** Our session token's ``exp`` matches the IdP token's expiry,
+and the browser cookie's ``Max-Age`` is clamped down to it.
 
-**Ephemeral flow state.** ``state``, the PKCE verifier, and the authorization
-code are seconds-lived and single-use, so they are carried in a short-TTL JWE
-cookie (``EncryptionService``), not a table.
+**Ephemeral flow state.** ``state``, the PKCE verifier, and the authorization code
+are seconds-lived and single-use, so they are carried in a short-TTL JWE cookie,
+not a table.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
 """
@@ -93,28 +85,10 @@ def register_oauth_routes(
 ) -> APIRouter:
     """Mount the interactive login / callback / refresh routes.
 
-    Args:
-        app_or_router: A ``FastAPI`` app / ``APIRouter`` (duck-typed).
-        client_resource: The **inner** client resource (config-list or DB-backed).
-        token_resource: The token resource; required for the callback / refresh
-            (the login redirect needs only the client resource).
-        identity_resource: The ``ExternalIdentity`` resource; required to resolve
-            ``(iss, sub)`` to an internal user on callback.
-        authenticator: The :class:`~resourcey.auth.auth_oauth.OAuthAuthenticator`
-            whose JWKS verification the callback reuses to verify the provider's
-            **ID token** (never an unverified decode). Defaults to a bare one
-            built over ``client_resource`` (verification only — no identity /
-            principal-store checks, which the callback performs itself).
-        config: The OAuth config block (flow paths / state TTL). Default
-            :meth:`IdpConfig.get_instance`.
-        session_config: The session-cookie config. Default
-            :meth:`SessionCookieConfig.get_instance`.
-        encryption_service: The service that mints the flow-state / session JWEs.
-            Defaults to the process-wide one.
-        http_post: An injectable token-exchange poster (tests inject a fake).
-        http_get: An injectable JWKS fetcher for the default authenticator
-            (ignored when ``authenticator`` is supplied; tests inject a fake).
-        prefix: An optional mount prefix.
+    ``token_resource`` and ``identity_resource`` are required for the callback /
+    refresh. ``authenticator`` supplies the JWKS verification the callback reuses
+    to verify the provider's ID token. ``http_post`` / ``http_get`` are
+    injectable so tests touch no network.
     """
     resolved = config if config is not None else IdpConfig.get_instance()
     session = session_config if session_config is not None else SessionCookieConfig.get_instance()

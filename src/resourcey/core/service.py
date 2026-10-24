@@ -2,32 +2,15 @@
 
 A service exposes the standard resource actions (create, read, update, delete,
 search, count, batch_read, batch_edit) as async methods. It is generic over the
-DTO type it serves (``T``) and the identifier type (``K``), so it takes DTOs /
-ids in and declares DTOs as its return types.
+DTO type it serves (``T``) and the identifier type (``K``).
 
 The service is the **async context manager**: it owns its storage lifetime, not
-the resource. Two storage strategies are both expressible and core privileges
-neither (see :class:`~resourcey.core.resource.Resource`):
-
-* session-per-service — a caller supplies the storage via ``ctx`` and owns
-  commit/close;
-* session-per-operation — the service opens and closes its own storage.
-
-The base class holds no storage. Concrete services override the actions they
-support; the raising defaults are a safety net so a misconfigured route
-surfaces clearly rather than silently doing nothing.
-
-``search`` / ``count`` take a standard
-:class:`~resourcey.util.search_filter.SearchFilter` tree and ``search`` a
-:class:`~resourcey.util.sort_order.SortOrder`; both are passed as plain
-arguments, so the whole operation's inputs are explicit rather than wrapped in
-a request object. ``batch_edit`` takes a list of :class:`Edit` nodes so a single
-batch can create, update, *and* delete.
+the resource. The base class holds no storage, and concrete services override
+the actions they support; the raising defaults are a safety net so a
+misconfigured route surfaces clearly rather than silently doing nothing.
 
 This module is part of the ``core`` layer: besides the standard library it
-imports only ``util`` (the filter / sort / discriminated-union leaves) and
-its sibling ``core.errors`` (the framework error base) — ``core`` imports
-no other project package.
+imports only ``util`` and its sibling ``core.errors``.
 """
 
 from __future__ import annotations
@@ -57,12 +40,11 @@ DEFAULT_LIMIT = 20
 class Action(enum.StrEnum):
     """The standard resource actions.
 
-    Member *names* (lowercased) match the :class:`Service` method names exactly
-    (``CREATE`` -> ``create``, ``BATCH_READ`` -> ``batch_read``) so a route
-    builder can derive a method name from an :class:`Action` directly. Being a
-    ``StrEnum``, ``Action("create") in supported`` works for a correctly
-    spelled string, which is why a startup assertion — not mypy — is what
-    catches a typo in a dynamically built action set.
+    Member *names* (lowercased) match the :class:`Service` method names exactly,
+    so a route builder can derive a method name from an :class:`Action`
+    directly. Being a ``StrEnum``, ``Action("create") in supported`` works for a
+    correctly spelled string, which is why a startup assertion — not mypy —
+    is what catches a typo in a dynamically built action set.
     """
 
     CREATE = "create"
@@ -184,14 +166,9 @@ class Create(Edit, Generic[T]):
     item: T
 
 
-# A condition is the *native* standard :class:`SearchFilter` tree, carried as a
-# ``SkipValidation`` field so an already-built instance (the service-caller path)
-# is not re-entered through the discriminated-union validator; a wire ``dict``
-# (the transport path) is resolved by each node's ``mode="before"`` validator.
-# A parameterised generic annotation (``SearchFilter[Any]``) would re-enter the
-# union validator on an instance, the same reason ``util.search_filter`` uses
-# ``NestedFilter`` for its nested fields. The ``| None`` union is accepted by
-# ``SkipValidation`` (the bare annotation is not).
+# The *native* standard filter tree, carried as a ``SkipValidation`` field so an
+# already-built instance is not re-entered through the discriminated-union
+# validator; a wire ``dict`` is resolved by the ``mode="before"`` validator.
 Condition = Annotated[SearchFilter[Any] | None, SkipValidation]
 
 
@@ -448,11 +425,7 @@ def normalize_actions(actions: frozenset[Action]) -> frozenset[Action]:
     return frozenset(normalized)
 
 
-# The singular action a derived action reduces to for a policy that reasons only
-# about the CRUD surface: counting is not a separate privilege from searching,
-# and batching is not a separate privilege from the action it batches. A venue
-# that *does* distinguish them (a wrapper's action set, a view) uses the actions
-# as declared; this is for the policy reduction alone.
+# The singular action a derived action reduces to for a CRUD-only policy.
 _ACTION_EQUIVALENT: dict[Action, Action] = {
     Action.COUNT: Action.SEARCH,
     Action.BATCH_READ: Action.READ,

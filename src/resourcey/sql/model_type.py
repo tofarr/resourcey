@@ -2,24 +2,14 @@
 
 A column can round-trip a whole Pydantic model through a single JSON(-like)
 column and be *typed* as that model: reading a row hands back the model
-instance, and writing one binds its JSON form. This is the pattern a
-polymorphic / structured payload column wants — e.g. a job body, an event
-envelope, a settings blob — and it composes with the framework's DTO inference:
+instance, and writing one binds its JSON form. The DTO inference projects the
+model as the field's annotation, so the generated request models carry the
+model's own schema, and a model value is never a scalar, so it gets no filter /
+sort operators.
 
-* the DTO field's annotation is the model type (see
-  :func:`~resourcey.sql.sqlalchemy_2_dto.sqlalchemy_2_dto`), so the generated
-  request models carry the model's own schema (for a
-  :class:`~resourcey.util.models.DiscriminatedUnionMixin`, the discriminated
-  union of its kinds); the stored read model keeps the raw JSON shape, since a
-  read is what the column *stores*;
-* a model value is never a scalar, so :func:`~resourcey.util.search_filter.operators_for_annotation`
-  gives it no filter / sort operators and the transport never synthesises a
-  query parameter for it.
-
-The column's storage ``impl`` is :class:`~sqlalchemy.JSON` by default —
-override it (``ModelType(Details, impl=Text)``) for a column stored as text.
-No migration is needed to adopt it over an existing ``JSON`` column: the DDL is
-unchanged (identified by the concrete ``impl``).
+The storage ``impl`` is :class:`~sqlalchemy.JSON` by default — override it
+(``ModelType(Details, impl=Text)``) for a column stored as text. No migration is
+needed to adopt it over an existing ``JSON`` column: the DDL is unchanged.
 
 This module imports only the lower framework layers (``util``); it is part of
 ``sql``.
@@ -40,9 +30,7 @@ class ModelType(TypeDecorator[T], Generic[T]):
     """A column typed as the Pydantic model ``model``, stored as JSON.
 
     Args:
-        model: The Pydantic model the column round-trips. A value bound is
-            serialized with ``model_dump(mode="json")``; a value read back is
-            validated to the model via ``model_validate``.
+        model: The Pydantic model the column round-trips.
         impl: The underlying SQL type; :class:`~sqlalchemy.JSON` by default.
     """
 

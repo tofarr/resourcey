@@ -1,27 +1,21 @@
 """``CachedResource`` — an in-memory read-through cache wrapper (issue #168).
 
-``CachedResource`` wraps another resource and serves its reads from a
-:class:`~resourcey.cache.cache_store.CacheStore` when the resource's
-:class:`~resourcey.cache.cache_strategy.CacheStrategy` says the cached copy is
-still fresh (:meth:`~resourcey.core.service.CacheStrategy.should_read`),
-refilling the store from the source when it is not. It is the server-side
-counterpart to ``filestore``'s pre-signed capabilities: a wrapper for a slow
-source (e.g. a service backed by a slow HTTP entity) whose reads are otherwise
-paid on every request.
+It wraps another resource and serves its reads from a
+:class:`~resourcey.cache.cache_store.CacheStore` while the strategy's
+``should_read`` says the copy is fresh, refilling the store from the source when
+it is not.
 
 Like :class:`~resourcey.view.resource_view.ResourceView` and
 :class:`~resourcey.triggers.triggered_resource.TriggeredResource`, it changes
-nothing observable about the resource's surface: the schema, actions, query /
-sort surface, cache policy, and registration are all delegated; only the service
-seam changes, wrapping the inner service in a
+nothing observable about the resource's surface; only the service seam changes,
+wrapping the inner service in a
 :class:`~resourcey.cache.cached_service.CachedService`.
-``get_exposed_resource()`` returns ``self`` so the wrapper (whose service holds
-the cache) is what gets registered.
+``get_exposed_resource()`` returns ``self`` so the wrapper is what gets
+registered.
 
 The cache is **best-effort and in-memory**: it is not the source of truth, it
 does not coordinate across processes, and a write through the wrapper evicts the
-resource's entries. A caller-scoped (``private``) resource is never cached —
-see :mod:`~resourcey.cache.cached_service`.
+resource's entries. A caller-scoped resource is never cached.
 
 This module is part of ``resourcey.cache``; it imports only lower framework
 layers (``core`` / ``util``).
@@ -54,14 +48,11 @@ class CachedResource(Resource[T, K], Generic[T, K]):
     """A resource wrapper that caches reads in memory per the inner's strategy.
 
     Args:
-        resource: The inner resource to wrap. Its schema, actions, query / sort
-            surface, cache policy, registration, and lifecycle are all delegated.
-        store: The cache medium (default a fresh
-            :class:`~resourcey.cache.cache_store.InMemoryCacheStore`). Pass a
+        resource: The inner resource to wrap; its whole surface is delegated.
+        store: The cache medium (default a fresh ``InMemoryCacheStore``). Pass a
             shared / external store for a multi-worker deployment.
         private: Force the cached responses to be treated as caller-scoped, so
-            **nothing** is cached (an extra guard for a resource that is
-            caller-scoped without advertising it). The inner service's own
+            **nothing** is cached. The inner service's own
             ``response_is_private()`` already has this effect.
     """
 
@@ -100,10 +91,8 @@ class CachedResource(Resource[T, K], Generic[T, K]):
     def get_cache_strategy(self) -> CacheStrategy | None:
         """The inner's cache policy (unchanged): HTTP caching is not this wrapper's job.
 
-        The wrapper only uses the strategy *programmatically*
-        (:meth:`~resourcey.core.service.CacheStrategy.should_read`); the
-        response headers the transport emits are the inner's, so a caching
-        wrapper does not alter what a client cache sees.
+        The wrapper only uses the strategy *programmatically*, so it does not
+        alter what a client cache sees.
         """
         return self._inner.get_cache_strategy()
 
@@ -148,7 +137,7 @@ class CachedResource(Resource[T, K], Generic[T, K]):
         """The inner service, wrapped so fresh reads are served from the cache."""
         inner = await self._inner.get_service(ctx)
         # The resource hands back the transport-facing placeholder type; the
-        # concrete strategy the wrapper reads ``should_read`` off is its subtype.
+        # concrete strategy is its subtype.
         strategy = cast("ConcreteCacheStrategy[T] | None", self._inner.get_cache_strategy())
         return CachedService(
             inner,

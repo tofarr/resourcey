@@ -1,40 +1,25 @@
 """The authorization dependency builder (issue #127 / #131).
 
 :class:`AuthorizedDependencyBuilder` is a
-:class:`~resourcey.http.dependency_builder.DependencyBuilder` (a
-``DiscriminatedUnionMixin``, like :class:`~resourcey.http.dependency_builder.OpenDependencyBuilder`).
-Passing it to :func:`~resourcey.http.app.create_app`'s /
-:func:`~resourcey.http.app.add_to_app`'s ``dependency_builder=`` argument
-secures every resource at once: each resource's per-request service is wrapped
-in an :class:`~resourcey.auth.auth_authorized_service.AuthorizedService`.
+:class:`~resourcey.http.dependency_builder.DependencyBuilder`. Passing it to
+``create_app``'s / ``add_to_app``'s ``dependency_builder=`` argument secures
+every resource at once: each resource's per-request service is wrapped in an
+:class:`~resourcey.auth.auth_authorized_service.AuthorizedService`.
 
-It **composes two independent, pluggable seams** rather than hard-coding either:
+It **composes two independent, pluggable seams**:
 
 * ``authenticator`` — an :class:`~resourcey.auth.auth_principal.Authenticator`
-  resolving the request's credential to an
-  :class:`~resourcey.auth.auth_principal.AuthResult` (which distinguishes
-  absent from invalid). The default is a **fail-closed**
-  :class:`~resourcey.auth.auth_api_key.ApiKeyAuthenticator` (no key resource
-  -> every request denied), so a misconfigured app never opens silently.
+  resolving the request's credential to an ``AuthResult``. The default is a
+  **fail-closed** :class:`~resourcey.auth.auth_api_key.ApiKeyAuthenticator`, so a
+  misconfigured app never opens silently.
 * ``policy_resolver`` — a
-  :class:`~resourcey.auth.auth_policy.PolicyResolver` turning the
-  authenticated principal into the policies for the resource. The default is
-  :class:`~resourcey.auth.auth_policy.AllowAllResolver`, preserving #118 /
-  #127's "a valid credential grants full access".
+  :class:`~resourcey.auth.auth_policy.PolicyResolver` turning the authenticated
+  principal into the policies for the resource. The default is
+  :class:`~resourcey.auth.auth_policy.AllowAllResolver`.
 
-The **requirement** is the third knob: with ``posture=Posture.OPTIONAL`` an
-absent credential is anonymous (a lenient dependency); with the default
-``Posture.REQUIRED`` the request must authenticate (a strict dependency). Singling
-out a resource (e.g. anonymous reads of one endpoint) is a one-line override
-without re-implementing the wiring: :meth:`with_posture` returns a copy with only
-the posture changed.
-
-The builder caches its ``AuthResult`` on the request-scoped ctx and stores it so
-:func:`~resourcey.auth.auth_principal.current_principal` reads the same result
-downstream. After authentication the resource's own service is opened over the
-request ctx and wrapped in an ``AuthorizedService`` (entered), which does not
-close an inner handed to it already entered — so the storage-ownership rule
-("whoever opens the storage owns its commit and close") is preserved.
+The **requirement** is the third knob: ``posture=Posture.OPTIONAL`` lets an
+absent credential through as anonymous; the default ``Posture.REQUIRED`` rejects
+it. :meth:`with_posture` returns a copy with only the posture changed.
 
 This module is part of ``resourcey.auth``; it imports only lower framework
 layers. ``http`` must not import it (the app supplies the builder), so no cycle
@@ -77,15 +62,7 @@ class Posture(StrEnum):
 
 
 class AuthorizedDependencyBuilder(DependencyBuilder):
-    """Authenticate, resolve a policy set, then enforce it on every resource's service.
-
-    Attributes:
-        authenticator: The authentication method applied to every request.
-            Defaults to a fail-closed :class:`ApiKeyAuthenticator`.
-        policy_resolver: How the authenticated principal maps to policies.
-            Defaults to :class:`AllowAllResolver`.
-        posture: ``REQUIRED`` (default) or ``OPTIONAL`` (see :class:`Posture`).
-    """
+    """Authenticate, resolve a policy set, then enforce it on every resource's service."""
 
     authenticator: Authenticator = ApiKeyAuthenticator()
     policy_resolver: PolicyResolver = AllowAllResolver()
@@ -94,19 +71,17 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
     def with_posture(self, posture: Posture) -> AuthorizedDependencyBuilder:
         """A copy of this builder with only ``posture`` changed.
 
-        The one-line override for a differently-guarded endpoint (e.g. anonymous
-        reads), without rebuilding the authenticator / resolver wiring.
+        The one-line override for a differently-guarded endpoint, without
+        rebuilding the authenticator / resolver wiring.
         """
         return self.model_copy(update={"posture": posture})
 
     def get_principal_dependency(self) -> Callable[..., Any] | None:
         """The authentication dependency the transport adds to every route.
 
-        It declares the authenticator's security scheme(s) (so OpenAPI shows
-        them) and enforces the posture; the authenticated result is cached per
-        request, so the service dependency's own authentication is free. The
-        resource is not needed — the authenticator and posture are the same for
-        every resource.
+        It declares the authenticator's security scheme(s) and enforces the
+        posture; the result is cached per request, so the service dependency's
+        own authentication is free.
         """
         if self.posture is Posture.OPTIONAL:
             return optional_principal(self.authenticator)
@@ -115,15 +90,10 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
     def get_service_dependency(self, resource: Resource[Any, Any]) -> Callable[..., Any]:
         """Compose authentication, the resource's service, and the policy wrapper.
 
-        The returned dependency authenticates first (so an unauthenticated
-        request is rejected before the resource opens any storage), resolves the
-        principal's policies for this resource, then builds the resource's
-        service over the request-scoped ctx and wraps it in an
-        :class:`AuthorizedService`.
+        Authenticates first, so an unauthenticated request is rejected before the
+        resource opens any storage.
         """
-        # A required posture rejects unless authenticated; an optional one lets
-        # an absent credential through as anonymous. Both derive from the same
-        # AuthResult, so the requirement tier is one code path.
+        # Both postures derive from the same AuthResult.
         if self.posture is Posture.OPTIONAL:
             authenticate: Callable[..., Any] = optional_principal(self.authenticator)
         else:
@@ -140,10 +110,8 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
             policies = await policy_resolver.resolve(resource, principal)
             user_id = principal.id if principal is not None else None
             ctx = request_ctx(request)
-            # Publish the principal on the call-scoped ctx so a resource service
-            # (which receives the same ctx) can read it — e.g. an Owner-scoped
-            # resource stamping the owner on a create row the policy deliberately
-            # leaves unscoped.
+            # Publish the principal on the call-scoped ctx so a resource service can
+            # read it — e.g. an Owner-scoped resource stamping the owner on create.
             ctx[PRINCIPAL_CTX_KEY] = principal
             inner = await resource.get_service(ctx)
             service: Service[Any, Any] = AuthorizedService(
@@ -163,12 +131,8 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
 def _response_is_caller_scoped(policies: list[Any]) -> bool:
     """Whether a response under ``policies`` may differ per caller.
 
-    A response is marked caller-private when any resolved policy scopes to the
-    caller (``Policy.scopes_to_caller``). The flag defaults to ``True`` on
-    :class:`~resourcey.auth.auth_policy.Policy`, so an unclassified policy is
-    treated as caller-scoped (safe); the principal-independent built-ins
-    (``AllowAll`` / ``DenyAll`` / ``ReadOnly``) declare ``False`` and keep the
-    shared-cache optimisations. This is what stops a shared cache from replaying
-    a principal-narrowed body (e.g. an ``Owner`` policy) to another caller.
+    The flag defaults to ``True`` on ``Policy``, so an unclassified policy is
+    treated as caller-scoped (safe) and a shared cache cannot replay a
+    principal-narrowed body to another caller.
     """
     return any(getattr(policy, "scopes_to_caller", True) for policy in policies)

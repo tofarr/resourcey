@@ -1,22 +1,12 @@
 """Context-driven serialization for ``SecretStr`` / secret-bearing fields (issue #118).
 
-Sensitive fields are serialized through a uniform pydantic-context convention
-applied to every :class:`~pydantic.SecretStr` field:
-
-* An optional **context object** is passed when serializing / deserializing
-  (``model_dump(..., context=...)`` / ``model_validate(..., context=...)``).
-* If the context carries an ``encryption_service``, :class:`SecretStr` values are
-  encrypted on dump via ``encrypt_value`` and decrypted on load via
-  ``decrypt_value`` (the column stores JWE ciphertext).
-* Otherwise, if the context carries ``expose_secrets: true``, secrets are dumped
-  in plaintext.
-* Otherwise (no context / neither flag), secrets are **redacted**
-  (``str(SecretStr)`` -> ``**********``).
+An optional **context object** is passed to ``model_dump(..., context=...)`` /
+``model_validate(..., context=...)``. If it carries an ``encryption_service``,
+secret values are encrypted on dump and decrypted on load; otherwise
+``expose_secrets: true`` dumps them in plaintext; otherwise they are redacted.
 
 The helpers here are wired onto generated models via ``field_serializer`` /
-``field_validator`` (see :mod:`resourcey.core.dto`); they take the pydantic
-``SerializationInfo`` / ``ValidationInfo`` when available so the context flows
-through.
+``field_validator`` (see :mod:`resourcey.core.dto`).
 
 This module is part of the bottom ``util`` layer: it imports no other
 ``resourcey`` module.
@@ -51,9 +41,8 @@ def _ctx_dict(info: Any | None) -> dict[str, Any]:
 def encryption_service_from_context(info: Any | None) -> EncryptionService | None:
     """The ``encryption_service`` from the serialization context, or ``None``.
 
-    Duck-typed (an ``encrypt_value`` attribute) so the util module has no
-    import-time dependency on the encryption package, keeping the bottom layer
-    self-contained.
+    Duck-typed (an ``encrypt_value`` attribute) so this module has no
+    import-time dependency on the encryption package.
     """
     enc = _ctx_dict(info).get("encryption_service")
     return enc if enc is not None and hasattr(enc, "encrypt_value") else None
@@ -65,11 +54,10 @@ def expose_secrets_from_context(info: Any | None) -> bool:
 
 
 def dump_secret_str(secret: SecretStr, info: Any | None = None) -> str:
-    """Serialize a :class:`SecretStr` per the convention above.
+    """Serialize a :class:`SecretStr`: encrypt, else expose, else redact.
 
-    Encryption (context ``encryption_service``) wins over plaintext exposure
-    (context ``expose_secrets``), which wins over redaction -- an explicit
-    encryption request must never leak plaintext through a stray flag.
+    An explicit encryption request wins over a stray ``expose_secrets`` flag, so
+    it can never leak plaintext.
     """
     enc = encryption_service_from_context(info)
     if enc is not None:
@@ -80,12 +68,7 @@ def dump_secret_str(secret: SecretStr, info: Any | None = None) -> str:
 
 
 def load_secret_str(secret: SecretStr | str, info: Any | None = None) -> str:
-    """Deserialize a stored secret per the convention above.
-
-    When the context carries an ``encryption_service`` the stored value is JWE
-    ciphertext and is decrypted to plaintext. Otherwise the value is passed
-    through unchanged.
-    """
+    """Deserialize a stored secret, decrypting JWE ciphertext when a service is in context."""
     enc = encryption_service_from_context(info)
     raw = secret.get_secret_value() if isinstance(secret, SecretStr) else str(secret)
     if enc is not None:

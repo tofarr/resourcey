@@ -1,45 +1,27 @@
 """The ``files`` surface's hand-written routes (issue #117, #158).
 
-``files`` is an ordinary resource (:mod:`resourcey.filestore.file_resource`),
-so :func:`~resourcey.http.routes.register_routes` already mounts its standard
-surface -- ``read`` / ``delete`` / ``search`` / ``count`` / ``batch_read`` /
-``batch_edit`` -- correctly. Three things still need hand-written routes:
-
-* ``create`` -- not among the actions ``register_routes`` generates at all
-  (``files`` does not declare ``Action.CREATE``; see
-  :mod:`~resourcey.filestore.file_resource`'s docstring for why). It is a
-  direct ``multipart/form-data`` upload (case 2 of the upload-design
-  discussion), answering the ordinary ``201 Created`` once the bytes have
-  genuinely landed -- there is no capability-minting step to make a placeholder
-  status code necessary.
-* ``download`` (the JSON capability, unchanged from #117) and ``content``
-  (bytes, #158) are not among the eight standard actions at all.
-
-::
+``files`` is an ordinary resource (:mod:`resourcey.filestore.file_resource`), so
+:func:`~resourcey.http.routes.register_routes` already mounts its standard
+surface. Three routes are hand-written::
 
     POST   {resource}                 the upload itself (201; multipart/form-data)
     GET    {resource}/{id}/download   mint a ``get`` capability (the JSON shape)
     GET    {resource}/{id}/content    the bytes: a redirect for S3, streamed
-                                       directly for Local / SQL
+                                      directly for Local / SQL
 
-The framework-signed ``GET`` ``/_files/{key}`` transfer endpoint is mounted
-here too, for a :class:`~resourcey.filestore.signed_url.SignedFileStore`
-medium (Local / SQL); S3 mints native URLs and never reaches it. Upload has no
-transfer endpoint of its own to mount -- ``create`` *is* the upload, served
-directly by the route above.
+``create`` is not generated because ``files`` does not declare
+``Action.CREATE``. The framework-signed ``GET`` ``/_files/{key}`` transfer
+endpoint is mounted here too, for a
+:class:`~resourcey.filestore.signed_url.SignedFileStore` medium; S3 mints
+native URLs and never reaches it.
 
 :func:`register_file_routes` is called **after**
-:func:`~resourcey.http.app.create_app`, exactly like every other after-the-fact
-mount in this framework (``register_oauth_routes``, the earlier
-``register_file_routes``), and is the **sole** place ``files``'s routes are
-mounted -- it calls ``register_routes`` itself (which, with no ``Action.CREATE``
-declared, mounts every *other* standard route correctly and nothing for
-``create``), so the resource must **not** also be listed in the
-``Manifest(resources=...)`` passed to ``create_app`` (that would register its
-other standard routes a second time, on its own router). The medium still goes
-in the manifest's ``managers`` slot exactly as before::
+:func:`~resourcey.http.app.create_app`, and is the **sole** place ``files``'s
+routes are mounted — it calls ``register_routes`` itself, so the resource must
+**not** also be listed in the ``Manifest(resources=...)`` passed to
+``create_app``. The medium still goes in the manifest's ``managers`` slot::
 
-    manifest = Manifest(resources=[], managers=[store])  # files is not a manifest resource
+    manifest = Manifest(resources=[], managers=[store])
     app = create_app(manifest, dependency_builder=builder)
     register_file_routes(app, store, resource=files, dependency_builder=builder)
 
@@ -70,10 +52,8 @@ from resourcey.http.routes import (
     register_routes,
 )
 
-# Bounds how much of an over-cap upload this process buffers before rejecting
-# it: the upload is read and hashed in chunks, so a ``max_size`` cap is
-# enforced as soon as it is exceeded rather than only after the whole body
-# has already been read into memory.
+# The upload is read in chunks, so a ``max_size`` cap is enforced as soon as it
+# is exceeded rather than after the whole body has been buffered.
 _UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 
@@ -91,14 +71,11 @@ def register_file_routes(
     Args:
         app_or_router: A ``FastAPI`` app / ``APIRouter`` (duck-typed).
         store: The medium the bytes move against.
-        resource: The ``files`` resource (see :mod:`~resourcey.filestore.file_resource`).
-        dependency_builder: The seam every route authorizes through (default
-            :class:`~resourcey.http.dependency_builder.OpenDependencyBuilder`).
-        config: TTL / size cap (default ``FileStoreConfig.get_instance()``);
-            a ``max_size`` the resource itself was constructed with takes
-            precedence over this config's, mirroring the resource-level
-            override :class:`~resourcey.filestore.file_resource.FileResource`
-            already honours for the service-level enforcement.
+        resource: The ``files`` resource.
+        dependency_builder: The seam every route authorizes through.
+        config: TTL / size cap (default ``FileStoreConfig.get_instance()``).
+            A ``max_size`` the resource itself was constructed with takes
+            precedence over this config's.
         prefix: An optional mount prefix.
     """
     if resource.get_manifest() is not None:
@@ -139,13 +116,9 @@ def _add_create_route(
 ) -> None:
     """Mount ``POST {path}``: a ``multipart/form-data`` body with one ``file`` part.
 
-    This is the same shape a plain HTML ``<input type="file">`` form already
-    produces, so a no-JS form -- and Swagger UI's "Try it out" -- can create a
-    file directly, with no separate capability step. ``name`` / ``content_type``
-    are read off the upload; the service computes ``size`` / ``checksum`` from
-    the bytes it actually receives. Not among the actions
-    ``register_routes`` mounts (``files`` does not declare ``Action.CREATE``),
-    so there is no generated route to replace here, only one to add.
+    The same shape a plain HTML ``<input type="file">`` form produces, so a
+    no-JS form and Swagger UI can create a file directly. ``files`` does not
+    declare ``Action.CREATE``, so there is no generated route to replace.
     """
     service_dep = _service_dependency(exposed, builder)
     models = exposed.get_rest_models()
@@ -240,11 +213,9 @@ def _add_content_route(
 ) -> None:
     """``GET {path}/{id}/content`` -- the bytes.
 
-    A ``307`` redirect to a fresh presigned ``GET`` for S3 (the only sane
-    option for a non-browser client -- a native presigned URL is the thing
-    that tells it when the capability expires); streamed directly for Local /
-    SQL, where a redirect to ``/_files/{key}`` would buy nothing since the
-    request never leaves this process anyway.
+    A ``307`` redirect to a fresh presigned ``GET`` for S3, streamed directly
+    for Local / SQL, where a redirect would buy nothing since the request never
+    leaves this process.
     """
     service_dep = _service_dependency(exposed, builder)
     auth_dep = builder.get_principal_dependency()
@@ -289,11 +260,8 @@ def _add_content_route(
 def _add_signed_transfer_routes(router: APIRouter, store: FileStore) -> None:
     """Mount the signed ``GET`` transfer endpoint for a signed store.
 
-    Only a :class:`~resourcey.filestore.signed_url.SignedFileStore` serves
-    this (Local / SQL); an S3 store mints native URLs and a capability never
-    reaches the API. There is no ``PUT`` counterpart: upload has no capability
-    of its own to serve -- ``create`` *is* the upload, mounted directly by
-    :func:`_add_create_route` above.
+    Only a :class:`~resourcey.filestore.signed_url.SignedFileStore` serves this
+    (Local / SQL). There is no ``PUT`` counterpart: ``create`` *is* the upload.
     """
     if not isinstance(store, SignedFileStore):
         return

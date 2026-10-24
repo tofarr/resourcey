@@ -1,32 +1,21 @@
 """``RedisChannel`` — the clustered pub/sub channel (issue #17).
 
-Redis pub/sub bridges **processes**, not durability. Each app instance
-publishes to a Redis channel (through
-:class:`~resourcey.triggers.redis_trigger.RedisTrigger`) and every instance
-re-delivers to *its* local subscribers. Behind a load balancer a subscriber is
-usually on a different process from the one that handled the write, so an
-in-process callback alone is not correct in the deployment the framework
-assumes (multiple app instances, one database); Redis is what makes the
-fan-out correct there.
+Redis pub/sub bridges **processes**, not durability. Each app instance publishes
+to a Redis channel and every instance re-delivers to *its* local subscribers.
+Behind a load balancer a subscriber is usually on a different process from the one
+that handled the write, so an in-process fan-out alone is not correct there.
 
-Two consequences stated explicitly, because the transport cannot give more:
+Two consequences stated explicitly:
 
-* **At-most-once, unordered, no replay.** Pub/sub drops an event for an
-  instance that is down or briefly disconnected, and there is no offset to
-  resume from. Do not promise ordering or delivery guarantees the transport
-  cannot give.
+* **At-most-once, unordered, no replay.** Pub/sub drops an event for an instance
+  that is down or briefly disconnected.
 * **Policy filtering is local.** A published event carries no principal and no
-  filter; each instance re-applies *its own* subscribers' policies before
-  send. A process never trusts another process's filtering -- the policy is
-  never serialized to Redis.
+  filter; each instance re-applies *its own* subscribers' policies before send.
 
-``redis`` is imported **lazily**, only when a real client is built (or an
-explicit ``client=`` is supplied), exactly as ``filestore`` imports ``boto3``
-lazily, so ``realtime`` imports without the extra and a missing driver fails
-with an actionable :class:`ImportError` naming ``resourcey[redis]``. The
-client is owned by the channel's ``__aenter__`` / ``__aexit__`` (entered
-through the manifest's ``managers`` slot) when the channel built it; an
-injected ``client=`` is the escape hatch and is not closed.
+``redis`` is imported **lazily**, so ``realtime`` imports without the extra and a
+missing driver fails with an actionable ``ImportError`` naming
+``resourcey[redis]``. A client the channel built is closed on exit; an injected
+``client=`` is the escape hatch and is left alone.
 
 This module is part of ``resourcey.realtime``; it imports only lower framework
 layers (and ``redis`` lazily).
@@ -63,17 +52,9 @@ def _require_redis() -> Any:
 class RedisChannel(Channel):
     """A cross-process channel over ``redis.asyncio`` pub/sub.
 
-    Attributes:
-        url: The Redis connection URL (``redis://host:port/db``). Used only
-            when no explicit ``client`` is supplied.
-        channel_name: The Redis channel name events are published to.
-
-    The injected client (the escape hatch, winning over ``url`` and never
-    closed on exit -- the caller owns it) is a constructor-only keyword, held
-    in a ``PrivateAttr`` rather than a model field -- exactly
-    ``S3FileStore``'s pattern -- so it never reaches ``from_env``'s field walk
-    (an arbitrary ``Any``-typed object has no env parser, and is not something
-    an env var could express anyway).
+    ``url`` is used only when no explicit ``client`` is supplied. The injected
+    client is a constructor-only keyword held in a ``PrivateAttr``, so it never
+    reaches ``from_env``'s field walk.
     """
 
     url: str = "redis://localhost:6379/0"
@@ -110,8 +91,7 @@ class RedisChannel(Channel):
     async def publish(self, event: ResourceEvent) -> None:
         """Publish ``event`` (JSON) to the Redis channel.
 
-        A subscriber on any instance decodes it and re-applies its own
-        policies before delivering.
+        A subscriber on any instance decodes it and re-applies its own policies.
         """
         if self.client is None:
             raise RuntimeError("RedisChannel used before entering it (no client)")

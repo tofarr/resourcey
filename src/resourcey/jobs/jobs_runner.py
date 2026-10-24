@@ -1,11 +1,8 @@
 """``JobRunner`` — the durable, claimable-job manager (issue #16).
 
-The runner is an ordinary :class:`~resourcey.core.manifest.Manifest` **manager**,
-entered through the existing ``managers=`` slot (like
-:class:`~resourcey.tasks.scheduler.BackgroundTaskScheduler` /
-:class:`~resourcey.sql.session_manager.SqlSessionManager`), so ``core`` stays
-unaware of jobs and the whole feature lives in its own package. On construction
-it generates a **process-unique** ``runner_id``. On a sweep interval it:
+The runner is an ordinary ``Manifest`` **manager**, entered through the existing
+``managers=`` slot, so ``core`` stays unaware of jobs. On construction it
+generates a **process-unique** ``runner_id``. On a sweep interval it:
 
 1. **Recovers** stale claims and promotes due ``SCHEDULED`` jobs;
 2. **Claims** up to its free capacity of ``PENDING`` jobs;
@@ -13,19 +10,14 @@ it generates a **process-unique** ``runner_id``. On a sweep interval it:
    session held open while the body runs**;
 4. **Completes** each run via a conditional completion.
 
-Coordination is :mod:`resourcey`'s conditional write (issue #164): both the
-claim and the completion are ordinary ``Service.update(payload, condition=...)``
+Both the claim and the completion are ``Service.update(payload, condition=...)``
 calls whose ``None`` result is the verdict, so the check and the write are **one
 atomic operation** — no read-then-write race and no ``SELECT … FOR UPDATE SKIP
-LOCKED``. A claim miss and an absent row are both ``None``, so a losing runner
-cannot distinguish them. The runner writes through the **inner** ``jobs``
-resource (it is not serving a request), so no authorization policy scope is
-folded into its writes; the REST / ``ResourceView`` surface enforces client
-scope.
+LOCKED``. The runner writes through the **inner** ``jobs`` resource, so no
+authorization policy scope is folded into its writes.
 
-Entering is gated by ``jobs_runner_enabled``, so a web replica can start the
-manifest without running jobs. Tests drive the deterministic :meth:`sweep`
-directly rather than waiting on the loop.
+Entering is gated by ``jobs_runner_enabled``. Tests drive the deterministic
+:meth:`sweep` directly rather than waiting on the loop.
 
 This module is part of ``resourcey.jobs``; it imports lower framework layers
 (``core`` / ``config`` / ``util``).
@@ -69,9 +61,8 @@ _CLAIM_ATTEMPT_FACTOR = 4
 def _as_utc(value: datetime) -> datetime:
     """Return ``value`` as timezone-aware UTC.
 
-    A SQLite ``DateTime(timezone=True)`` column round-trips as a *naive*
-    datetime, so a comparison against an aware ``now`` would raise; anchoring a
-    naive value to UTC keeps the sweep's age arithmetic correct on every backend.
+    A SQLite ``DateTime(timezone=True)`` column round-trips as *naive*, so
+    anchoring it to UTC keeps the sweep's age arithmetic correct.
     """
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
@@ -79,20 +70,9 @@ def _as_utc(value: datetime) -> datetime:
 class JobRunner:
     """Claims and runs durable ``jobs`` rows, one process-unique id per runner.
 
-    Args:
-        resource: The **inner** ``jobs`` resource (the full model). The runner
-            opens its service per operation; the public
-            :func:`~resourcey.jobs.jobs_model.jobs_view` is registered separately.
-        config: The runner config; defaults to
-            :meth:`~resourcey.jobs.jobs_config.JobsConfig.get_instance`.
-        runner_id: An explicit claim id (mostly for tests); a fresh ``uuid4`` by
-            default, so a restart never reuses an id and a stale claim is never
-            mistaken for this process's.
-        sweep_interval: Overrides the config sweep interval (seconds).
-        max_concurrent: Overrides the config concurrency cap.
-        default_max_seconds_for_run: Overrides the config stale-claim bound.
-        default_max_attempts: Overrides the config retry cap.
-        enabled: Overrides the config ``jobs_runner_enabled`` gate.
+    ``resource`` is the **inner** ``jobs`` resource; the public ``jobs_view`` is
+    registered separately. ``runner_id`` is a fresh ``uuid4`` by default, so a
+    restart never reuses an id.
     """
 
     def __init__(
@@ -168,9 +148,8 @@ class JobRunner:
     async def __aexit__(self, *exc: object) -> None:
         """Cancel the loop and drain in-flight runs, releasing their claims.
 
-        A run cancelled mid-body leaves its row ``RUNNING``; each in-flight
-        job's claim is released back to ``PENDING`` (best effort) so a graceful
-        shutdown does not delay a re-run by the stale-claim bound.
+        A run cancelled mid-body leaves its row ``RUNNING``; each claim is
+        released back to ``PENDING`` (best effort).
         """
         self._entered = False
         loop, self._loop = self._loop, None
@@ -209,9 +188,8 @@ class JobRunner:
     async def sweep(self, *, now: datetime | None = None) -> int:
         """One coordination pass: recover, promote, then claim and start work.
 
-        Returns the number of jobs this pass claimed. Deterministic and public
-        so a test can drive it with a chosen ``now`` instead of waiting on the
-        loop.
+        Returns the number of jobs claimed. Public so a test can drive it with a
+        chosen ``now``.
         """
         moment = now if now is not None else datetime.now(UTC)
         await self._recover_stale(moment)
@@ -225,11 +203,8 @@ class JobRunner:
     async def _recover_stale(self, now: datetime) -> int:
         """Return stale ``RUNNING`` claims to ``PENDING``, or mark them ``ERROR``.
 
-        A crashed runner leaves a job ``RUNNING`` forever; ``runner_id`` is fresh
-        per process so it is never reused, and ``claimed_at`` plus the job's own
-        ``max_seconds_for_run`` (falling back to the config default) is the
-        bound. Under the attempt cap the job requeues; at the cap it goes
-        terminal ``ERROR``.
+        ``claimed_at`` plus the job's own ``max_seconds_for_run`` is the bound.
+        Under the attempt cap the job requeues; at the cap it goes ``ERROR``.
         """
         recovered = 0
         async with await self._resource.get_service() as service:
@@ -270,9 +245,8 @@ class JobRunner:
     async def _promote_due_scheduled(self, now: datetime) -> int:
         """Promote a due ``SCHEDULED`` job to ``PENDING`` so it becomes claimable.
 
-        A ``SCHEDULED`` job with a ``NULL`` ``run_at`` is treated as due (it was
-        scheduled without a future time). The promotion is a conditional write,
-        so two runners promoting the same job is harmless.
+        A ``NULL`` ``run_at`` is treated as due. The promotion is a conditional
+        write, so two runners promoting the same job is harmless.
         """
         promoted = 0
         async with await self._resource.get_service() as service:
@@ -318,8 +292,7 @@ class JobRunner:
                     claimed_at=now,
                     attempts=job.attempts + 1,
                 )
-                # The condition makes the check-and-write atomic: ``None`` means
-                # another runner won the claim, so this one simply tries the next.
+                # ``None`` means another runner won the claim; try the next.
                 if await service.update(payload, condition=claimable) is not None:
                     claimed.append(job.id)
         for job_id in claimed:
@@ -352,14 +325,10 @@ class JobRunner:
             logger.exception("Job %s failed unexpectedly.", job_id)
 
     async def _invoke(self, kind: str, details: Any) -> JobRun:
-        """Run the stored body — a ``JobDetails`` instance, or a legacy mapping.
+        """Run the stored body — a ``JobDetails`` instance, or a raw mapping.
 
-        The ``job_details`` column round-trips the model, so ``details`` is
-        normally already the concrete kind. A raw mapping (an older row, or a
-        backend that stored plain JSON) is validated here. A body that raises is
-        caught and mapped to a terminal ``ERROR`` (rather than crashing the
-        runner task); an unresolvable kind (a class the process has not imported)
-        is likewise an ``ERROR``, never a silent no-op.
+        A body that raises is caught and mapped to a terminal ``ERROR``; an
+        unresolvable kind is likewise an ``ERROR``, never a silent no-op.
         """
         try:
             body = (
@@ -381,15 +350,9 @@ class JobRunner:
     async def _finish(self, job: Any, run: JobRun) -> bool:
         """Persist a run's outcome, conditional on this runner still owning the claim.
 
-        The condition requires ``status == RUNNING`` **and** ``claimed_by == this
-        runner``, so a runner whose claim was recovered (and possibly re-claimed)
-        abandons its write and never overwrites a terminal state.
-
-        A *failed* run requeues to ``PENDING`` (clearing the claim) while the
-        attempt cap is not yet reached, and goes terminal ``ERROR`` at the cap;
-        a successful run is terminal ``COMPLETED``. The retry decision is made
-        here, against the freshly loaded row, because the attempt counter is
-        only known once the body has finished. Returns whether the write applied.
+        A *failed* run requeues to ``PENDING`` while the attempt cap is not yet
+        reached, and goes terminal ``ERROR`` at the cap. Returns whether the write
+        applied.
         """
         if run.status == "ERROR" and job.attempts < job.max_attempts:
             payload = self._payload(
@@ -428,10 +391,8 @@ class JobRunner:
     ) -> Any:
         """Create a ``jobs`` row for ``details`` and return it.
 
-        This is the producer surface: a scheduled task, an app request handler,
-        or ordinary app code enqueues a durable job here (the REST ``POST /jobs``
-        is the same create through the view). ``run_at`` schedules a one-shot;
-        ``max_attempts`` / ``max_seconds_for_run`` default to the runner's config.
+        The producer surface (the REST ``POST /jobs`` is the same create through
+        the view). ``run_at`` schedules a one-shot.
         """
         payload = self._payload(
             None,
@@ -498,8 +459,7 @@ _NULLABLE_FIELDS = frozenset({"claimed_by", "claimed_at", "run_at", "detail", "c
 def runner_from_manifest(manifest: Manifest) -> JobRunner:
     """The :class:`JobRunner` among ``manifest``'s managers.
 
-    Raises :class:`ValueError` when the manifest has no runner, naming the fix
-    (register one in ``managers=``).
+    Raises :class:`ValueError` naming the fix (register one in ``managers=``).
     """
     for manager in manifest.managers:
         if isinstance(manager, JobRunner):

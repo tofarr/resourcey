@@ -1,55 +1,28 @@
 """The per-request service-dependency seam (issue #86).
 
 A :class:`DependencyBuilder` decides **how** the per-request service a route
-handler receives is built. It is passed to the transport entry points
-(:func:`~resourcey.http.app.create_app` /
-:func:`~resourcey.http.app.add_to_app`), resolved once per resource at
-route-registration time, and used to build that resource's FastAPI dependency —
-so one setting can apply an authorization posture (e.g. wrap every service in a
-secured service) to the whole API without naming a resource.
+handler receives is built. It is passed to the transport entry points, resolved
+once per resource at route-registration time, and used to build that resource's
+FastAPI dependency — so one setting can apply an authorization posture to the
+whole API without naming a resource.
 
-* :class:`OpenDependencyBuilder` — the default, and named for what it does: it
-  applies **no** authentication or authorization, producing a dependency that
-  opens the resource's own service over the request-scoped ``ctx`` and yields
-  it. The name is a warning label, not an incidental one: a route secured by
-  this builder is reachable by anyone, so it should appear deliberately in an
-  app's assembly (e.g. ``create_app(manifest, dependency_builder=OpenDependencyBuilder())``)
-  rather than be reached by forgetting to pass a securing builder.
-* An app-supplied builder — e.g. one that wraps every resource's service and
-  composes an auth dependency. Because
-  :meth:`DependencyBuilder.get_service_dependency` returns an ordinary
-  **callable**, its author may declare any parameter FastAPI can wire (the
-  :class:`~starlette.requests.Request`, other ``Depends(...)``, i.e. an auth
-  dependency). That is how the ``v1`` builder composed an API-key check with
-  the service, and it is what makes this seam cover authentication as well as
-  authorization.
+:class:`OpenDependencyBuilder` is the default and secures nothing, so it
+appears deliberately in an app's assembly rather than being reached by
+forgetting to pass a securing builder. Because
+:meth:`DependencyBuilder.get_service_dependency` returns an ordinary
+**callable**, a builder's author may declare any parameter FastAPI can wire
+(the request, other ``Depends(...)``, i.e. an auth dependency), which is what
+makes this seam cover authentication as well as authorization.
 
-* An **authenticating** builder may additionally implement
-  :meth:`DependencyBuilder.get_principal_dependency` (issue #131). The transport
-  adds that dependency to each resource's routes as a lightweight
-  ``dependencies=[...]`` so the OpenAPI operation reflects the builder's
-  security scheme (an extra declared parameter — e.g. ``X-API-Key`` — would not,
-  because FastAPI omits dependency-injected parameters from the operation). It
-  does not change the route or service contract: the service dependency still
-  does the real work, and the principal dependency runs once per request (the
-  result is cached, so there is no double authentication). The default returns
-  ``None`` (no extra dependency).
+The builder is an **authorization** seam: it never decides *exposure*
+(``get_exposed_resource`` is the sole gate on route registration) and returns a
+non-optional callable, so it cannot silently drop routes. A restrictive posture
+should return a dependency that *denies* rather than nothing, keeping the route
+visible in OpenAPI.
 
-The builder is an **authorization** seam. It never decides *exposure*:
-:meth:`~resourcey.core.resource.Resource.get_exposed_resource` is the sole
-gate on route registration, and
-:meth:`DependencyBuilder.get_service_dependency` returns a **non-optional**
-callable, so a builder cannot silently drop routes. A restrictive posture
-should return a dependency that *denies* (403) rather than nothing, keeping the
-route (and the denial) visible in OpenAPI.
-
-The builder and its default live here, in ``http``, rather than on the
-:class:`~resourcey.core.manifest.Manifest`: the default must produce a
-FastAPI dependency whose ``Request`` parameter is annotated
-``starlette.requests.Request`` (FastAPI locates the request by that
-annotation), so the builder is transport code, and ``core`` must not import
-``http`` (a cycle). The manifest therefore stays a plain container, and the
-seam threads through the transport entry points.
+The builder lives in ``http`` rather than on the manifest because the default
+produces a FastAPI dependency annotated with ``starlette.requests.Request``,
+and ``core`` must not import ``http`` (a cycle).
 
 This module imports no code outside the framework.
 """
@@ -86,12 +59,10 @@ class DependencyBuilder(DiscriminatedUnionMixin, ABC):
     def get_principal_dependency(self) -> Callable[..., object] | None:
         """An optional dependency the transport adds to every route's ``dependencies``.
 
-        An authenticating builder returns a FastAPI dependency here so the
-        builder's security scheme appears in the OpenAPI operation (issue #131);
-        the default returns ``None``. It is added as a ``dependencies=[...]``
-        entry, so it guards the route without becoming a declared parameter; the
-        real service work stays in :meth:`get_service_dependency`, and the
-        authenticated result is cached per request (no double authentication).
+        An authenticating builder returns one here so its security scheme appears
+        in the OpenAPI operation. It guards the route without becoming a declared
+        parameter, and the authenticated result is cached per request, so there is
+        no double authentication.
         """
         return None
 
@@ -100,8 +71,7 @@ class OpenDependencyBuilder(DependencyBuilder):
     """The no-auth default: the resource's own service over the request-scoped ctx.
 
     Named ``Open`` because it secures nothing — a deployment must supply an
-    authenticating builder instead; this one exists so an intentionally public
-    app says so out loud.
+    authenticating builder instead.
     """
 
     def get_service_dependency(self, resource: Resource[Any, Any]) -> Callable[..., object]:
@@ -117,8 +87,7 @@ def request_ctx(request: Request) -> MutableMapping[Any, Any]:
     """The call-scoped context for ``request`` (created on first use).
 
     Every resource in one request shares this mapping, so storage opened by one
-    service is adopted by the next (see
-    :mod:`resourcey.core.resource` on storage ownership).
+    service is adopted by the next.
     """
     ctx = getattr(request.state, _CTX_STATE_KEY, None)
     if ctx is None:

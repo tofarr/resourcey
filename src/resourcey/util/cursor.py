@@ -1,31 +1,22 @@
 """Opaque, tamper-proof keyset cursor codec for pagination (issues #78, #97, #80).
 
 The cursor encodes the ``(sort field, ascending, sort key, id)`` of the last row
-on the current page — the ``v1`` shape — and is encrypted with
-:class:`~resourcey.encryption.encryption_service.EncryptionService`
-(JWE ``dir`` + ``A256GCM``), so a client cannot forge or alter it: any tampering
-invalidates the GCM auth tag and :meth:`EncryptionService.decrypt_value` raises,
-which the service maps to an error rather than silently paging from a bogus
-position.
+on the current page, encrypted with the ``EncryptionService`` (JWE ``dir`` +
+``A256GCM``), so a client cannot forge or alter it: any tampering invalidates the
+GCM auth tag and decryption raises.
 
 Encoding the sort field and direction is what lets a service **reject** a cursor
-reused under a different sort (a ``sort=created_at`` page's ``next_cursor`` sent
-back with ``sort=name`` would otherwise apply the decrypted key against the
-wrong column, yielding silently wrong results). ``sort_field`` is ``None`` for
-the default, no-sort (identifier-ordered) case.
+reused under a different sort. ``sort_field`` is ``None`` for the default,
+identifier-ordered case.
 
-Values are stored with a type tag (:func:`_serialize` / :func:`_deserialize`) so
-non-JSON-native types (``datetime``, ``UUID``, ``Decimal``, ...) round-trip to
-their native Python type and bind correctly to the backend's keyset predicate.
+Values are type-tagged so non-JSON-native types (``datetime``, ``UUID``,
+``Decimal``, ...) round-trip to their native Python type.
 
-This module holds the *storage-agnostic* half only: the SQL keyset ``WHERE``
-predicate stays in :mod:`resourcey.sql.cursor` (it imports SQLAlchemy) and the
-Mongo one in ``mongo``, so the tamper-proof encoding is identical across
-backends while each backend builds its own seek clause.
+This module holds the *storage-agnostic* half only: each backend builds its own
+seek clause.
 
-It is part of the ``util`` bottom layer: besides the standard library it
-imports no project package at runtime (the encryption service is a
-``TYPE_CHECKING``-only reference).
+It is part of the ``util`` bottom layer: it imports no project package at runtime
+(the encryption service is a ``TYPE_CHECKING``-only reference).
 """
 
 from __future__ import annotations
@@ -49,13 +40,8 @@ _K_ID = "id"  # type-tagged id value
 def _serialize(value: Any) -> tuple[str, Any]:
     """Tag a value with its type so it can be deserialized natively.
 
-    Returns a ``(type_tag, json_native_repr)`` pair whose repr is always a
-    JSON-native scalar, keeping the encrypted payload plain JSON while the tag
-    drives reconstruction of the native Python type on decode.
-
-    ``None`` gets its own tag: stringifying it to ``"None"`` (the previous
-    fallback) decoded back as the *string* ``"None"``, which bound against the
-    wrong type and broke keyset paging on a nullable sort column.
+    Returns a ``(type_tag, json_native_repr)`` pair. ``None`` gets its own tag
+    so it cannot decode back as the *string* ``"None"``.
     """
     if value is None:
         return "n", None

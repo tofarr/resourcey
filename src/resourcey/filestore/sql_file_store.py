@@ -2,28 +2,22 @@
 
 For deployments that already run Postgres and want no second system: the bytes
 live in a dedicated ``file_blobs`` table, accessed through SQLAlchemy directly
-(the documented escape hatch), and the framework signs the capability URLs
-(:mod:`resourcey.filestore.signed_url`). It suits small files; large files
-belong on S3.
+(the documented escape hatch), and the framework signs the capability URLs. It
+suits small files; large files belong on S3.
 
-Unlike #117's original design, the blob table carries ``name`` / ``checksum``
-alongside the bytes -- **it is the single source of truth** for an object's
-existence and metadata, exactly as the local directory and S3 bucket are for
-their media. It is exposed as a real, registered, **read-only** resource
-(:func:`sql_file_blob_view`: a :class:`~resourcey.sql.sql_resource.SqlResource`
-wrapped in a :class:`~resourcey.view.ResourceView` that projects ``data`` out of
-every response shape) for debuggability -- mirroring the OAuth token table's
-"exposed read-only with every secret field hidden" pattern -- but the actual
-``files`` surface (create / read / delete / search / count / batch) is served
-by :mod:`resourcey.filestore.file_resource` through this store's ``put`` /
-``head`` / ``list_objects`` seam, not through the SQL resource's own routes.
+The blob table **is** the single source of truth for an object's existence and
+metadata, exactly as the local directory and S3 bucket are for their media. It is
+exposed as a read-only resource (:func:`sql_file_blob_view`, a
+:class:`~resourcey.sql.sql_resource.SqlResource` wrapped in a
+:class:`~resourcey.view.resource_view.ResourceView` that projects ``data`` out of
+every response shape) for debuggability, but the actual ``files`` surface is
+served by :mod:`resourcey.filestore.file_resource` through this store's
+``put`` / ``head`` / ``list_objects`` seam.
 
-The session source mirrors :class:`~resourcey.sql.sql_resource.SqlResource`:
-an explicit ``session_factory`` (the escape hatch) wins; otherwise a session
-maker is resolved from ``session_manager`` by ``connection_name``, defaulting to
-the process-wide :func:`~resourcey.sql.session_manager.get_sql_session_manager`.
-The store is entered through the manifest's manager slot, so its resolution
-happens while the manager is open.
+The session source mirrors :class:`~resourcey.sql.sql_resource.SqlResource`: an
+explicit ``session_factory`` wins; otherwise a session maker is resolved from
+``session_manager`` by ``connection_name``. The store is entered through the
+manifest's manager slot, so its resolution happens while the manager is open.
 
 This module imports no code outside the framework.
 """
@@ -81,11 +75,8 @@ def sql_file_blob_view(
 ) -> Resource[Any, Any]:
     """A read-only, ``data``-hiding view of the blob table (debuggability only).
 
-    Mirrors ``oauth_token_view``: the table is the single source of truth for
-    the SQL medium, so exposing it read-only with the bytes projected away is
-    useful for admin / debugging without risking the bytes leaking through a
-    generated response. Register the **view**, not a bare
-    ``SqlResource(FileBlob)`` -- registering both double-mounts the table.
+    Register the **view**, not a bare ``SqlResource(FileBlob)`` -- registering
+    both double-mounts the table.
     """
     inner: Resource[Any, Any] = SqlResource(
         FileBlob,
@@ -113,13 +104,9 @@ def sql_file_blob_view(
 class SqlFileStore(SignedFileStore):
     """A blob-table-backed medium.
 
-    Attributes:
-        connection_name: The connection resolved from ``session_manager``
-            (default: its first connection).
-        table_name: The blob table name (informational; the mapper owns the real
-            table).
-        signed_url_base_url: Prefix prepended to a framework-signed URL.
-        signed_url_path_template: The route template the URL points at.
+    ``connection_name`` selects the connection resolved from
+    ``session_manager``; ``table_name`` is informational (the mapper owns the
+    real table).
     """
 
     connection_name: str | None = None

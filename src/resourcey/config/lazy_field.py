@@ -3,13 +3,12 @@
 A :class:`LazyField` descriptor lets a :class:`~resourcey.config.config_base.BaseConfig`
 declare a field typed as an abstract :class:`~resourcey.util.models.DiscriminatedUnionMixin`
 base whose concrete subclass is **not loaded** at config-build time. The
-subclass is chosen by a ``{NAME}_CLASS`` env var and imported lazily on the
-first attribute access — after the config is fully built, so the concrete
-package and the config can reference each other without a circular import.
+subclass is chosen by a ``{NAME}_CLASS`` env var and imported on the first
+attribute access — after the config is fully built, so the concrete package and
+the config can reference each other without a circular import.
 
 This complements (does not replace) the env parser's eager
-:class:`~resourcey.util.env_parser.DiscriminatedUnionEnvParser`; the existing
-discriminated-union path is left intact.
+:class:`~resourcey.util.env_parser.DiscriminatedUnionEnvParser`.
 """
 
 from __future__ import annotations
@@ -36,32 +35,21 @@ class LazyField:
     """Descriptor that lazily resolves a polymorphic config field on first access.
 
     The field's name (→ env-var prefix) and base type (→ subclass check) are
-    inferred from the class declaration via :meth:`__set_name__` and the
-    ``ClassVar`` annotation, so no arguments are needed.
-
-    Usage::
+    inferred from the class declaration, so no arguments are needed::
 
         class AppConfig(BaseConfig):
             my_field: ClassVar[MyPolymorphicObj] = LazyField()
 
     An optional ``default`` supplies the value used when the ``{NAME}_CLASS``
-    env var is **unset**, instead of raising. ``default`` may be an instance or
-    a zero-arg callable returning one; each config instance gets its own call
-    result (so a mutable default is not shared). The default is **not** parsed
-    from the environment — it is expected to already be fully built::
+    env var is **unset**; it may be an instance or a zero-arg callable, and each
+    config instance gets its own call result. A *set-but-empty*
+    ``{NAME}_CLASS`` raises rather than falling back to the default — silently
+    downgrading a security setting to a no-authentication posture is the wrong
+    failure mode.
 
-        dependency_builder: ClassVar[DependencyBuilder] = LazyField(
-            default=OpenDependencyBuilder
-        )
-
-    A *set-but-empty* ``{NAME}_CLASS`` raises rather than falling back to the
-    default. The fallback exists for "no posture configured"; an empty value is
-    a misconfiguration, and silently downgrading to the default (which may be a
-    no-authentication posture) is the wrong failure mode for a security setting.
-
-    A ``ClassVar[list[type[SomeBase]]]`` field is supported too — it resolves
-    a ``{NAME}`` / ``{NAME}_0`` / ``{NAME}_1`` list of dotted import paths to
-    the named classes (lazily, on first access). See :meth:`_resolve_list`.
+    A ``ClassVar[list[type[SomeBase]]]`` field resolves a ``{NAME}`` /
+    ``{NAME}_0`` / ``{NAME}_1`` list of dotted import paths instead. See
+    :meth:`_resolve_list`.
     """
 
     _owner: type[BaseConfig]
@@ -98,10 +86,7 @@ class LazyField:
                 f"Missing env var '{class_var}' for lazy field '{self._name}' "
                 f"on {self._owner.__name__}"
             )
-        # A set-but-empty value is a misconfiguration, not "unconfigured": the
-        # default fallback above only covers an unset var. Falling through here
-        # with "" would otherwise raise the "must be fully-qualified" error,
-        # which is correct — but name the real problem.
+        # A set-but-empty value is a misconfiguration, not "unconfigured".
         if not fqn.strip():
             raise ResourceyConfigError(
                 f"Env var '{class_var}' is set but empty for lazy field '{self._name}' "
@@ -132,14 +117,10 @@ class LazyField:
         """Resolve a ``list[type[Base]]`` field from dotted import paths in env.
 
         Reads ``{PREFIX}_{NAME}`` (JSON array) or ``{PREFIX}_{NAME}_0`` /
-        ``{PREFIX}_{NAME}_1`` … and imports each path, enforcing the declared
-        base via :func:`resolve_import_paths`. The prefix is the config
-        class's :meth:`get_prefix` (the process-wide ``APP``) so the env var is
-        consistent with the config's other fields (``APP_MANIFEST``),
-        unlike the single-class variant whose field name is the namespace for
-        the imported object's own config. ``{NAME}_CLASS`` is never consulted
-        — the list variant has no single class. An empty / unset list resolves
-        to ``[]``.
+        ``{PREFIX}_{NAME}_1`` … and imports each path. The prefix is the config
+        class's :meth:`get_prefix`, so the env var is consistent with the
+        config's other fields. ``{NAME}_CLASS`` is never consulted — the list
+        variant has no single class. An empty / unset list resolves to ``[]``.
         """
         base = _list_item_base(annotation)
         prefix = f"{self._owner.get_prefix()}_{self._name.upper()}"
@@ -171,12 +152,7 @@ class LazyField:
 
 
 def _unwrap_classvar(annotation: Any) -> type:
-    """Strip a ``ClassVar[...]`` wrapper so the inner type is usable with ``issubclass``.
-
-    A subscripted ``ClassVar`` is not a valid ``issubclass`` argument; this
-    helper returns the inner type. If the annotation is not a ``ClassVar`` it
-    is returned unchanged.
-    """
+    """Strip a ``ClassVar[...]`` wrapper so the inner type is usable with ``issubclass``."""
     origin = getattr(annotation, "__origin__", None)
     if origin is ClassVar:
         return cast(type, annotation.__args__[0])
@@ -184,12 +160,7 @@ def _unwrap_classvar(annotation: Any) -> type:
 
 
 def _is_list_of_types(annotation: Any) -> bool:
-    """True when ``annotation`` is ``ClassVar[list[type[...]]]`` or ``list[type[...]]``.
-
-    This is the shape of a multi-class lazy field (e.g.
-    :attr:`FrameworkConfig.resources`). Strips a ``ClassVar`` wrapper first so
-    the same check serves both ``ClassVar[list[...]]`` and bare ``list[...]``.
-    """
+    """True when ``annotation`` is ``ClassVar[list[type[...]]]`` or ``list[type[...]]``."""
     inner = annotation
     if getattr(annotation, "__origin__", None) is ClassVar:
         inner = annotation.__args__[0]
@@ -202,9 +173,8 @@ def _is_list_of_types(annotation: Any) -> bool:
 def _list_item_base(annotation: Any) -> type:
     """The declared base of a ``list[type[Base]]`` (or ``ClassVar`` thereof).
 
-    For ``list[type[Base]]`` returns ``Base``; for ``list[type]`` (no
-    parameter) returns ``object``. Raises :class:`TypeError` if the annotation
-    is not a list-of-types shape.
+    For ``list[type[Base]]`` returns ``Base``; for an unparameterized
+    ``list[type]`` returns ``object``.
     """
     inner = annotation
     if getattr(annotation, "__origin__", None) is ClassVar:

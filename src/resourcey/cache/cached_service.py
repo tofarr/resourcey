@@ -1,27 +1,14 @@
 """``CachedService`` — the read-through cache a ``CachedResource`` yields.
 
-The service wrapper :class:`~resourcey.cache.cached_resource.CachedResource`
-builds. It forwards every action to ``inner`` but, for reads, consults the
-resource's :class:`~resourcey.cache.cache_strategy.CacheStrategy`
-(:meth:`~resourcey.core.service.CacheStrategy.should_read`) against the copy it
-holds in a :class:`~resourcey.cache.cache_store.CacheStore`: a fresh copy is
-served from the store (no source read), a stale one is refetched and the store
-refilled.
+It forwards every action to ``inner`` but, for ``read`` / ``search`` /
+``count`` / ``batch_read``, consults the strategy's ``should_read`` against the
+copy in a :class:`~resourcey.cache.cache_store.CacheStore`: a fresh copy is
+served from the store, a stale one is refetched and the store refilled. Every
+write is forwarded and then **evicts** the resource's entries.
 
-Read-through scope
-------------------
-Only the shape-preserving reads are cached: ``read`` / ``search`` / ``count`` /
-``batch_read``. Every write (``create`` / ``update`` / ``delete`` /
-``batch_edit``) is forwarded and then **evicts** the resource's entries, so a
-write through the wrapper never serves a stale copy.
-
-Caller-scoped responses
------------------------
-A response that may differ per caller is **never** stored:
-``response_is_private()`` is true when either the wrapper was configured
-``private`` or the inner service reports itself caller-scoped (an ``Owner``
-policy). Such a service still works, it just always reads through — sharing a
-principal-narrowed body across callers would be an authorization leak.
+A response that may differ per caller is **never** stored: sharing a
+principal-narrowed body across callers would be an authorization leak, so such
+a service always reads through.
 
 This module is part of ``resourcey.cache``; it imports only lower framework
 layers (``core`` / ``util``).
@@ -64,10 +51,8 @@ def _digest(value: str) -> str:
 class CachedService(Service[T, K], Generic[T, K]):
     """A service proxy that serves fresh reads from cache and evicts on a write.
 
-    It is its own async context manager, delegating the storage lifetime to the
-    inner service (the "whoever opens the storage owns its commit and close"
-    rule is unchanged). The :class:`CacheStore` is owned by the wrapping
-    resource, not this per-request service, so the cache outlives a request.
+    The :class:`CacheStore` is owned by the wrapping resource, not this
+    per-request service, so the cache outlives a request.
     """
 
     def __init__(
@@ -93,9 +78,7 @@ class CachedService(Service[T, K], Generic[T, K]):
 
     async def __aenter__(self) -> CachedService[T, K]:
         await super().__aenter__()
-        # An inner already entered (a composed DependencyBuilder opened it)
-        # stays owned by whoever opened it -- adopting it here would
-        # double-enter / double-close it.
+        # An inner already entered stays owned by whoever opened it.
         if not self._inner.entered:
             await self._inner.__aenter__()
             self._owns_inner = True
@@ -119,8 +102,7 @@ class CachedService(Service[T, K], Generic[T, K]):
         """Whether this response may differ per caller, so must not be cached.
 
         The wrapper's own ``private`` flag **or** the inner service's
-        caller-scoping — an ``Owner``-scoped inner still makes the body
-        principal-dependent, so the wrapper must not share it.
+        caller-scoping.
         """
         return self._private or self._inner.response_is_private()
 
@@ -135,18 +117,14 @@ class CachedService(Service[T, K], Generic[T, K]):
     def _cacheable(self) -> bool:
         """Whether this service may read / write cache at all.
 
-        No: when there is no strategy, or the response is caller-scoped. A
-        caller-scoped response is never shared, so it always reads through.
+        ``False`` when there is no strategy or the response is caller-scoped.
         """
         return self._strategy is not None and not self.response_is_private()
 
     def _entry(self, payload: Any) -> CacheEntry:
         """A cache entry for ``payload``, with a best-effort validator.
 
-        The strategy's ETag is computed where the payload shape allows it (a
-        model, a list, a :class:`Page`, or a bare count); the shipped
-        time-based strategy ignores it, so a shape the strategy cannot hash
-        simply stores ``etag=None``.
+        A shape the strategy cannot hash simply stores ``etag=None``.
         """
         etag: str | None = None
         strategy = self._strategy

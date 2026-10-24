@@ -1,26 +1,10 @@
 """A :class:`Singleton` mixin for process-wide instances.
 
-Several pieces of the framework are naturally one-per-process (a dependency
-builder, a cache, the search-filter leaves), and each would otherwise
-hand-roll an ``lru_cache`` accessor or its own ``__new__`` cache. This module
-gives them one small, composable building block.
-
-Semantics:
-
-* Constructing a class more than once returns the **same** instance — identity,
-  not equality.
-* ``__init__`` runs **exactly once** per concrete class, on first construction.
-  Later constructions with different arguments return the existing instance and
-  leave it untouched, so the first construction wins.
-* Each concrete subclass owns its own singleton: a base and its subclass are
-  independent, as are sibling subclasses.
-
-It is deliberately transport / framework agnostic and composes with both
-Pydantic's ``BaseModel`` and :class:`~resourcey.util.models.DiscriminatedUnionMixin`:
-pydantic's validation/construction still runs (``model_validate`` returns the
-cached instance), and one singleton is kept per discriminated ``kind``. No
-extra Pydantic field is introduced — the cache lives on the class's own
-``__dict__`` under private attribute names.
+Constructing a concrete subclass more than once returns the same instance, and
+its ``__init__`` runs exactly once (the first construction wins). Each concrete
+subclass owns its own instance, and the mixin composes with both Pydantic
+``BaseModel`` and :class:`~resourcey.util.models.DiscriminatedUnionMixin`
+because it stores state on the class's own ``__dict__``, never as a field.
 
 This module imports nothing but the standard library.
 """

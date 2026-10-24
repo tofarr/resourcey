@@ -1,10 +1,9 @@
 """``TriggerConfig`` — the env-parseable trigger declaration (issue #155).
 
-The core seam is ``TriggeredResource(inner, on_edit=[...])``, built directly
-in app code. This module is the **opt-in rung** that makes triggers
-deployable from the environment instead: each entry names the resource path it
-targets and carries a polymorphic :class:`~resourcey.triggers.trigger.Trigger`,
-so a deployment can add a webhook without touching the resource declaration::
+The core seam is ``TriggeredResource(inner, on_edit=[...])``, built directly in
+app code. This module is the **opt-in rung** that makes triggers deployable from
+the environment instead: each entry names the resource path it targets and carries
+a polymorphic ``Trigger``::
 
     APP_TRIGGERS_0_RESOURCE_PATH=threads
     APP_TRIGGERS_0_TRIGGER_KIND=myapp.webhooks.NotifyWebhook
@@ -12,9 +11,7 @@ so a deployment can add a webhook without touching the resource declaration::
 
 :meth:`TriggerConfig.resource_triggers` groups the flat list by
 ``resource_path`` — the same "flat config, grouped at the point of use" shape
-:class:`~resourcey.auth.auth_role.RolePolicyResolver` uses for its
-per-resource maps — ready for
-:class:`~resourcey.triggers.triggered_dependency_builder.TriggeredDependencyBuilder`.
+``RolePolicyResolver`` uses.
 
 This module is part of ``resourcey.triggers``; it imports only lower framework
 layers (``config`` / ``util``).
@@ -29,14 +26,9 @@ from pydantic import BaseModel, Field, SkipValidation, field_validator
 from resourcey.config.config_base import BaseConfig
 from resourcey.triggers.trigger import Trigger
 
-# A nested ``Trigger`` field is validated by the ``mode="before"`` resolver
-# below (which routes a wire ``dict`` through ``Trigger.model_validate`` and
-# accepts an already-built instance as-is) and then accepted verbatim.
-# Without ``SkipValidation`` a *parameterised* generic annotation
-# (``Trigger[Any, Any]``) re-enters the discriminated-union validator on an
-# already-built instance, which the mixin's ``data.pop("kind")`` path cannot
-# handle -- the same reason
-# :data:`~resourcey.util.search_filter.NestedFilter` needs it.
+# Without ``SkipValidation`` a parameterised generic annotation re-enters the
+# discriminated-union validator on an already-built instance, which the mixin
+# cannot handle -- the same reason ``NestedFilter`` needs it.
 TriggerField = Annotated["Trigger[Any, Any]", SkipValidation]
 
 
@@ -49,13 +41,8 @@ def _resolve_trigger(value: Any) -> Any:
 class TriggerEntry(BaseModel):
     """One configured trigger: which resource path it fires on, and the trigger itself.
 
-    Attributes:
-        resource_path: The target resource's REST path segment (matching
-            :meth:`~resourcey.core.resource.Resource.get_resource_path`).
-        trigger: The configured, polymorphic :class:`Trigger` instance. Typed
-            ``Trigger[Any, Any]`` here -- a config entry cannot know the
-            target resource's DTO / id types ahead of time (it is resolved by
-            resource path, not type).
+    ``trigger`` is typed ``Trigger[Any, Any]``: a config entry is resolved by
+    resource path, not type, so it cannot know the target's DTO / id types.
     """
 
     resource_path: str
@@ -70,10 +57,8 @@ class TriggerEntry(BaseModel):
 class TriggerConfig(BaseConfig):
     """The central, env-parseable trigger config.
 
-    Parsed under the process-wide prefix as ``APP_TRIGGERS_<n>_RESOURCE_PATH``
-    / ``_TRIGGER_KIND`` (the dotted path of the trigger subclass) plus any
-    kind-specific field, the same list-of-nested-polymorphic-entry shape
-    :class:`~resourcey.sql.sql_config.SqlConfig` uses for its connections.
+    Parsed as ``APP_TRIGGERS_<n>_RESOURCE_PATH`` / ``_TRIGGER_KIND`` plus any
+    kind-specific field.
     """
 
     triggers: list[TriggerEntry] = Field(default_factory=list)

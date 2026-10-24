@@ -1,35 +1,30 @@
 """Base class for typed configuration objects.
 
-:class:`BaseConfig` is a Pydantic v2 ``BaseModel`` subclass that every
-framework / app config extends. It wires together the vendored
+:class:`BaseConfig` is a Pydantic v2 ``BaseModel`` subclass that every framework
+/ app config extends. It wires the vendored
 :func:`~resourcey.util.env_parser.from_env` /
-:func:`~resourcey.util.env_parser.to_env` machinery with a cached
-:meth:`get_instance` entry point and a
+:func:`~resourcey.util.env_parser.to_env` machinery to a cached
+:meth:`~BaseConfig.get_instance` entry point and a
 :class:`~resourcey.config.lazy_field.LazyField`-aware ``model_config``.
 
 ``get_instance`` caches **per class**: ``MyAppConfig.get_instance()`` returns a
-``MyAppConfig`` and ``FrameworkConfig.get_instance()`` returns a
-``FrameworkConfig``. There is no super/subclass acceptance check — an app may
-extend a framework config and both remain independently resolvable, so a
-specific app config never needs to be known to the outer layers that only read
-the framework slice.
+``MyAppConfig`` and a base class keeps its own cache. There is no
+super/subclass acceptance check, so an app may extend a framework config and
+both stay independently resolvable.
 
 One prefix, process-wide
 ------------------------
 Every :class:`BaseConfig` subclass parses from the *same* env prefix, owned by
-this module rather than by each class: :func:`get_config_prefix` reads it (the
-default is ``APP``) and :func:`set_config_prefix` sets it. The first read
-**latches**, so a later :func:`set_config_prefix` raises
+this module rather than by each class. The first read **latches**, so a later
+:func:`set_config_prefix` raises
 :class:`~resourcey.core.errors.ResourceyConfigError` — a late set would
 otherwise silently reuse configs already cached under the old prefix.
-:func:`set_config_prefix` clears every class's instance cache for the same
-reason; :func:`_reset_config_prefix` is the test-only reset.
+:func:`_reset_config_prefix` is the test-only reset.
 
 Because all subclasses share one flat namespace, two classes declaring the same
 field name with *different* types make the env var ambiguous. That is rejected
-at class-creation time by :meth:`BaseConfig.__init_subclass__` (a
-:class:`TypeError`, the same point and style as ``DTO``'s id-field check) so a
-collision fails at import rather than reading a value it cannot validate.
+at class-creation time by :meth:`BaseConfig.__init_subclass__`, so a collision
+fails at import rather than reading a value it cannot validate.
 """
 
 from __future__ import annotations
@@ -47,9 +42,6 @@ from resourcey.util.env_parser import from_env, to_env
 # stored on each subclass's own ``__dict__`` so subclasses don't share caches.
 _INSTANCE_CACHE_ATTR = "_cached_instance"
 
-# The single app-wide env prefix and the one-way "already read" latch. A set
-# after the first read would silently reuse configs cached under the old prefix,
-# so it is rejected rather than merely documented.
 _config_prefix: str = "APP"
 _config_prefix_retrieved: bool = False
 
@@ -67,9 +59,8 @@ TConfig = TypeVar("TConfig", bound="BaseConfig")
 def get_config_prefix() -> str:
     """The process-wide env prefix, latching on first read.
 
-    The latch makes "set the prefix before the first build" enforced rather
-    than merely documented: after this returns, :func:`set_config_prefix`
-    raises.
+    The latch is what makes "set the prefix before the first build" enforced
+    rather than merely documented.
     """
     global _config_prefix_retrieved
     _config_prefix_retrieved = True
@@ -132,10 +123,9 @@ class BaseConfig(BaseModel):
     def get_instance(cls: type[TConfig]) -> TConfig:
         """Build (and cache) this class's config from env vars.
 
-        Reads :data:`os.environ` under the process-wide prefix; the result is
-        cached on the class, so repeated calls return the same instance — and a
-        subclass keeps its own cache independent of its base. The framework does no
-        ``.env`` loading of its own (use ``uvicorn --env-file`` or the like).
+        Reads ``os.environ`` under the process-wide prefix; the result is
+        cached per class. The framework does no ``.env`` loading of its own (use
+        ``uvicorn --env-file`` or the like).
         """
         cached = cls.__dict__.get(_INSTANCE_CACHE_ATTR)
         if cached is not None:
@@ -164,9 +154,8 @@ class BaseConfig(BaseModel):
     def clear_instance_cache(cls) -> None:
         """Drop *this class's* cached instance so the next build is fresh.
 
-        Intended for tests that flip env vars between cases; not for runtime
-        use. Only the class it is called on is cleared — a base and its
-        subclass cache independently, so clearing one leaves the other alone.
+        Intended for tests that flip env vars between cases. Only the class it
+        is called on is cleared.
         """
         if _INSTANCE_CACHE_ATTR in cls.__dict__:
             delattr(cls, _INSTANCE_CACHE_ATTR)
@@ -176,12 +165,8 @@ def _register_field_types(cls: type[BaseConfig]) -> None:
     """Register a subclass's own fields, rejecting an ambiguous redeclaration.
 
     ``cls.model_fields`` is not populated when ``__init_subclass__`` runs, so the
-    annotations are read from the class's own ``__dict__`` via
-    :func:`inspect.get_annotations` (inherited fields belong to the base) and
-    resolved eagerly. ``ClassVar`` entries (``LazyField``) are not fields and are
-    skipped. Only the declaring class's own fields are registered, and a
-    same-name/same-type redeclaration across classes is allowed — it denotes the
-    same env var.
+    annotations are read from the class's own ``__dict__`` and resolved eagerly.
+    ``ClassVar`` entries (``LazyField``) are not fields and are skipped.
     """
     own_annotations = inspect.get_annotations(cls, eval_str=True)
     if not own_annotations:

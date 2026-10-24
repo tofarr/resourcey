@@ -1,28 +1,19 @@
 """``LocalFileStore`` -- file bytes under a configured root directory (issue #117, #158).
 
 The simplest medium: bytes live as files under ``root`` and the framework signs
-the capability URLs (see :mod:`resourcey.filestore.signed_url`). It fits
-single-instance deployments, development, and tests -- it is **not** shared
-across replicas, so a multi-replica deployment should use S3.
+the capability URLs. It fits single-instance deployments, development, and tests
+-- it is **not** shared across replicas, so a multi-replica deployment should use
+S3.
 
 Security: keys are **opaque server-assigned UUIDs**, never client paths. A
 presented key containing ``..``, a path separator, or an absolute path is
-rejected, and the resolved path is re-checked to live under ``root``. That
-closes the two obvious failure modes of a file-backed medium -- path traversal
-and overwriting an arbitrary file.
+rejected, and the resolved path is re-checked to live under ``root``.
 
-``put`` writes to a **temp file in the same directory, then ``os.replace()``s
-it into place**: writing the final path directly and the sidecar in a second
-step is not atomic, so a concurrent reader could otherwise observe a truncated
-file or stale metadata mid-upload. ``name`` / ``content_type`` / ``checksum``
-fold into the one sidecar JSON, written atomically with the rename, so they
-become visible at the same instant the bytes do -- exactly when ``head`` /
-``get`` first see the key, which is this medium's half of "existence is the
-only state".
-
-``kind`` is the class name (from
-:class:`~resourcey.util.models.DiscriminatedUnionMixin`), so the store is
-selectable from config as ``LocalFileStore``.
+``put`` writes to a **temp file in the same directory, then ``os.replace()``s it
+into place**, so a concurrent reader never observes a truncated file or stale
+metadata mid-upload. ``name`` / ``content_type`` / ``checksum`` fold into the one
+sidecar JSON, written atomically with the rename, so they become visible at the
+same instant the bytes do.
 
 This module imports no code outside the framework.
 """
@@ -44,14 +35,7 @@ from resourcey.filestore.signed_url import SignedFileStore
 
 
 class LocalFileStore(SignedFileStore):
-    """A file-backed medium rooted at ``root``.
-
-    Attributes:
-        root: The directory bytes are stored under (created on enter).
-        signed_url_base_url: Prefix prepended to a framework-signed URL (empty
-            for a URL relative to the API host).
-        signed_url_path_template: The route template the URL points at.
-    """
+    """A file-backed medium rooted at ``root`` (created on enter)."""
 
     root: Path = Path("./.resourcey_files")
 
@@ -79,9 +63,8 @@ class LocalFileStore(SignedFileStore):
     ) -> StoredObject:
         path = self._path_for(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Write bytes + sidecar to temp files in the same directory, then
-        # ``os.replace()`` each into place -- a concurrent reader therefore
-        # never observes a truncated file or metadata that disagrees with it.
+        # Temp files in the same directory, then ``os.replace()`` each into place,
+        # so a concurrent reader never sees a truncated file or disagreeing metadata.
         fd, tmp_name = tempfile.mkstemp(dir=path.parent)
         try:
             with os.fdopen(fd, "wb") as tmp:
@@ -137,10 +120,8 @@ class LocalFileStore(SignedFileStore):
     async def list_objects(self, *, after: str | None = None, limit: int) -> list[StoredObject]:
         """List the objects directly under ``root``, ordered ascending by key.
 
-        Only top-level keys are listed (the server-generated keys this medium
-        serves are flat hex strings; a caller who writes a nested key via
-        ``put`` directly can still ``get`` / ``head`` / ``delete`` it, but it
-        will not appear in a listing).
+        A nested key written through ``put`` directly can still be ``get`` /
+        ``head`` / ``delete``d, but it will not appear in a listing.
         """
         if not self.root.is_dir():
             return []
@@ -199,9 +180,8 @@ class LocalFileStore(SignedFileStore):
     def _path_for(self, key: str) -> Path:
         """Resolve ``key`` to a path guaranteed to live under ``root``.
 
-        An opaque key (a UUID, optionally with an S3-style ``prefix/``) is the
-        only shape accepted: an empty key, an absolute path, ``~``, and ``..``
-        are rejected, and the resolved path is re-checked to be under ``root``.
+        An empty key, an absolute path, ``~``, and ``..`` are rejected, and the
+        resolved path is re-checked to be under ``root``.
         """
         if not key or key.startswith("/") or key.startswith("~"):
             raise InvalidInputError(f"Invalid file key {key!r}")

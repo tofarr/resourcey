@@ -9,24 +9,18 @@ developer **declares the DTO** and the resource serves it::
 
     manifest = Manifest(resources=[MongoResource(Thread, name="main")])
 
-The DTO declaration drives everything: the six REST models, the identifier, the
-query surface (the read model *is* the filter / sort surface — the same security
-gate ``SqlResource`` uses), and the resource path (the DTO name, pluralized).
-A bare ``id: UUID`` gets a server-side ``uuid4`` create default from the
-``core`` conventions, so the earlier ``_make_id_optional`` hack is unnecessary,
-and ``created_at`` / ``updated_at`` are framework-owned.
+The DTO declaration drives the six REST models, the identifier, the query surface
+(the read model *is* the filter / sort surface — the same security gate
+``SqlResource`` uses), and the resource path.
 
 The session source mirrors ``SqlResource``'s escape hatches: an explicit
 ``client=`` (or a client pre-seeded on ``ctx``) wins; otherwise the collection is
-resolved from ``client_manager`` by ``name``, defaulting to the process-wide
-:func:`~resourcey.mongo.mongo_client.get_mongo_client_manager` and its first
-connection. Resolving a connection is async, so :meth:`get_service` is async
-(same as SQL).
+resolved from ``client_manager`` by ``name``, which makes :meth:`get_service`
+async.
 
-Indexes are opt-in and app-driven (:meth:`get_indexes` / :meth:`ensure_indexes`,
-run from :meth:`__aenter__`) since there is no DDL / migration step, and
-:meth:`migrate_document` is the manual migration-on-read hook (default no-op)
-invoked on every read path by the service.
+Indexes are opt-in (:meth:`get_indexes` / :meth:`ensure_indexes`, run from
+:meth:`__aenter__`), and :meth:`migrate_document` is the manual
+migration-on-read hook (default no-op).
 
 The action layer lives in :mod:`resourcey.mongo.mongo_service`.
 
@@ -73,21 +67,15 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     """The Mongo backend: a DTO declaration served by :class:`MongoService`.
 
     Args:
-        dto: The :class:`~resourcey.core.dto.DTO` declaration to serve. Its
-            fields become the DTO / REST models and the query surface.
+        dto: The :class:`~resourcey.core.dto.DTO` declaration to serve.
         client_manager: The manager the collection's client is resolved from
             (default: the process-wide :func:`get_mongo_client_manager`). It must
             be entered (via the manifest) before the first service is built.
-        name: The connection name to resolve from ``client_manager`` (default:
-            the first configured connection).
+        name: The connection name to resolve from ``client_manager``.
         path: An explicit REST path segment (defaults to the DTO name, pluralized).
         encryption_service: The service used to encrypt pagination cursors.
-            Defaults to the process-wide
-            :func:`~resourcey.encryption.encryption_service.get_encryption_service`;
-            pass one to override.
         client: An explicit client (the escape hatch) — wins over ``client_manager``.
-        database_name: The database to select on ``client`` (default: the
-            resolved connection's database, or ``DEFAULT_MONGO_DATABASE``).
+        database_name: The database to select on ``client``.
         collection_name: An explicit collection name (defaults to the DTO name,
             pluralized / snake-cased).
     """
@@ -111,8 +99,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         self._client = client
         self._database_name = database_name
         self._collection_name = collection_name
-        # Resolved eagerly so cursor pagination works out of the box; the
-        # explicit argument remains the escape hatch.
+        # Resolved eagerly so cursor pagination works out of the box.
         self._encryption_service = encryption_service or get_encryption_service()
         self._collection: Any = None
         self._entered = False
@@ -151,8 +138,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """Every field the read model exposes — the default query surface.
 
         Derived from ``read_response``, so a field projected away is not
-        filterable: a wrapper that hides ``secret`` must not leave
-        ``?secret__eq=`` disclosing it.
+        filterable.
         """
         return frozenset(self.get_rest_models().read_response.model_fields)
 
@@ -177,8 +163,6 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """Validate ``sort`` / ``desc`` into the ordering a search will use.
 
         With no ``sort`` the identifier order is used and ``desc`` is ignored.
-        An unknown or non-sortable field raises
-        :class:`~resourcey.core.errors.InvalidInputError`.
         """
         if not sort:
             return None
@@ -200,8 +184,8 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
             return MONGO_ID_FIELD
         return attribute
 
-    # Opt-in escape hatch: when True, an unconvertible filter falls back to an
-    # in-memory scan instead of raising. Off by default.
+    # Opt-in escape hatch: an unconvertible filter falls back to an in-memory
+    # scan instead of raising.
     allow_filter_iteration: bool = False
 
     # ------------------------------------------------------------------
@@ -211,9 +195,8 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def build_filter_context(self) -> MongoFilterContext:
         """The conversion context: only *queryable* fields resolve to Mongo fields.
 
-        Restricting ``fields`` to :meth:`get_queryable_fields` is the security
-        gate: a field projected away from the read model has no field here, so
-        ``?secret__eq=`` raises rather than disclosing the value.
+        That restriction is the security gate: a field projected away from the
+        read model has no field here, so ``?secret__eq=`` raises.
         """
         queryable = self.get_queryable_fields()
         fields = {attr: self.mongo_field_for(attr) for attr in queryable}
@@ -230,10 +213,8 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def build_sort_context(self) -> MongoSortContext:
         """The sort context: only *sortable* fields resolve to Mongo fields.
 
-        Restricting ``fields`` to :meth:`get_sortable_fields` is the security
-        gate, mirroring filtering: a field projected away from the read model
-        has no field here, so ``?sort=secret`` raises rather than leaking the
-        hidden value's relative order.
+        The same security gate as filtering: a field projected away has no field
+        here, so ``?sort=secret`` raises.
         """
         sortable = self.get_sortable_fields()
         fields = {attr: self.mongo_field_for(attr) for attr in sortable}
@@ -262,11 +243,8 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build a :class:`MongoService` over ``ctx`` and a collection.
 
-        A collection already seeded on ``ctx`` (under ``STORAGE_KEY``) wins — the
-        same reuse seam the SQL service uses; an explicit ``client`` wins over
-        the manager; otherwise the client is resolved from ``client_manager`` —
-        the injected one, else the process-wide :func:`get_mongo_client_manager`
-        — by ``connection_name``. Resolving by name makes this method async.
+        A collection already seeded on ``ctx`` wins, mirroring the SQL service;
+        an explicit ``client`` wins over the manager.
         """
         mapping = ctx if ctx is not None else {}
         collection = mapping.get(STORAGE_KEY)
@@ -275,12 +253,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         return MongoService(self, mapping, collection)
 
     async def _resolve_collection(self) -> Any:
-        """The collection this resource serves, resolved lazily and cached.
-
-        An explicit ``client`` wins; otherwise the client is resolved from the
-        manager by connection name. The result is cached on the instance (the
-        manager caches the underlying client) so repeated services share it.
-        """
+        """The collection this resource serves, resolved lazily and cached."""
         if self._collection is not None:
             return self._collection
         client, database_name = self._client, self._database_name
@@ -300,8 +273,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def collection(self) -> Any:
         """The resolved collection, or ``None`` before the first service is built.
 
-        The escape hatch back to ``motor``: a caller may drop to the raw
-        collection for anything the standard actions do not cover.
+        The escape hatch back to ``motor``.
         """
         return self._collection
 
@@ -330,9 +302,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """Exit the lifecycle, dropping the resolved collection.
 
         The manager closes its clients on exit, so the cached collection would
-        reference a closed client on the next entry; clearing it forces
-        :meth:`_resolve_collection` to re-resolve from the rebuilt client. (A
-        collection seeded on ``ctx`` is unaffected — it is never cached here.)
+        reference a closed client on the next entry.
         """
         self._collection = None
         self._entered = False
@@ -345,8 +315,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """Index specifications for :meth:`ensure_indexes`.
 
         Each spec is ``{"key": [(field, direction)], "name": str | None,
-        "options": dict}``. The default is empty (only the ``_id`` index exists);
-        override to declare secondary indexes.
+        "options": dict}``. The default is empty (only the ``_id`` index exists).
         """
         return []
 
@@ -368,8 +337,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     def migrate_document(self, document: dict[str, Any]) -> dict[str, Any]:
         """Upgrade a stored document to the current shape before it is read.
 
-        Default no-op. Override to lazily migrate a document on every read path
-        (read / search / batch-read / batch-edit results); the versioning scheme
-        is application-defined.
+        Default no-op. Override to lazily migrate a document on every read path;
+        the versioning scheme is application-defined.
         """
         return document

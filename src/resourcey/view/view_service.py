@@ -1,15 +1,11 @@
 """``ViewService`` - the action-enforcing wrapper a ``ResourceView`` yields.
 
-A :class:`~resourcey.view.resource_view.ResourceView` delegates its service to
-the inner resource, so the inner service consults the **inner** resource's action
-set - which is wider than the view's whenever the view narrows actions. The
-transport already narrows the ``batch-edit`` body to the view's actions, but a
-*direct* service caller (or a custom dependency builder) bypasses that. This
-wrapper re-asserts the view's action set on ``batch_edit``, closing the gap.
+The inner service consults the **inner** resource's action set, which is wider
+than the view's whenever the view narrows actions. The transport already narrows
+the ``batch-edit`` body, but a *direct* service caller bypasses that, so this
+wrapper re-asserts the view's action set on ``batch_edit``.
 
-Every other action is forwarded verbatim: the inner service reads/writes the
-inner storage and returns inner-DTO instances, which the transport projects onto
-the view's REST models.
+Every other action is forwarded verbatim.
 
 This module imports no code outside the framework.
 """
@@ -37,10 +33,8 @@ K = TypeVar("K")
 class ViewService(Service[T, K], Generic[T, K]):
     """A service proxy that forwards to ``inner`` but enforces a view's actions.
 
-    It is its own async context manager, delegating the storage lifetime to the
-    inner service so the "whoever opens the storage owns its commit and close"
-    rule is unchanged. The DTO type is nominal - the inner service returns inner
-    DTOs, which the transport projects onto the view's REST models.
+    The DTO type is nominal - the inner service returns inner DTOs, which the
+    transport projects onto the view's REST models.
     """
 
     def __init__(self, inner: Service[T, K], actions: frozenset[Action]) -> None:
@@ -68,10 +62,9 @@ class ViewService(Service[T, K], Generic[T, K]):
     def serialization_context(self) -> dict[str, Any] | None:
         """The inner service's serialization context.
 
-        Delegated, not the wrapper's own: the inner service is what decides a
-        response's context (e.g. an auth key service asking for the one-time
-        reveal), and the transport reads it off the service it was handed — the
-        view. Without this the reveal would be silently dropped.
+        Delegated, not the wrapper's own: the inner decides a response's context
+        (e.g. a one-time secret reveal), and the transport reads it off the
+        service it was handed — the view.
         """
         return self._inner.serialization_context()
 
@@ -82,9 +75,8 @@ class ViewService(Service[T, K], Generic[T, K]):
     def response_is_private(self) -> bool:
         """The inner service's cache privacy.
 
-        Delegated: a projection narrows the *fields*, but whether the body is
-        caller-scoped is the inner (authorized) service's fact — an ``Owner``
-        policy behind a view still makes the response caller-private.
+        A projection narrows the *fields*, but whether the body is caller-scoped
+        is the inner (authorized) service's fact.
         """
         return self._inner.response_is_private()
 

@@ -1,20 +1,15 @@
 """Translate a standard :class:`SortOrder` into a Mongo sort spec (issue #80).
 
-Mirrors :mod:`resourcey.sql.sort_converter`: dispatch is a single registry
-keyed on the :class:`SortOrder` type, and the module asserts at import time that
-every standard node has a handler — a new node added without one fails at
-startup, not per request.
+Mirrors :mod:`resourcey.sql.sort_converter`: a single registry keyed on the
+:class:`SortOrder` type, with an import-time completeness assert.
 
-:meth:`MongoSortConverter.apply` appends the identifier (``_id``) ascending as a
-tie-breaker to every ordering (``<sort> 1/-1, _id 1``), so keyset paging is a
-total order even when sort keys collide. The matching keyset predicate lives in
-:mod:`resourcey.mongo.mongo_service`.
+:meth:`MongoSortConverter.apply` appends ``_id`` ascending as a tie-breaker to
+every ordering, so keyset paging is a total order even when sort keys collide.
+The matching keyset predicate lives in :mod:`resourcey.mongo.mongo_service`.
 
-NULL placement is not configured here: Mongo's per-type rule places ``null``
-first ascending and last descending, which is exactly the in-memory
-:meth:`AttrSortOrder.compare` reference (``None`` sorts first, reversed for
-descending). The keyset predicate therefore needs no NULL special-casing beyond
-what that fixed order implies.
+Mongo's per-type rule places ``null`` first ascending and last descending, which
+is exactly the in-memory :meth:`AttrSortOrder.compare` reference, so no NULL
+configuration is needed here.
 
 This module imports no code outside the framework.
 """
@@ -66,12 +61,8 @@ _assert_registry_is_complete()
 class MongoSortContext:
     """Everything a sort handler needs, passed as one frozen object.
 
-    Args:
-        fields: DTO attribute name -> the Mongo field it maps to. Only the
-            resource's *sortable* fields are present, so a field projected away
-            from the read model cannot be sorted on (``?sort=secret`` would leak
-            the hidden value's relative order).
-        id_field: The DTO's identifier field, whose Mongo field is ``_id``.
+    ``fields`` holds only the resource's *sortable* fields, so a field projected
+    away from the read model cannot be sorted on.
     """
 
     fields: Mapping[str, str]

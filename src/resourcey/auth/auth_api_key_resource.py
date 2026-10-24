@@ -4,27 +4,19 @@ Two key sources, declared once with **full storage truth** and exposed through a
 narrowing :class:`~resourcey.view.resource_view.ResourceView`:
 
 * the **DB-backed** resource — an ORM ``ApiKey`` row minted / revoked through the
-  ordinary REST surface (``POST /api-keys``, ``GET /api-keys``,
-  ``PATCH /api-keys/{id}``, ``DELETE /api-keys/{id}``);
+  ordinary REST surface;
 * the **config-list** resource — a read-only :class:`ListResource` built from
   :class:`~resourcey.auth.auth_config.ApiKeysConfig`.
 
-Both store the key **only as a SHA-256 digest**. The ORM attribute is ``key``
-(mapped to the column ``key_hash``) and the declared annotation is
-:class:`~pydantic.SecretStr`, so the model layer treats it as a secret even
-though the stored value is already a digest. A presented key is validated by
-hashing it and searching for that hash — never through the public query surface,
-which the view closes (``?key__eq=`` / ``?sort=key`` are rejected).
+Both store the key **only as a SHA-256 digest**, declared as
+:class:`~pydantic.SecretStr` so the model layer treats it as a secret even though
+the stored value is already a digest. A presented key is validated by hashing it
+and searching for that hash — never through the public query surface, which the
+view closes.
 
 The raw key is disclosed exactly once, in the ``201`` create response, through
-the ``expose_secrets`` serialization context (see
-:mod:`resourcey.auth.auth_api_key_service`). Every other surface is free of
-it.
-
-The exposed view drops ``key`` from the read / search / update models and the
-create request, keeping it only in the create response. ``in_create_request``
-must be ``False``: it defaults to ``True``, and without the override a client
-could supply the digest the lookup would then match.
+the ``expose_secrets`` serialization context. ``in_create_request`` must be
+``False``: otherwise a client could supply the digest the lookup would match.
 
 This module is part of ``resourcey.auth``; it imports only lower framework layers.
 """
@@ -53,22 +45,19 @@ KEY_FIELD = "key"
 
 API_KEY_RANDOM_BITS = 256
 
-# The preset pattern every key follows: a prefix that makes a leaked key
-# recognisable as a resourcey key (so secret scanners can match it) plus the
-# random secret.
+# A prefix that makes a leaked key recognisable to secret scanners.
 API_KEY_FORMAT = "rsk_{secret}"
 
 _BASE36_ALPHABET = string.digits + string.ascii_lowercase
 
-# ceil(API_KEY_RANDOM_BITS / log2(36)). Every secret is padded to this width so
-# a key's length never varies with the value it encodes.
+# ceil(API_KEY_RANDOM_BITS / log2(36)); padding keeps a key's length constant.
 _BASE36_WIDTH = 50
 
 # SHA-256 hex is 64 characters.
 _KEY_HASH_LENGTH = 64
 
-# The projection both exposed views share: the key is never read, searched,
-# updated, or client-supplied — only the create response reveals it.
+# The key is never read, searched, updated, or client-supplied — only the
+# create response reveals it.
 KEY_EXPOSED: dict[str, dict[str, Any]] = {
     KEY_FIELD: {
         "in_create_request": False,
@@ -80,12 +69,9 @@ KEY_EXPOSED: dict[str, dict[str, Any]] = {
     }
 }
 
-# The read-only variant: the key is hidden from every response and the query
-# surface, and ``principal_id`` / ``roles`` (internal credential bindings, not
-# part of the public listing) are hidden too. A read-only resource has no create
-# route, so there is nothing to reveal; leaving the create flags untouched is
-# therefore inert, but an explicit hide is clearer than relying on the action
-# set.
+# The read-only variant: the key and the internal credential bindings
+# (``principal_id`` / ``roles``) are hidden from every response and the query
+# surface.
 KEY_QUERY_SURFACE_HIDDEN: dict[str, dict[str, Any]] = {
     KEY_FIELD: {"in_read_response": False, "in_search_response": False},
     "principal_id": {"in_read_response": False, "in_search_response": False},
@@ -93,12 +79,8 @@ KEY_QUERY_SURFACE_HIDDEN: dict[str, dict[str, Any]] = {
 }
 
 # The DB-backed view is the full key surface: only the secret ``key`` is
-# projected away (``KEY_EXPOSED``). ``roles`` stays a normal writable field — a
-# credential-carried role is an entry on the key's definition, settable (and
-# rotatable) through the REST surface, not a secret. Note the consequence: the
-# DB-backed key resource is therefore a **privilege-assignment surface** —
-# whoever can write a key row can grant it roles — so access to this resource
-# must itself be restricted to administrators.
+# projected away, so ``roles`` stays writable. That makes this resource a
+# **privilege-assignment surface** — access must be restricted to administrators.
 STORED_KEY_EXPOSED: dict[str, dict[str, Any]] = dict(KEY_EXPOSED)
 
 
@@ -114,9 +96,8 @@ def encode_base36(value: int, width: int) -> str:
 def generate_api_key(key_format: str = API_KEY_FORMAT) -> str:
     """Mint a key: a fresh random secret rendered into ``key_format``.
 
-    The secret is :data:`API_KEY_RANDOM_BITS` bits from
-    :func:`secrets.token_bytes` (a CSPRNG), so keys are unguessable and
-    collisions are not a practical concern.
+    The secret is :data:`API_KEY_RANDOM_BITS` bits from a CSPRNG, so keys are
+    unguessable and collisions are not a practical concern.
     """
     secret = int.from_bytes(secrets.token_bytes(API_KEY_RANDOM_BITS // 8), "big")
     return key_format.format(secret=encode_base36(secret, _BASE36_WIDTH))
@@ -125,9 +106,8 @@ def generate_api_key(key_format: str = API_KEY_FORMAT) -> str:
 def hash_api_key(raw: str) -> str:
     """The SHA-256 hex digest of a raw key — the value stored at rest.
 
-    Hash-and-search is the validation strategy: a presented key is hashed and
-    the digest looked up, so neither the table nor the config list holds a usable
-    credential.
+    A presented key is hashed and the digest looked up, so neither the table nor
+    the config list holds a usable credential.
     """
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -138,31 +118,16 @@ def utc_now() -> datetime:
 
 
 class ApiKeyBase(DeclarativeBase):
-    """The declarative base owning the ``api_keys`` table.
-
-    Kept local so the auth package is self-contained; an app can point Alembic at
-    this metadata (or import the model) exactly as it does for any SQLAlchemy
-    model.
-    """
+    """The declarative base owning the ``api_keys`` table (an app points Alembic at it)."""
 
 
 class ApiKey(ApiKeyBase):
     """An API key stored as a row, mintable and revocable at runtime.
 
     The ORM attribute is ``key``; the DB column is ``key_hash`` and stores the
-    SHA-256 digest. Declared as :class:`~pydantic.SecretStr` so the derived DTO
-    field is a secret (redacted / encrypted / revealed per the serialization
-    context) even though the stored value is already a digest.
-
-    Fields:
-        id: Primary key, generated as a UUID4.
-        name: Optional human-readable label (the only editable field).
-        key: The secret digest. Generated on create, never accepted from a
-            client, never updated, and absent from every read model — so the
-            create response is the only place it is disclosed, and even there it
-            is the *raw* key (the service reveals the minted value).
-        created_at: Set on create.
-        updated_at: Set on create and re-set on update.
+    SHA-256 digest, declared as :class:`~pydantic.SecretStr` so the derived DTO
+    field is a secret. The create response is the only place the key is
+    disclosed, and even there it is the *raw* minted value.
     """
 
     __tablename__ = "api_keys"
@@ -188,11 +153,9 @@ class ApiKey(ApiKeyBase):
 class StoredApiKeyResource(SqlResource[Any, Any]):
     """The DB-backed key resource: the ``ApiKey`` model, with ``find_by_key``.
 
-    A thin :class:`~resourcey.sql.sql_resource.SqlResource` subclass that
-    builds a :class:`~resourcey.auth.auth_api_key_service.StoredApiKeyService`
-    (which adds ``find_by_key`` and the one-time reveal). The service import is
-    deferred to :meth:`make_service` so this module and the service module do not
-    import one another at module load.
+    Builds a ``StoredApiKeyService`` (which adds ``find_by_key`` and the
+    one-time reveal). The import is deferred to :meth:`make_service` to avoid a
+    module cycle.
     """
 
     def make_service(self, ctx: Any, session_factory: Any) -> Any:
@@ -202,12 +165,7 @@ class StoredApiKeyResource(SqlResource[Any, Any]):
 
 
 class ConfigApiKeyResource(ListResource[Any, Any]):
-    """The read-only config key resource, with ``find_by_key``.
-
-    A thin :class:`~resourcey.list.list_resource.ListResource` subclass that
-    builds a :class:`~resourcey.auth.auth_api_key_service.ConfigApiKeyService`
-    (which adds ``find_by_key``).
-    """
+    """The read-only config key resource, with ``find_by_key``."""
 
     def make_service(self, ctx: Any, items: list[Any]) -> Any:
         from resourcey.auth.auth_api_key_service import ConfigApiKeyService
@@ -224,9 +182,8 @@ def stored_api_key_resource(
 ) -> Resource[Any, Any]:
     """The DB-backed key resource: the ``ApiKey`` ORM model with full storage truth.
 
-    The returned resource is the **inner** resource — the authenticator holds it
-    to reach :meth:`~resourcey.auth.auth_api_key_service.StoredApiKeyService.find_by_key`.
-    Register :func:`stored_api_key_view` in the manifest, not this.
+    This is the **inner** resource the authenticator holds to reach
+    ``find_by_key``; register :func:`stored_api_key_view` in the manifest, not this.
     """
     return StoredApiKeyResource(
         ApiKey,
@@ -245,11 +202,9 @@ def stored_api_key_view(inner: Resource[Any, Any]) -> ResourceView[Any, Any]:
 class ConfigApiKey(BaseModel):
     """A served config key: the identifier, the label, the digest, and its roles.
 
-    Only ``id`` / ``name`` are ever exposed; ``key`` holds the SHA-256 digest and
-    is hidden by the read-hiding view, so it can be searched by the authenticator
-    but never read. ``principal_id`` (an optional fixed principal for the key)
-    and ``roles`` (the roles the key authenticates as) are carried so the
-    authenticator can resolve them without a DB lookup.
+    Only ``id`` / ``name`` are ever exposed; ``key`` holds the digest and is
+    hidden by the read-hiding view, so the authenticator can search it but never
+    read it.
     """
 
     id: str
@@ -262,8 +217,7 @@ class ConfigApiKey(BaseModel):
 def config_api_key_models(config: ApiKeysConfig) -> list[ConfigApiKey]:
     """The served config entries, with each plaintext key hashed on load.
 
-    The plaintext (:class:`~pydantic.SecretStr`) is read once, hashed, and not
-    retained: the returned entries hold only the digest.
+    The plaintext is read once, hashed, and not retained.
     """
     return [
         ConfigApiKey(
@@ -292,8 +246,6 @@ def config_api_key_view(inner: Resource[Any, Any]) -> ResourceView[Any, Any]:
     """The exposed view over a config-list key resource (read-only, key hidden).
 
     Uses :data:`KEY_QUERY_SURFACE_HIDDEN` (not :data:`KEY_EXPOSED`): the config
-    list is read-only, so there is no create request to close and no create
-    response to reveal — the key is simply absent from every response and from
-    the query surface.
+    list is read-only, so there is no create route to reveal anything.
     """
     return ResourceView(inner, exposed_field_overrides=KEY_QUERY_SURFACE_HIDDEN)
