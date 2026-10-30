@@ -52,6 +52,7 @@ from resourcey.core.service import (
     normalize_actions,
 )
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
+from resourcey.http.http_config import RequestLimitsConfig
 from resourcey.util.missing import MISSING
 from resourcey.util.naming import humanize, pluralize
 from resourcey.util.search_filter import SEPARATOR, SearchFilter, build_filter
@@ -115,19 +116,31 @@ def register_routes(
     route_deps = [Depends(auth_dep)] if auth_dep is not None else None
     supported = normalize_actions(exposed.get_supported_actions())
     strategy = exposed.get_cache_strategy()
+    # Read once here, never per request: a request cap is a deployment setting,
+    # and re-reading it per call would let a mid-flight env change move the
+    # boundary between the OpenAPI document and the live behaviour.
+    limits = RequestLimitsConfig.get_instance()
 
     # Static sub-paths (search / count / batch-read / batch-edit) are registered
     # before the ``{id}`` routes, otherwise ``batch-read`` would be captured as
     # an id value by the ``/{resource}/{id}`` route.
     if Action.SEARCH in supported:
         _add_search_route(
-            router, path, models, exposed, service_dep, strategy, resource_name, route_deps
+            router, path, models, exposed, service_dep, strategy, resource_name, route_deps, limits
         )
     if Action.COUNT in supported:
         _add_count_route(router, path, exposed, service_dep, strategy, resource_name, route_deps)
     if Action.BATCH_READ in supported:
         _add_batch_read_route(
-            router, path, models, id_type, service_dep, strategy, resource_name, route_deps
+            router,
+            path,
+            models,
+            id_type,
+            service_dep,
+            strategy,
+            resource_name,
+            route_deps,
+            limits,
         )
     if Action.BATCH_EDIT in supported:
         _add_batch_edit_route(
@@ -319,6 +332,37 @@ def _coerce_filter_value(op: str, value: Any, annotation: Any) -> Any:
         return [adapter.validate_python(item) for item in items]
     except ValidationError as exc:
         raise InvalidInputError(f"Invalid value for {op!r} filter: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Request caps (issue #175)
+# ---------------------------------------------------------------------------
+
+
+def _check_search_limit(limit: int, cap: int) -> None:
+    """Reject a ``search`` limit outside ``1 <= limit <= cap``.
+
+    ``limit=0`` and a negative ``limit`` are bad input rather than "no rows" or
+    "unlimited" — SQL would read ``-1`` as ``limit(0)`` and return an empty page
+    that echoes a nonsensical ``limit=-1`` back to the client.
+    """
+    if limit < 1:
+        raise InvalidInputError(f"limit must be at least 1; got {limit}")
+    if limit > cap:
+        raise InvalidInputError(f"limit must not exceed {cap}; got {limit}")
+
+
+def _check_batch_read_ids(count: int, cap: int) -> None:
+    """Reject a ``batch_read`` whose id list exceeds ``cap``.
+
+    Never truncate: the result is positionally aligned with the requested ids, so
+    a shortened list would misalign every position after the cut.
+    """
+    if count > cap:
+        raise InvalidInputError(
+            f"batch-read accepts at most {cap} ids; got {count}. "
+            "Split the request, or raise the configured cap."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -536,24 +580,36 @@ def _add_search_route(
     strategy: Any,
     resource_name: str,
     route_deps: list[Any] | None = None,
+    limits: RequestLimitsConfig | None = None,
 ) -> None:
     """Register ``GET /{resource}`` — cursor-paginated, filterable, sortable search.
 
     An unknown or non-sortable sort field, and an unknown filter field or
-    operator, are rejected ``400``.
+    operator, are rejected ``400``, as is a ``limit`` outside
+    ``1 <= limit <= max_search_limit``.
+
+    The default ``limit`` is clamped to the cap at registration time, so an
+    omitted ``limit`` is always valid — even when the configured cap is below
+    ``DEFAULT_LIMIT``. Only an *explicit* over-cap value is rejected.
     """
+    limits = limits if limits is not None else RequestLimitsConfig.get_instance()
+    cap = limits.max_search_limit
+    default_limit = min(DEFAULT_LIMIT, cap)
     filter_spec = _filter_surface(exposed)
     filter_dep = _filter_dependency(filter_spec)
 
     async def handler(  # type: ignore[no-untyped-def]
         request,
-        limit=DEFAULT_LIMIT,
+        limit=Query(  # noqa: B008
+            default=default_limit, json_schema_extra={"minimum": 1, "maximum": cap}
+        ),
         cursor=None,
         sort=None,
         desc=False,
         values=Depends(filter_dep),  # noqa: B008
         service=Depends(service_dep),  # noqa: B008
     ):
+        _check_search_limit(limit, cap)
         filters = _resolve_filters(request, filter_spec, values)
         page = await service.search(
             search_filter=filters,
@@ -640,8 +696,23 @@ def _add_batch_read_route(
     strategy: Any,
     resource_name: str,
     route_deps: list[Any] | None = None,
+    limits: RequestLimitsConfig | None = None,
 ) -> None:
-    async def handler(request, id=Query(default=[]), service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: A002, B008
+    """Register ``GET /{resource}/batch-read`` — several reads by id in one request.
+
+    An id list longer than ``max_batch_read_ids`` is rejected ``400`` rather than
+    truncated: the result is positionally aligned with the input, so a shortened
+    list would silently misalign every following position.
+    """
+    limits = limits if limits is not None else RequestLimitsConfig.get_instance()
+    cap = limits.max_batch_read_ids
+
+    async def handler(  # type: ignore[no-untyped-def]
+        request,
+        id=Query(default_factory=list, json_schema_extra={"maxItems": cap}),  # noqa: A002, B008
+        service=Depends(service_dep),  # noqa: B008
+    ):
+        _check_batch_read_ids(len(id), cap)
         found = await service.batch_read(list(id))
         context = service.serialization_context()
         items = [_project(item, models.search_response, context) for item in found]

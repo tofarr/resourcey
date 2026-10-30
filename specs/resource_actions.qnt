@@ -4,6 +4,15 @@
 // batch_read, batch_edit. This spec models the state transitions and
 // invariants that every generated service must satisfy.
 //
+// Two caller-controlled knobs on the read surface are capped at the transport
+// (issue #175), and the decisions are pinned here: the number of ids in one
+// `batch_read` (`max_batch_read_ids`) and the `limit` on a `search`
+// (`max_search_limit`). Both default to 100 and are read once at registration,
+// not per request. An over-cap `batch_read` is *rejected*, never truncated —
+// truncation would break the positional-alignment invariant below. An over-cap
+// or sub-1 `search` limit is rejected too, while an *omitted* limit defaults to
+// the smaller of the page-size default and the cap, so it is always valid.
+//
 // search is modelled with an opt-in filter: a resource declares a filter type
 // via get_search_filter_type(); when no filter type is declared the search
 // action refuses any non-empty filter (the endpoint serves pagination + sort
@@ -144,6 +153,40 @@ module resource_actions {
     ids.foldl(List(), (acc, i) =>
       acc.append(if (entities.keys().contains(i)) Present(entities.get(i)) else Absent)
     )
+
+  // ---- Request caps (issue #175) -----------------------------------------
+  //
+  // The transport caps the two caller-controlled read knobs. These are pure
+  // decisions over the requested size and the configured cap, so the spec pins
+  // the boundary at exactly cap and cap+1 for both surfaces.
+
+  // The page size used when the client omits `limit` (DEFAULT_LIMIT in core).
+  pure val defaultLimit: int = 20
+
+  // A requested `search` limit is accepted only within 1..cap. 0 and negatives
+  // are rejected rather than read as "no rows"/"unlimited".
+  pure def searchLimitAccepted(limit: int, cap: int): bool =
+    limit >= 1 and limit <= cap
+
+  // An omitted `limit` resolves to min(DEFAULT_LIMIT, cap) at registration, so
+  // it is valid even when the configured cap is below DEFAULT_LIMIT.
+  pure def effectiveDefaultLimit(cap: int): int =
+    if (defaultLimit < cap) defaultLimit else cap
+
+  // An omitted limit is always accepted, for any cap >= 1.
+  pure def omittedLimitAccepted(cap: int): bool =
+    searchLimitAccepted(effectiveDefaultLimit(cap), cap)
+
+  // A batch_read id list is accepted up to and including the cap. Over-cap is
+  // rejected, never truncated, so a client never receives a shorter (and
+  // therefore misaligned) result.
+  pure def batchReadAccepted(count: int, cap: int): bool = count <= cap
+
+  // The result a capped batch_read produces: the full positional result when
+  // accepted, nothing at all when rejected. There is deliberately no branch
+  // that returns a *prefix* of the result.
+  def cappedBatchRead(ids: List[int], cap: int): List[BatchResult] =
+    if (batchReadAccepted(ids.length(), cap)) batch_read(ids) else List()
 
   // batch_edit: apply a list of edits (create / update / delete) positionally.
   // A CreateEdit allocates a new id and stores the value (as create does); an
@@ -552,6 +595,92 @@ module resource_actions {
       .then(create(42))
       .then(all {
         assert(not(servesClone(false))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // search limit boundaries: exactly the cap is accepted, cap + 1 is not, and
+  // 0 / negative limits are rejected rather than treated as "no rows".
+  run searchLimitCapBoundary = {
+    init
+      .then(all {
+        assert(searchLimitAccepted(100, 100)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(not(searchLimitAccepted(101, 100))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        assert(not(searchLimitAccepted(0, 100))),
+        assert(not(searchLimitAccepted(-1, 100))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      // A non-default cap moves the boundary with it.
+      .then(all {
+        assert(searchLimitAccepted(10, 10)),
+        assert(not(searchLimitAccepted(11, 10))),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // An omitted limit is always accepted: it resolves to min(DEFAULT_LIMIT, cap)
+  // at registration, so a cap below DEFAULT_LIMIT still serves default requests.
+  run searchDefaultLimitClamped = {
+    init
+      .then(all {
+        // cap above the page-size default -> the default is unchanged.
+        assert(effectiveDefaultLimit(100) == 20),
+        assert(omittedLimitAccepted(100)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        // cap below the page-size default -> the default is clamped to the cap.
+        assert(effectiveDefaultLimit(10) == 10),
+        assert(omittedLimitAccepted(10)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        // the smallest legal cap still admits an omitted limit.
+        assert(omittedLimitAccepted(1)),
+        entities' = entities,
+        nextId' = nextId,
+      })
+  }
+
+  // batch_read cap boundaries: exactly the cap succeeds with a positionally
+  // aligned result; cap + 1 is rejected outright, never truncated.
+  run batchReadCapBoundary = {
+    init
+      .then(create(10))
+      .then(create(20))
+      .then(all {
+        // At the cap: full, aligned result (id 3 is absent -> Absent).
+        assert(batchReadAccepted(3, 3)),
+        assert(cappedBatchRead(List(1, 2, 3), 3) == List(Present(10), Present(20), Absent)),
+        assert(cappedBatchRead(List(1, 2, 3), 3).length() == 3),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        // One over the cap: rejected, so the result is empty — not a prefix of
+        // the aligned result, which would misalign every following position.
+        assert(not(batchReadAccepted(4, 3))),
+        assert(cappedBatchRead(List(1, 2, 3, 999), 3) == List()),
+        entities' = entities,
+        nextId' = nextId,
+      })
+      .then(all {
+        // The default cap accepts a full 100-id request.
+        assert(batchReadAccepted(100, 100)),
+        assert(not(batchReadAccepted(101, 100))),
         entities' = entities,
         nextId' = nextId,
       })

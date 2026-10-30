@@ -205,7 +205,7 @@ def test_the_encryption_files_exist_without_an_init():
 def test_the_http_files_exist_without_an_init():
     http = FRAMEWORK_DIR / "http"
     names = {p.name for p in sorted(http.glob("*.py"))}
-    assert names == {"app.py", "dependency_builder.py", "routes.py"}
+    assert names == {"app.py", "dependency_builder.py", "http_config.py", "routes.py"}
     assert not (http / "__init__.py").exists()
 
 

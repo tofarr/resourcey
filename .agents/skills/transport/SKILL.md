@@ -105,14 +105,51 @@ generic breaks FastAPI's OpenAPI generation.
 
 ## Query surface
 
-`search` takes `limit` (default `DEFAULT_LIMIT`), `cursor`, `sort`, `desc`, and
-one typed `Query` param per `<attribute>__<op>` synthesised from the resource's
-filter surface (so they appear in OpenAPI and are coerced). `_resolve_filters`
-rejects any unknown `field__op` key with `InvalidInputError` (400) — FastAPI
-silently ignores unknown query params, so a typo must not be dropped — and
-rejects any filter param at all when the resource declares no surface. The count
-route's ETag hashes the resolved filter too, so distinct filters get distinct
-validators.
+`search` takes `limit`, `cursor`, `sort`, `desc`, and one typed `Query` param per
+`<attribute>__<op>` synthesised from the resource's filter surface (so they
+appear in OpenAPI and are coerced). `_resolve_filters` rejects any unknown
+`field__op` key with `InvalidInputError` (400) — FastAPI silently ignores
+unknown query params, so a typo must not be dropped — and rejects any filter
+param at all when the resource declares no surface. The count route's ETag
+hashes the resolved filter too, so distinct filters get distinct validators.
+
+## Request caps
+
+Two caller-controlled read knobs are capped at the transport, from
+`RequestLimitsConfig` (`src/resourcey/http/http_config.py`), read **once** in
+`register_routes` and threaded into the route builders:
+
+| Config field | Env var | Default | Bounds |
+|---|---|---|---|
+| `max_search_limit` | `APP_MAX_SEARCH_LIMIT` | 100 | an explicit `search` `limit` |
+| `max_batch_read_ids` | `APP_MAX_BATCH_READ_IDS` | 100 | the id count in one `batch_read` |
+
+* Both must be `>= 1`; `RequestLimitsConfig.get_instance()` raises
+  `ResourceyConfigError` otherwise. `None` is not accepted — a silently
+  unbounded read surface is the footgun the caps close.
+* The caps live in `config`, which `core` (rank 1) cannot import, so enforcement
+  is here, not in `Service`. A **direct service call is trusted code and is not
+  capped** — the same split that has the transport validate the sort/filter
+  surface.
+* `DEFAULT_LIMIT` (20, `core/service.py`) is the *page size used when the client
+  omits `limit`*. It is not the cap. The route's `limit` default is
+  `min(DEFAULT_LIMIT, max_search_limit)` resolved **at registration**, so an
+  omitted `limit` is always valid, even under a cap below 20. Only an *explicit*
+  over-cap value is rejected.
+* A `limit` below 1 is rejected too: SQL would read `-1` as `limit(0)` and
+  return an empty page echoing a nonsense `limit=-1`.
+* An over-cap `batch_read` is **rejected, never truncated** — the result is
+  positionally aligned with the input, so a shortened list would misalign every
+  position after the cut (and break the `DataLoader` contract).
+* Both rejections are `400 invalid_input` through the error envelope, matching
+  the other bad-input cases. Because the checks are manual
+  (`_check_search_limit` / `_check_batch_read_ids`) rather than `le=` on the
+  `Query`, the bounds are declared with `json_schema_extra` (`minimum` /
+  `maximum` / `maxItems`) so they still appear in the generated OpenAPI
+  document.
+
+`batch_edit` is not capped (out of scope for #175); `MAX_IN_VALUES` (500, for
+`?id__in=`) and `ACL_MAX_IDS` (100) are separate, pre-existing caps.
 
 ## Error envelope
 
@@ -124,7 +161,7 @@ Every framework error becomes:
 
 | Status | `code` | Raised by |
 |---|---|---|
-| 400 | `invalid_input` | `InvalidInputError` (bad filter, sort, cursor) |
+| 400 | `invalid_input` | `InvalidInputError` (bad filter, sort, cursor, over-cap `limit` / `batch_read`) |
 | 401 | FastAPI default (`{"detail": ...}`) | the strict/lenient principal dependency, with `WWW-Authenticate` |
 | 403 | `forbidden` | `ForbiddenError` (denied create) |
 | 404 | `not_found` | `NotFoundError` (absent, or out-of-scope by id) |
