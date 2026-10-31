@@ -16,12 +16,23 @@ conversation. Subsystem detail lives in on-demand skills
 
 ## Release state
 
-The project is **pre-release** (no tagged release, no external consumers).
-Backward-compatibility shims are not required when changing the public API:
-removed query params (e.g. a dropped `offset` after switching to cursor
-pagination) do not need to be rejected or aliased — they may simply be
-ignored. Optimize for a clean, minimal API surface over migration ergonomics
-until the first release.
+Releases are published to PyPI as `resourcey` from a tagged GitHub release. The
+version lives in **two** places — `pyproject.toml` and `uv.lock` — so bump it
+with `uv version <x.y.z>`, which updates both. Editing `pyproject.toml` by hand
+leaves the lock stale: CI's `uv sync` silently rewrites it, but `uv lock
+--check` (and the release build) fails.
+
+To release: bump the version and merge it, then publish a GitHub release tagged
+`v<version>`. `release.yml` refuses to build when the tag and the lock/version
+disagree, runs the full `ci.yml` first, and uploads with PyPI trusted
+publishing (OIDC — no stored token) plus Sigstore attestations. A
+`workflow_dispatch` run with `dry_run` publishes to TestPyPI instead.
+
+Still pre-1.0, so backward-compatibility shims are not required when changing
+the public API: removed query params (e.g. a dropped `offset` after switching
+to cursor pagination) do not need to be rejected or aliased — they may simply
+be ignored. Optimize for a clean, minimal API surface over migration
+ergonomics.
 
 ## Code structure — reusable & testable
 

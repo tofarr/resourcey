@@ -4,6 +4,26 @@ A resource-oriented Python web framework built on FastAPI, SQLAlchemy, and
 Alembic — **progressive enhancement with escape hatches to the underlying
 stack.**
 
+## Installation
+
+```bash
+pip install resourcey
+```
+
+```bash
+uv add resourcey
+```
+
+Optional extras pull in a driver for the parts you use:
+
+| Extra | Adds | For |
+|---|---|---|
+| `resourcey[mongodb]` | `motor` | the Mongo backend |
+| `resourcey[s3]` | `boto3` | the S3 file-store medium |
+| `resourcey[redis]` | `redis` | `RedisTrigger` / `RedisChannel` |
+| `resourcey[webhooks]` | `httpx` | `WebhookTrigger` |
+| `resourcey[dev]` | pytest, ruff, mypy, test drivers | working on `resourcey` itself |
+
 ## Why?
 
 Most web frameworks either hide the database entirely or make you wire every
@@ -357,7 +377,7 @@ omitted, never `null`. The route reads that row directly (not through the
 an admin-only `users` surface does not block a caller from seeing its own `me`.
 It is guarded by the **strict** principal dependency: an absent or invalid
 credential is a `401` regardless of the builder's posture. See
-[`examples/04_simple_roles`](examples/04_simple_roles) / [`07_oauth`](examples/07_oauth).
+[`examples/04_simple_roles`](https://github.com/tofarr/resourcey/tree/main/examples/04_simple_roles) / [`07_oauth`](https://github.com/tofarr/resourcey/tree/main/examples/07_oauth).
 
 ### OAuth / OIDC (external identity providers)
 
@@ -373,7 +393,7 @@ encrypted at rest, in an `oauth_tokens` table, and refresh is serialized across
 processes with a lease / compare-and-swap column. `configure_oauth(...)` wires
 the whole subsystem in one call and `register_oauth_routes` mounts the
 interactive login / callback / refresh flow (BFF session, PKCE). See
-[`examples/07_oauth`](examples/07_oauth).
+[`examples/07_oauth`](https://github.com/tofarr/resourcey/tree/main/examples/07_oauth).
 
 ## Configuration
 
