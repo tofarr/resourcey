@@ -126,6 +126,7 @@ jobs:
       - name: Publish to ${{ inputs.dry_run && 'TestPyPI' || 'PyPI' }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          repository-url: ${{ inputs.dry_run && 'https://test.pypi.org/legacy/' || 'https://pypi.org/legacy/' }}
+          # Upload host, not the pypi.org project host: pypi.org/legacy/ 404s.
+          repository-url: ${{ inputs.dry_run && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
           packages-dir: dist/
           attestations: true
