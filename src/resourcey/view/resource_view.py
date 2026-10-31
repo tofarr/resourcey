@@ -53,6 +53,7 @@ from resourcey.core.service import (
     CacheStrategy,
     Service,
     ServiceError,
+    StorageKey,
     normalize_actions,
 )
 from resourcey.util.search_filter import SearchFilter, operators_for_annotation
@@ -328,6 +329,10 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         """
         inner = await self._inner.get_service(ctx)
         return ViewService(inner, self._actions)
+
+    async def get_storage_key(self) -> StorageKey:
+        """The inner resource's storage key: a wrapper adds no storage of its own."""
+        return await self._inner.get_storage_key()
 
     # ------------------------------------------------------------------
     # Registration / lifecycle (delegated to the inner)

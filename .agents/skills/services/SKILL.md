@@ -135,7 +135,16 @@ separate `count` action). `DEFAULT_LIMIT = 20`.
 
 The **shared ownership rule**: *whoever opens the storage owns its commit and
 close; a resource that finds storage already in `ctx` reuses it and neither
-commits nor closes it.* `STORAGE_KEY` is the call-scoped key.
+commits nor closes it.* The ctx is keyed by `StorageKey` (build one with
+`storage_key(backend, *parts)`), and the key names the **storage**, not the
+request: a SQL service keys on its maker's bound engine (so two makers over
+one engine still share a session, while two engines never do), a Mongo service
+on its connection and collection, a list on its served list, a file service on
+its store. Sharing is therefore per connection — two resources on one
+connection share a session; two on different connections (or different
+backends) never adopt each other's storage, even in one ctx. Every resource
+exposes `async get_storage_key()` for an escape hatch to seed storage where a
+service will look for it.
 
 `normalize_actions(actions)` drops a batch action whose singular action is
 absent (`batch_read` needs `read`; `batch_edit` needs at least one of

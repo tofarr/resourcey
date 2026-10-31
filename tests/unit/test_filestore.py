@@ -31,6 +31,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from resourcey.cache.cache_strategy import LastModifiedCacheStrategy
@@ -57,10 +58,18 @@ from resourcey.filestore.sql_file_store import (
     sql_file_blob_view,
 )
 from resourcey.http.app import create_app
+from resourcey.list.list_resource import ListResource
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _Country(BaseModel):
+    """A plain Pydantic model, served by a ``ListResource`` in the isolation test."""
+
+    id: str
+    name: str
 
 
 def _encryption() -> EncryptionService:
@@ -544,6 +553,48 @@ class TestFileResource:
         resource = FileResource(LocalFileStore(), max_size=10)
         assert resource.max_size == 10
         assert FileResource(LocalFileStore()).max_size is None
+
+
+class TestFileStorageIsolation:
+    """Issue #178: a file medium is its own storage, keyed by the store object."""
+
+    async def test_two_stores_in_one_ctx_do_not_cross_adopt(self, tmp_path: Any) -> None:
+        first = LocalFileStore(root=tmp_path / "a")
+        second = LocalFileStore(root=tmp_path / "b")
+        first_resource = FileResource(first)
+        second_resource = FileResource(second)
+        async with first, second:
+            ctx: dict[Any, Any] = {}
+            async with await first_resource.get_service(ctx) as service_a:
+                await service_a.create(first_resource.get_dto_type()(name="a.txt", content=b"in a"))
+                async with await second_resource.get_service(ctx) as service_b:
+                    # B is served its own empty medium, not A's object.
+                    assert await service_b.count() == 0
+            async with await first_resource.get_service() as fresh:
+                assert await fresh.count() == 1
+
+    async def test_a_store_and_a_list_resource_do_not_cross_adopt(self, tmp_path: Any) -> None:
+        store = LocalFileStore(root=tmp_path / "blobs")
+        files = FileResource(store)
+        countries = ListResource(
+            [_Country(id="us", name="United States")], model=_Country, path="countries"
+        )
+        async with store:
+            ctx: dict[Any, Any] = {}
+            async with (
+                await files.get_service(ctx) as file_svc,
+                await countries.get_service(ctx) as list_svc,
+            ):
+                assert await list_svc.count() == 1
+                assert await file_svc.count() == 0
+            # The reverse entry order gives the same isolation.
+            ctx = {}
+            async with (
+                await countries.get_service(ctx) as list_svc,
+                await files.get_service(ctx) as file_svc,
+            ):
+                assert await file_svc.count() == 0
+                assert await list_svc.count() == 1
 
 
 @pytest_asyncio.fixture

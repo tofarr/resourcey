@@ -86,8 +86,11 @@ class OpenDependencyBuilder(DependencyBuilder):
 def request_ctx(request: Request) -> MutableMapping[Any, Any]:
     """The call-scoped context for ``request`` (created on first use).
 
-    Every resource in one request shares this mapping, so storage opened by one
-    service is adopted by the next.
+    Every resource in one request shares this mapping, but storage is adopted
+    only by a service that addresses the *same* storage: the ctx is keyed per
+    connection (a SQL engine, a Mongo collection, a list, a file store),
+    so two resources on different connections never share a session even when
+    they share one ctx.
     """
     ctx = getattr(request.state, _CTX_STATE_KEY, None)
     if ctx is None:

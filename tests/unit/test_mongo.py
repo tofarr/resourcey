@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
+from pydantic import BaseModel
 
 from resourcey.config.config_base import _reset_config_prefix
 from resourcey.core.dto import DTO, DtoField
@@ -113,6 +114,12 @@ class KeyedDTO(DTO, id_field_name="sku"):
 
     sku: str
     label: str = ""
+
+
+class _Country(BaseModel):
+    """A plain Pydantic model, served by a ``ListResource`` in the isolation test."""
+
+    id: str
 
 
 class IndexedResource(MongoResource[WidgetDTO, UUID]):
@@ -485,15 +492,68 @@ class TestResourceSurface:
             assert resource.collection is first
 
     async def test_a_collection_seeded_on_ctx_is_reused(self) -> None:
-        from resourcey.core.service import STORAGE_KEY
         from resourcey.mongo.embedded import AsyncEmbeddedClient
 
         manager, resource = await _resource(WidgetDTO)
         seeded = AsyncEmbeddedClient()["seeded"]["widget_dtos"]
         async with manager:
-            service = await resource.get_service({STORAGE_KEY: seeded})
+            # The key names the collection this resource resolves; a value seeded
+            # under it is adopted in place of the resource's own collection.
+            key = await resource.get_storage_key()
+            service = await resource.get_service({key: seeded})
         assert service._collection is seeded
-        assert resource.collection is None  # the manager path was never taken
+
+    async def test_a_collection_seeded_for_another_connection_is_not_adopted(self) -> None:
+        """Issue #178: one ctx must not hand a resource another database's rows."""
+        from resourcey.core.service import storage_key
+        from resourcey.mongo.embedded import AsyncEmbeddedClient
+
+        manager, resource = await _resource(WidgetDTO)
+        foreign = AsyncEmbeddedClient()["other_db"]["widget_dtos"]
+        async with manager:
+            service = await resource.get_service({storage_key("mongo", foreign): foreign})
+        assert service._collection is not foreign
+
+    async def test_two_collections_in_one_ctx_do_not_cross_adopt(self) -> None:
+        """Issue #178: one ctx must not hand a resource another collection's documents."""
+        manager, widgets_resource = await _resource(WidgetDTO)
+        keyed_resource = MongoResource(
+            KeyedDTO, client_manager=manager, encryption_service=_encryption()
+        )
+        async with manager:
+            created = await _seed(widgets_resource, label="a-widget")
+            ctx: dict[Any, Any] = {}
+            async with (
+                await widgets_resource.get_service(ctx) as widgets_service,
+                await keyed_resource.get_service(ctx) as keyed_service,
+            ):
+                assert keyed_service._collection is not widgets_service._collection
+                # The sibling collection is empty: no cross-collection read.
+                assert await keyed_service.count() == 0
+                assert (await widgets_service.read(created.id)).label == "a-widget"
+
+    async def test_a_mongo_and_a_list_resource_do_not_cross_adopt(self) -> None:
+        """Issue #178: differing backends never adopt each other's storage."""
+        from resourcey.list.list_resource import ListResource
+
+        manager, resource = await _resource(WidgetDTO)
+        countries = ListResource([_Country(id="us")], model=_Country, path="countries")
+        async with manager:
+            ctx: dict[Any, Any] = {}
+            async with (
+                await resource.get_service(ctx) as mongo_service,
+                await countries.get_service(ctx) as list_service,
+            ):
+                assert await list_service.count() == 1
+                assert await mongo_service.count() == 0
+            # The reverse entry order gives the same isolation.
+            ctx = {}
+            async with (
+                await countries.get_service(ctx) as list_service,
+                await resource.get_service(ctx) as mongo_service,
+            ):
+                assert await mongo_service.count() == 0
+                assert await list_service.count() == 1
 
     async def test_explicit_client_wins_over_the_manager(self) -> None:
         from resourcey.mongo.embedded import AsyncEmbeddedClient
@@ -506,6 +566,48 @@ class TestResourceSurface:
             pass
         assert resource.collection._col.database.name == "direct"
         assert resource.collection._col.name == "widget_dtos"
+
+    async def test_the_storage_key_names_the_collection_not_the_resource(self) -> None:
+        """Two resources over one manager and collection share a key; another collection differs.
+
+        Two resources on separate managers are separate storages, which is why the
+        key names the manager: the process-wide manager is what makes the default
+        setup share one client.
+        """
+        manager, widgets_resource = await _resource(WidgetDTO)
+        other_widgets = MongoResource(
+            WidgetDTO, client_manager=manager, encryption_service=_encryption()
+        )
+        keyed_resource = MongoResource(
+            KeyedDTO, client_manager=manager, encryption_service=_encryption()
+        )
+        _, separate_manager_resource = await _resource(WidgetDTO)
+        assert await widgets_resource.get_storage_key() == await other_widgets.get_storage_key()
+        assert await widgets_resource.get_storage_key() != await keyed_resource.get_storage_key()
+        assert (
+            await widgets_resource.get_storage_key()
+            != await separate_manager_resource.get_storage_key()
+        )
+
+    async def test_an_explicit_client_keys_on_the_client_and_database(self) -> None:
+        """An explicit client resolves no connection, so the client is the identity."""
+        from resourcey.mongo.embedded import AsyncEmbeddedClient
+
+        client = AsyncEmbeddedClient()
+        same = MongoResource(
+            WidgetDTO, client=client, database_name="db", encryption_service=_encryption()
+        )
+        other_db = MongoResource(
+            WidgetDTO, client=client, database_name="other", encryption_service=_encryption()
+        )
+        other_client = MongoResource(
+            WidgetDTO,
+            client=AsyncEmbeddedClient(),
+            database_name="db",
+            encryption_service=_encryption(),
+        )
+        assert await same.get_storage_key() != await other_db.get_storage_key()
+        assert await same.get_storage_key() != await other_client.get_storage_key()
 
     async def test_get_manifest_is_none_until_registered(self) -> None:
         _, resource = await _resource(WidgetDTO)
@@ -552,7 +654,6 @@ class TestActions:
 
     async def test_a_non_duplicate_insert_error_is_not_mislabelled(self) -> None:
         """Only a duplicate key becomes ``ConflictError``; anything else propagates."""
-        from resourcey.core.service import STORAGE_KEY
 
         class ExplodingCollection:
             async def insert_one(self, document: dict[str, Any]) -> Any:
@@ -560,7 +661,8 @@ class TestActions:
 
         manager, resource = await _resource(WidgetDTO)
         async with manager, resource:
-            service = await resource.get_service({STORAGE_KEY: ExplodingCollection()})
+            key = await resource.get_storage_key()
+            service = await resource.get_service({key: ExplodingCollection()})
             with pytest.raises(RuntimeError, match="transport blew up"):
                 await service.create(resource.get_dto_type()(label="x"))
 

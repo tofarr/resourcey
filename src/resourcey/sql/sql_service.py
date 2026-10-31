@@ -26,7 +26,6 @@ from resourcey.core.dto import apply_operation_defaults
 from resourcey.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.core.service import (
     DEFAULT_LIMIT,
-    STORAGE_KEY,
     Action,
     Create,
     Delete,
@@ -35,6 +34,7 @@ from resourcey.core.service import (
     Service,
     ServiceError,
     Update,
+    storage_key,
 )
 from resourcey.sql.cursor import decode_cursor, encode_cursor, keyset_predicate
 from resourcey.util.missing import MISSING
@@ -47,6 +47,19 @@ if TYPE_CHECKING:
 
 T = TypeVar("T", bound=BaseModel)
 K = TypeVar("K")
+
+
+def sql_storage_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> Any:
+    """What a SQL service's storage key names: the bound engine, else the maker.
+
+    Two resources over one engine share a session (and so a transaction) even
+    when each was handed its own maker; two over different engines never do.
+    An unbound maker can only be identified by itself.
+    """
+    bind = getattr(session_factory, "kw", {}).get("bind")
+    return bind if bind is not None else session_factory
 
 
 class SqlService(Service[T, K]):
@@ -62,6 +75,7 @@ class SqlService(Service[T, K]):
         self._resource = resource
         self._ctx = ctx
         self._session_factory = session_factory
+        self._storage_key = storage_key("sql", sql_storage_identity(session_factory))
         self._session: AsyncSession | None = None
         self._owns_storage = False
 
@@ -71,10 +85,10 @@ class SqlService(Service[T, K]):
 
     async def __aenter__(self) -> SqlService[T, K]:
         await super().__aenter__()
-        session = self._ctx.get(STORAGE_KEY)
+        session = self._ctx.get(self._storage_key)
         if session is None:
             session = self._session_factory()
-            self._ctx[STORAGE_KEY] = session
+            self._ctx[self._storage_key] = session
             self._owns_storage = True
         self._session = cast(AsyncSession, session)
         return self
@@ -86,7 +100,7 @@ class SqlService(Service[T, K]):
             else:
                 await self._session.commit()
             await self._session.close()
-            self._ctx.pop(STORAGE_KEY, None)
+            self._ctx.pop(self._storage_key, None)
         await super().__aexit__(*exc)
 
     def _active_session(self) -> AsyncSession:

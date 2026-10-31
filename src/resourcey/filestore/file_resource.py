@@ -44,7 +44,6 @@ from resourcey.core.errors import InvalidInputError, UnsupportedFilterError
 from resourcey.core.resource import Resource
 from resourcey.core.service import (
     DEFAULT_LIMIT,
-    STORAGE_KEY,
     Action,
     Create,
     Delete,
@@ -52,7 +51,9 @@ from resourcey.core.service import (
     Page,
     Service,
     ServiceError,
+    StorageKey,
     Update,
+    storage_key,
 )
 from resourcey.encryption.encryption_service import EncryptionService, get_encryption_service
 from resourcey.filestore.file_config import FileStoreConfig
@@ -228,6 +229,10 @@ class FileResource(DefaultCacheStrategyMixin, Resource[T, K]):
             download_url_ttl_seconds=self._download_url_ttl_seconds,
         )
 
+    async def get_storage_key(self) -> StorageKey:
+        """The ctx key a service of this resource stores its medium under."""
+        return storage_key("file", self._store)
+
     @property
     def store(self) -> FileStore:
         """The medium this resource serves (the escape hatch)."""
@@ -294,10 +299,11 @@ class FileService(Service[T, K]):
         self._store = store
         self._max_size = max_size
         self._download_url_ttl_seconds = download_url_ttl_seconds
+        self._storage_key = storage_key("file", store)
 
     async def __aenter__(self) -> FileService[T, K]:
         await super().__aenter__()
-        self._ctx.setdefault(STORAGE_KEY, self._store)
+        self._ctx.setdefault(self._storage_key, self._store)
         return self
 
     # ------------------------------------------------------------------
