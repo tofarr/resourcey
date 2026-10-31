@@ -180,6 +180,17 @@ curl -s "http://127.0.0.1:8081/messages/batch-read?id=1&id=2"
 # → [{…},{…}]
 ```
 
+Batch edit across both resources in one request:
+
+```bash
+curl -s -X POST http://127.0.0.1:8081/batch-edit \
+  -H "Content-Type: application/json" \
+  -d '[{"resource":"threads","kind":"Update","item":{"id":1,"title":"Renamed"}},
+       {"resource":"messages","kind":"Create","item":{"thread_id":1,"text":"hello"}}]'
+# → [{"resource":"threads","kind":"Update","result":{…}},
+#    {"resource":"messages","kind":"Create","result":{…}}]
+```
+
 ## Auto-generated REST surface
 
 Each resource gets the standard actions:
@@ -198,6 +209,12 @@ Each resource gets the standard actions:
 …and the same actions for `/messages`. Search is `limit` + `cursor` + `sort` /
 `desc` plus the `<field>__<op>` filter params; responses carry `ETag` /
 `Last-Modified` / `Cache-Control` and a conditional `GET` can return `304`.
+
+Plus one app-level route that is not per resource:
+
+| Method | Path          | Action                        |
+| ------ | ------------- | ----------------------------- |
+| `POST` | `/batch-edit` | batch_edit across every resource |
 
 ## Migrations
 

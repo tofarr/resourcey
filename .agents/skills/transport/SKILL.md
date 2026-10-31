@@ -115,18 +115,21 @@ hashes the resolved filter too, so distinct filters get distinct validators.
 
 ## Request caps
 
-Two caller-controlled read knobs are capped at the transport, from
-`RequestLimitsConfig` (`src/resourcey/http/http_config.py`), read **once** in
-`register_routes` and threaded into the route builders:
+Three caller-controlled knobs are capped at the transport, from
+`RequestLimitsConfig` (`src/resourcey/http/http_config.py`), read **once** at
+registration and threaded into the route builders:
 
 | Config field | Env var | Default | Bounds |
 |---|---|---|---|
 | `max_search_limit` | `APP_MAX_SEARCH_LIMIT` | 100 | an explicit `search` `limit` |
 | `max_batch_read_ids` | `APP_MAX_BATCH_READ_IDS` | 100 | the id count in one `batch_read` |
+| `max_batch_edits` | `APP_MAX_BATCH_EDITS` | 100 | the node count in one app-level `batch_edit` |
 
-* Both must be `>= 1`; `RequestLimitsConfig.get_instance()` raises
+* All three must be `>= 1`; `RequestLimitsConfig.get_instance()` raises
   `ResourceyConfigError` otherwise. `None` is not accepted — a silently
-  unbounded read surface is the footgun the caps close.
+  unbounded surface is the footgun the caps close. In particular
+  `register_batch_routes(max_edits=None)` (the default) means "read the config",
+  **not** "uncapped"; pass an int to override for one mount.
 * The caps live in `config`, which `core` (rank 1) cannot import, so enforcement
   is here, not in `Service`. A **direct service call is trusted code and is not
   capped** — the same split that has the transport validate the sort/filter
@@ -148,8 +151,11 @@ Two caller-controlled read knobs are capped at the transport, from
   `maximum` / `maxItems`) so they still appear in the generated OpenAPI
   document.
 
-`batch_edit` is not capped (out of scope for #175); `MAX_IN_VALUES` (500, for
-`?id__in=`) and `ACL_MAX_IDS` (100) are separate, pre-existing caps.
+The app-level `batch_edit` node count is capped by `max_batch_edits` (#177). The
+**per-resource** `/{resource}/batch-edit` is not capped — it takes one resource's
+edits and cannot span the surface, so it is not the unbounded-work footgun the
+app-level route is. `MAX_IN_VALUES` (500, for `?id__in=`) and `ACL_MAX_IDS` (100)
+are separate, pre-existing caps.
 
 ## Error envelope
 
@@ -161,7 +167,7 @@ Every framework error becomes:
 
 | Status | `code` | Raised by |
 |---|---|---|
-| 400 | `invalid_input` | `InvalidInputError` (bad filter, sort, cursor, over-cap `limit` / `batch_read`) |
+| 400 | `invalid_input` | `InvalidInputError` (bad filter, sort, cursor, over-cap `limit` / `batch_read` / `batch_edit`) |
 | 401 | FastAPI default (`{"detail": ...}`) | the strict/lenient principal dependency, with `WWW-Authenticate` |
 | 403 | `forbidden` | `ForbiddenError` (denied create) |
 | 404 | `not_found` | `NotFoundError` (absent, or out-of-scope by id) |
@@ -189,6 +195,40 @@ strategy, so a shared cache neither stores nor revalidates it.
 Only the projected REST representation is hashed, so the ETag validates exactly
 the bytes sent. `_project` / `_dump` / `_header_for` all thread the service's
 `serialization_context()`.
+
+## register_batch_routes
+
+```python
+register_batch_routes(app_or_router, manifest, *, path="/batch-edit", prefix="",
+                      dependency_builder=None, max_edits=None, tags=None)
+```
+
+The app-level `POST /batch-edit`: one ordered list of create / update / delete
+nodes spanning **every** exposed resource, answered positionally. `create_app` /
+`add_to_app` mount it by default (`batch_edit=False` opts out,
+`batch_edit_path=...` moves it, `batch_edit_max_edits=...` overrides the cap).
+`max_edits=None` reads `RequestLimitsConfig.max_batch_edits` — it never lifts
+the cap.
+
+* The body is a **static** two-level discriminated union built at registration:
+  `resource` → `kind`. Each resource contributes the same union its own
+  `/{resource}/batch-edit` accepts (`_batch_edit_body`, shared not copied), so
+  a `kind` the resource does not declare is a `422` and the two routes cannot
+  drift.
+* Targets are exposed resources whose normalized actions include `batch_edit` —
+  the same gate as the per-resource route. A hidden resource contributes
+  nothing, so it is unreachable here.
+* Nodes apply in **list order**, never grouped, so a later node sees an earlier
+  node's write. Consecutive nodes for one resource share one service (and one
+  transaction where the backend has one).
+* Every service stays open on an `AsyncExitStack` until the batch finishes:
+  closing a run early would commit it and defeat rollback. The first failure
+  propagates to the error envelope; rollback is **best effort** and holds where
+  the backend provides a shared transaction (SQL on one session factory).
+* `build_service` on the `DependencyBuilder` is the seam — the route selects a
+  resource at runtime, so it cannot use the static `get_service_dependency`.
+  An authorizing builder therefore wraps each node's service, which is what
+  keeps this route from being an authorization bypass.
 
 ## Escape hatches
 

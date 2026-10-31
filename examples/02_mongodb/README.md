@@ -68,6 +68,25 @@ PATCH  /messages/{id}                  — update a message
 DELETE /messages/{id}                  — delete a message
 ```
 
+## Cross-resource batch edit
+
+`POST /batch-edit` spans both resources in one ordered request. Each node goes
+through its own resource's service, so storage is keyed per collection: a
+`threads` node and a `messages` node in one batch each see their own documents.
+
+```bash
+curl -s localhost:8082/batch-edit -H 'content-type: application/json' -d '[
+  {"resource": "threads",  "kind": "Update", "item": {"id": "<thread-id>", "title": "Renamed"}},
+  {"resource": "messages", "kind": "Create", "item": {"thread_id": "<thread-id>", "text": "hi"}}
+]'
+```
+
+The response is positionally aligned, echoing `resource` / `kind`; a delete or a
+missing id is `null`. Rollback is **not** promised across two Mongo collections
+(Mongo has no shared transaction here), so a failed node may leave earlier ones
+applied — that is why `batch-edit` is documented as best-effort rather than
+atomic.
+
 ## Manual migration on read
 
 MongoDB resources do **not** use Alembic migrations. Instead, a resource can

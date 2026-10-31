@@ -22,6 +22,9 @@ sees.
 | `batch_read` | GET | `/{resource}/batch-read` | repeated `?id=` | 200 + list |
 | `batch_edit` | POST | `/{resource}/batch-edit` | edit union | 200 + list |
 
+Plus one app-level route that is not per resource: `POST /batch-edit`, spanning
+every exposed resource (see the batch section below).
+
 A route exists **only** for a declared action. A write against a read-only
 resource is a `405`, not a handler that raises.
 
@@ -115,6 +118,35 @@ one-time-reveal field survives); an `Update` onto the update response; a
 `Delete`, an absent id, or a failed `condition` yields `null`. The union is
 narrowed to the actions the resource declares, so a batch cannot reach an action
 the resource never exposed.
+
+### The app-level `POST /batch-edit`
+
+`POST /batch-edit` is the cross-resource counterpart: the same body with a
+`resource` field naming the target by **path segment**, and the same
+positionally aligned response with `resource` / `kind` echoed back:
+
+```json
+[
+  {"resource": "threads",  "kind": "Update", "item": {"id": 1, "title": "renamed"}},
+  {"resource": "messages", "kind": "Delete", "id": 7}
+]
+```
+
+* Mounted by default by `create_app` / `add_to_app`; `batch_edit=False`
+  suppresses it, `batch_edit_path` relocates it.
+* The body is a **static** two-level union (`resource` → `kind`) built at
+  registration from the exposed resources that declare `batch_edit`, so a node
+  naming an unknown resource, a hidden one, or a `kind` the resource does not
+  declare is a `422`.
+* Nodes apply in **strict list order** — never grouped by resource, which would
+  reorder dependent edits. A `Create` then an `Update` of the same
+  client-supplied id works.
+* Fail fast: the first failure aborts the batch and its error propagates. Roll
+  back is **best effort** — SQL resources on one connection share a transaction
+  and roll back together; across connections or backends, earlier nodes may stay
+  applied. Clients must not infer all-or-nothing.
+* No `ETag` / `Cache-Control`: the method is unsafe and there is no single
+  strategy to aggregate across resources.
 
 ## Errors
 

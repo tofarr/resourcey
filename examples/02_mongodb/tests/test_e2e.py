@@ -308,3 +308,77 @@ class TestBatchRead:
         assert len(body) == 2
         assert body[0]["id"] == created["id"]
         assert body[1] is None
+
+
+# ---------------------------------------------------------------------------
+# App-level cross-resource batch edit
+# ---------------------------------------------------------------------------
+
+
+class TestCrossResourceBatchEdit:
+    """`POST /batch-edit` spans both resources over Mongo.
+
+    Mongo is the backend where the per-request storage key used to collide
+    (#178), so this is the case that would have silently served threads' storage
+    to messages. It also pins the *honest* contract here: rollback is not
+    promised across two Mongo collections, so a failed node may leave earlier
+    ones applied.
+    """
+
+    async def test_create_in_two_collections_in_one_batch(self, client: AsyncClient) -> None:
+        thread = await _make_thread(client, "Batch")
+        resp = await client.post(
+            "/batch-edit",
+            json=[
+                {
+                    "resource": "threads",
+                    "kind": "Update",
+                    "item": {"id": thread["id"], "title": "U"},
+                },
+                {
+                    "resource": "messages",
+                    "kind": "Create",
+                    "item": {"thread_id": thread["id"], "text": "hello"},
+                },
+            ],
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [node["resource"] for node in body] == ["threads", "messages"]
+        assert [node["kind"] for node in body] == ["Update", "Create"]
+        # Each node was served its *own* collection, not the first one's.
+        assert body[0]["result"]["title"] == "U"
+        assert body[1]["result"]["text"] == "hello"
+
+    async def test_results_are_positionally_aligned_and_a_miss_is_null(
+        self, client: AsyncClient
+    ) -> None:
+        thread = await _make_thread(client, "Aligned")
+        resp = await client.post(
+            "/batch-edit",
+            json=[
+                {
+                    "resource": "threads",
+                    "kind": "Update",
+                    "item": {"id": thread["id"], "title": "R"},
+                },
+                {"resource": "messages", "kind": "Delete", "id": str(uuid.uuid4())},
+            ],
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 2
+        assert body[0]["result"]["title"] == "R"
+        assert body[1]["result"] is None
+
+    async def test_a_later_node_sees_an_earlier_create(self, client: AsyncClient) -> None:
+        resp = await client.post(
+            "/batch-edit",
+            json=[
+                {"resource": "threads", "kind": "Create", "item": {"title": "First"}},
+                {"resource": "threads", "kind": "Create", "item": {"title": "Second"}},
+            ],
+        )
+        assert resp.status_code == 200
+        assert [n["result"]["title"] for n in resp.json()] == ["First", "Second"]
+        assert (await client.get("/threads/count")).json() == 2

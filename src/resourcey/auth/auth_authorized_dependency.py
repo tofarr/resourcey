@@ -40,6 +40,7 @@ from resourcey.auth.auth_policy import AllowAllResolver, PolicyResolver
 from resourcey.auth.auth_principal import (
     PRINCIPAL_CTX_KEY,
     Authenticator,
+    current_principal,
     optional_principal,
     required_principal,
 )
@@ -99,33 +100,43 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
         else:
             authenticate = required_principal(self.authenticator)
 
-        policy_resolver = self.policy_resolver
-        id_field = resource.get_id_field()
-        resource_name = type(resource).__name__
-
         async def dependency(
             request: Request,
             principal: Any = Depends(authenticate),  # noqa: B008
         ) -> AsyncIterator[Service[Any, Any]]:
-            policies = await policy_resolver.resolve(resource, principal)
-            user_id = principal.id if principal is not None else None
-            ctx = request_ctx(request)
-            # Publish the principal on the call-scoped ctx so a resource service can
-            # read it — e.g. an Owner-scoped resource stamping the owner on create.
-            ctx[PRINCIPAL_CTX_KEY] = principal
-            inner = await resource.get_service(ctx)
-            service: Service[Any, Any] = AuthorizedService(
-                inner,
-                policies=policies,
-                id_field=id_field,
-                resource_name=resource_name,
-                user_id=user_id,
-                response_private=_response_is_caller_scoped(policies),
-            )
+            service = await self.build_service(request, resource)
             async with service:
                 yield service
 
         return dependency
+
+    async def build_service(
+        self, request: Request, resource: Resource[Any, Any]
+    ) -> Service[Any, Any]:
+        """The policy-wrapped service, for a route that selects resources at runtime.
+
+        The principal comes from :func:`current_principal` rather than a
+        ``Depends`` parameter: the transport's per-route
+        :meth:`get_principal_dependency` has already authenticated and stored it,
+        so a runtime-selected resource resolves against the same principal with
+        no second authentication.
+        """
+        principal = await current_principal(request)
+        policies = await self.policy_resolver.resolve(resource, principal)
+        user_id = principal.id if principal is not None else None
+        ctx = request_ctx(request)
+        # Publish the principal on the call-scoped ctx so a resource service can
+        # read it — e.g. an Owner-scoped resource stamping the owner on create.
+        ctx[PRINCIPAL_CTX_KEY] = principal
+        inner = await resource.get_service(ctx)
+        return AuthorizedService(
+            inner,
+            policies=policies,
+            id_field=resource.get_id_field(),
+            resource_name=type(resource).__name__,
+            user_id=user_id,
+            response_private=_response_is_caller_scoped(policies),
+        )
 
 
 def _response_is_caller_scoped(policies: list[Any]) -> bool:

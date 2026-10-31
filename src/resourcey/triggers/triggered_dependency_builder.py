@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Any
 
-from fastapi import Depends
+from fastapi import Depends, Request
 from pydantic import Field, PrivateAttr, SkipValidation, field_validator
 
 from resourcey.core.resource import Resource
@@ -103,21 +103,11 @@ class TriggeredDependencyBuilder(DependencyBuilder):
         is never double-wrapped.
         """
         inner_dependency = self.inner.get_service_dependency(resource)
-        if isinstance(resource, TriggeredResource):
-            return inner_dependency
-        triggers = self.resource_triggers.get(resource.get_resource_path())
+        triggers = self._triggers_for(resource)
         if not triggers:
             return inner_dependency
 
-        # The config-driven path's equivalent construction point, called once per
-        # resource at registration -- not per request.
-        for trigger in triggers:
-            if isinstance(trigger, ResourceBoundTrigger):
-                trigger.bind_resource(resource)
-
         background = self.background
-        # Created once per resource (registration) and shared by every request's
-        # service via the closure below.
         runner = TriggerRunner()
         self._runners.append(runner)
 
@@ -131,6 +121,48 @@ class TriggeredDependencyBuilder(DependencyBuilder):
                 yield service
 
         return dependency
+
+    async def build_service(
+        self, request: Request, resource: Resource[Any, Any]
+    ) -> Service[Any, Any]:
+        """The inner builder's service, wrapped in a ``TriggeredService`` when configured.
+
+        Mirrors :meth:`get_service_dependency` so a runtime-selected resource
+        (the cross-resource ``batch-edit``) fires its triggers too. The runner is
+        created here rather than at registration — this route resolves a resource
+        per request, so there is no registration-time point to hang it off. It is
+        still drained, because every runner is appended to the same ``_runners``
+        list this builder drains on ``__aexit__``.
+        """
+        inner_service = await self.inner.build_service(request, resource)
+        triggers = self._triggers_for(resource)
+        if not triggers:
+            return inner_service
+
+        runner = TriggerRunner()
+        self._runners.append(runner)
+        service: Service[Any, Any] = TriggeredService(
+            inner_service, triggers, background=self.background, runner=runner
+        )
+        return service
+
+    def _triggers_for(self, resource: Resource[Any, Any]) -> list[Trigger[Any, Any]]:
+        """The configured triggers for ``resource``, or ``[]`` when it must pass through.
+
+        Empty when the resource has no configured triggers, or already fires its
+        own — a ``TriggeredResource`` is never double-wrapped.
+        """
+        if isinstance(resource, TriggeredResource):
+            return []
+        triggers = self.resource_triggers.get(resource.get_resource_path())
+        if not triggers:
+            return []
+        # Binding is idempotent, so calling it from both the registration-time
+        # path and the runtime-selected one is safe.
+        for trigger in triggers:
+            if isinstance(trigger, ResourceBoundTrigger):
+                trigger.bind_resource(resource)
+        return list(triggers)
 
     # ------------------------------------------------------------------
     # Lifecycle -- an async context manager so an app can register this

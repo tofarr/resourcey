@@ -150,7 +150,20 @@ manifest = Manifest(resources=(SqlResource(Thread), SqlResource(Message)))
 From those two classes `create_app(manifest)` serves `POST /threads` and
 `GET /threads` (search), `GET|PATCH|DELETE /threads/{id}`, `GET /threads/count`,
 `GET /threads/batch-read`, and `POST /threads/batch-edit` — and the same set for
-`messages` — plus the OpenAPI docs.
+`messages` — plus `POST /batch-edit`, which spans both resources, and the
+OpenAPI docs.
+
+`POST /batch-edit` takes one ordered list of `create` / `update` / `delete`
+nodes, each naming its target resource, and answers with a positionally aligned
+list. Nodes apply in the order given, so a later node sees an earlier node's
+write. The first failure aborts the batch; rollback is best effort, holding
+wherever the backend provides a shared transaction (SQL resources on one
+session factory roll back together). It is mounted by default — pass
+`create_app(manifest, batch_edit=False)` to turn it off, or
+`batch_edit_path="/ops/edits"` to move it. The node count is capped by
+`batch_edit_max_edits`, which defaults to `RequestLimitsConfig.max_batch_edits`
+(`APP_MAX_BATCH_EDITS`, 100). A resource opts out by not
+declaring `batch_edit`, and a hidden resource is never reachable through it.
 
 SQLAlchemy is the schema of record: the DTO and the six REST models are
 inferred from the ORM model, so a developer keeps the mapping they already

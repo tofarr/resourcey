@@ -67,10 +67,19 @@ _WireCondition = Annotated[Any, WithJsonSchema({"type": "object", "title": "Sear
 
 
 def _resolve_wire_condition(value: Any) -> Any:
-    """Resolve a JSON condition into a :class:`SearchFilter`, else pass through."""
+    """Resolve a JSON condition into a :class:`SearchFilter`, else pass through.
+
+    A condition that is neither a filter nor a JSON object is rejected here
+    rather than reaching a backend, which would dereference it as a filter tree
+    and raise an ``AttributeError`` (a ``500`` on malformed input).
+    """
     if isinstance(value, dict):
         return SearchFilter.model_validate(value)
-    return value
+    if value is None or isinstance(value, SearchFilter):
+        return value
+    raise ValueError(
+        f"condition must be a JSON object describing a SearchFilter, not {type(value).__name__}"
+    )
 
 
 def register_routes(
