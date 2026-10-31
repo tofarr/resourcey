@@ -165,7 +165,7 @@ class TestCallbackBound:
         assert event.id == str(target)
         assert event.item is None
 
-    async def test_a_batch_edit_miss_publishes_nothing_for_that_pair(self) -> None:
+    async def test_a_batch_miss_publishes_nothing_for_that_pair(self) -> None:
         from pydantic import BaseModel
 
         class ThreadDTO(BaseModel):
@@ -179,7 +179,7 @@ class TestCallbackBound:
         )
         hit = ThreadDTO(id=uuid.uuid4(), title="hit")
         sub = channel.subscribe()
-        # An Update for an absent id yields a None result (a batch_edit miss);
+        # An Update for an absent id yields a None result (a batch miss);
         # only the successful pair should publish.
         await trigger.callback(
             [Update(item=hit), Update(item=ThreadDTO(id=uuid.uuid4(), title="miss"))],

@@ -66,7 +66,7 @@ register_routes(app_or_router, resource, *, prefix="", tags=None,
 * Registers one route per **normalized** supported action — no route for an
   action the resource does not declare, so a write on a read-only resource is a
   `405`.
-* Static sub-paths (`/count`, `/batch-read`, `/batch-edit`) are registered
+* Static sub-paths (`/count`, `/batch-read`) are registered
   before the `{id}` routes, or `batch-read` would be captured as an id.
 * The default OpenAPI tag is the resource path humanized (`threads` → `Threads`,
   `api-keys` → `Api Keys`), **not** the class name: the model-first workflow
@@ -91,13 +91,13 @@ The action → shape mapping:
 | `search` | GET | `/{resource}` | query params | `search_response` page | 200 |
 | `count` | GET | `/{resource}/count` | filter query params | bare integer | 200 |
 | `batch_read` | GET | `/{resource}/batch-read` | repeated `id` params | list of `search_response` | 200 |
-| `batch_edit` | POST | `/{resource}/batch-edit` | edit union | list of `search_response` / create / update | 200 |
 
 `create` maps to `create_response` (not read) so a one-time-reveal field
 survives. Services return DTOs; the transport **projects** them onto the REST
 model, dropping `MISSING`.
 
-The batch-edit body is a `kind`-discriminated union narrowed to the actions the
+There is no per-resource batch write: `POST /batch-edit` (below) is the only
+one (#179). Its body is a `kind`-discriminated union narrowed to the actions the
 resource declares: a resource without `create` / `delete` admits only `Update`.
 The condition field is typed `Any` with an explicit JSON-schema override and a
 `mode="before"` resolver — typing it as the parameterised `SearchFilter`
@@ -151,11 +151,9 @@ registration and threaded into the route builders:
   `maximum` / `maxItems`) so they still appear in the generated OpenAPI
   document.
 
-The app-level `batch_edit` node count is capped by `max_batch_edits` (#177). The
-**per-resource** `/{resource}/batch-edit` is not capped — it takes one resource's
-edits and cannot span the surface, so it is not the unbounded-work footgun the
-app-level route is. `MAX_IN_VALUES` (500, for `?id__in=`) and `ACL_MAX_IDS` (100)
-are separate, pre-existing caps.
+The app-level `batch_edit` node count is capped by `max_batch_edits` (#177) —
+the only batch write route, so every batch is bounded. `MAX_IN_VALUES` (500, for
+`?id__in=`) and `ACL_MAX_IDS` (100) are separate, pre-existing caps.
 
 ## Error envelope
 
@@ -167,7 +165,7 @@ Every framework error becomes:
 
 | Status | `code` | Raised by |
 |---|---|---|
-| 400 | `invalid_input` | `InvalidInputError` (bad filter, sort, cursor, over-cap `limit` / `batch_read` / `batch_edit`) |
+| 400 | `invalid_input` | `InvalidInputError` (bad filter, sort, cursor, over-cap `limit` / `batch_read` / batch node count) |
 | 401 | FastAPI default (`{"detail": ...}`) | the strict/lenient principal dependency, with `WWW-Authenticate` |
 | 403 | `forbidden` | `ForbiddenError` (denied create) |
 | 404 | `not_found` | `NotFoundError` (absent, or out-of-scope by id) |
@@ -211,13 +209,11 @@ nodes spanning **every** exposed resource, answered positionally. `create_app` /
 the cap.
 
 * The body is a **static** two-level discriminated union built at registration:
-  `resource` → `kind`. Each resource contributes the same union its own
-  `/{resource}/batch-edit` accepts (`_batch_edit_body`, shared not copied), so
-  a `kind` the resource does not declare is a `422` and the two routes cannot
-  drift.
-* Targets are exposed resources whose normalized actions include `batch_edit` —
-  the same gate as the per-resource route. A hidden resource contributes
-  nothing, so it is unreachable here.
+  `resource` → `kind`. Each resource contributes its own union
+  (`_resource_edit_body`), so a `kind` the resource does not declare is a `422`.
+* Targets are exposed resources that declare at least one write action — the
+  gate that replaced the removed `Action.BATCH_EDIT`. A hidden or read-only
+  resource contributes nothing, so it is unreachable here.
 * Nodes apply in **list order**, never grouped, so a later node sees an earlier
   node's write. Consecutive nodes for one resource share one service (and one
   transaction where the backend has one).

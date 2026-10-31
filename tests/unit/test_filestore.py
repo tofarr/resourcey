@@ -696,25 +696,25 @@ class TestFileService:
         with pytest.raises(InvalidInputError):
             await file_service.search(cursor="not-a-real-cursor")
 
-    async def test_batch_edit_create_is_rejected(self, file_service: Any) -> None:
+    async def test_apply_edits_create_is_rejected(self, file_service: Any) -> None:
         dto_type = file_service._resource.get_dto_type()
         from resourcey.core.service import Create
 
-        with pytest.raises(InvalidInputError, match="batch_edit cannot create"):
-            await file_service.batch_edit([Create(item=dto_type(name="a.txt", content=b"x"))])
+        with pytest.raises(InvalidInputError, match="a batch cannot create"):
+            await file_service.apply_edits([Create(item=dto_type(name="a.txt", content=b"x"))])
 
-    async def test_batch_edit_delete(self, file_service: Any) -> None:
+    async def test_apply_edits_delete(self, file_service: Any) -> None:
         dto_type = file_service._resource.get_dto_type()
         created = await file_service.create(dto_type(name="a.txt", content=b"x"))
-        results = await file_service.batch_edit([Delete(id=created.id), Delete(id="ghost")])
+        results = await file_service.apply_edits([Delete(id=created.id), Delete(id="ghost")])
         assert results == [None, None]
         with pytest.raises(NotFoundError):
             await file_service.read(created.id)
 
-    async def test_batch_edit_update_is_rejected(self, file_service: Any) -> None:
+    async def test_apply_edits_update_is_rejected(self, file_service: Any) -> None:
         dto_type = file_service._resource.get_dto_type()
         with pytest.raises(InvalidInputError, match="no update action"):
-            await file_service.batch_edit([Update(item=dto_type(id="x"))])
+            await file_service.apply_edits([Update(item=dto_type(id="x"))])
 
 
 # ---------------------------------------------------------------------------
@@ -822,25 +822,28 @@ async def test_sorting_is_rejected(client: AsyncClient) -> None:
     assert response.status_code == 400
 
 
-async def test_batch_edit_cannot_create(client: AsyncClient) -> None:
+async def test_no_per_resource_batch_edit_route(client: AsyncClient) -> None:
+    """``files`` has no batch-edit route: the app-level one is the only batch write."""
     response = await client.post(
         "/files/batch-edit",
-        json=[{"kind": "Create", "item": {"name": "a.txt"}}],
+        json=[{"kind": "Delete", "id": "whatever"}],
     )
-    # The batch-edit kind union is narrowed to ``Delete`` only -- an
-    # unrecognized discriminator tag is a validation error.
-    assert response.status_code == 422
+    assert response.status_code == 405
 
 
-async def test_batch_edit_can_delete(client: AsyncClient) -> None:
+async def test_the_cross_resource_batch_edit_does_not_reach_files(client: AsyncClient) -> None:
+    """``files`` is mounted outside the ``Manifest``, so ``/batch-edit`` cannot address it.
+
+    Bulk deletion therefore means one ``DELETE`` per file. Widening the app-level
+    route to reach a hand-mounted resource is a separate design question, tracked
+    on the issue that removed the per-resource route.
+    """
     file_id = await _create(client)
-    delete_response = await client.post(
-        "/files/batch-edit",
-        json=[{"kind": "Delete", "id": file_id}],
+    response = await client.post(
+        "/batch-edit", json=[{"resource": "files", "kind": "Delete", "id": file_id}]
     )
-    assert delete_response.status_code == 200
-    assert delete_response.json() == [None]
-    assert (await client.get(f"/files/{file_id}")).status_code == 404
+    assert response.status_code == 404
+    assert (await client.get(f"/files/{file_id}")).status_code == 200
 
 
 async def test_signed_url_is_bound_to_its_object(client: AsyncClient) -> None:

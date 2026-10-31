@@ -22,7 +22,7 @@ REST shapes:
 | `in_create_request` / `in_create_response` | `POST /{resource}` |
 | `in_update_request` / `in_update_response` | `PATCH /{resource}/{id}` |
 | `in_read_response` | `GET /{resource}/{id}` |
-| `in_search_response` | search items, batch_read, batch_edit results |
+| `in_search_response` | search items, batch_read, apply_edits results |
 
 Tag with `Annotated[T, DtoField(...)]`. The bare-assignment form is a
 `mypy --strict` error.
@@ -108,11 +108,12 @@ manager, so the call site is `async with await resource.get_service(ctx)`.
 `on_register` only retains the manifest; siblings are resolved lazily later,
 never from inside it (registration order is not a contract).
 
-## Service — the eight actions
+## Service — the actions
 
 `Action` is a `StrEnum` whose lowercased member names match the method names:
-`CREATE`, `READ`, `UPDATE`, `DELETE`, `SEARCH`, `COUNT`, `BATCH_READ`,
-`BATCH_EDIT`.
+`CREATE`, `READ`, `UPDATE`, `DELETE`, `SEARCH`, `COUNT`, `BATCH_READ`. There is
+no batch **write** member: batching a write is a transport concern
+(`POST /batch-edit`), not a per-resource action (#179).
 
 `Service[T, K]` declares them and *is* the async CM; calling an action before
 `__aenter__` raises `ServiceError`. It holds no storage — session-per-service
@@ -127,8 +128,14 @@ async search(search_filter=None, sort_order=None, cursor=None,
              limit=DEFAULT_LIMIT) -> Page[T]
 async count(search_filter=None) -> int
 async batch_read(ids: list[K]) -> list[T | None]
-async batch_edit(edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]
+async apply_edits(edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]
 ```
+
+`apply_edits` is **not** an action — it is an internal helper the app-level
+`POST /batch-edit` calls, and the one place a batch is applied. Every backend
+implements it as a loop over its own singular `create` / `update` / `delete`, so
+it adds no behaviour of its own; call it directly when you need a batch without
+HTTP.
 
 `Page` carries `items`, `limit`, `next_cursor` — no `total` (counting is the
 separate `count` action). `DEFAULT_LIMIT = 20`.
@@ -146,14 +153,13 @@ backends) never adopt each other's storage, even in one ctx. Every resource
 exposes `async get_storage_key()` for an escape hatch to seed storage where a
 service will look for it.
 
-`normalize_actions(actions)` drops a batch action whose singular action is
-absent (`batch_read` needs `read`; `batch_edit` needs at least one of
-create / update / delete). `normalize_action(action)` reduces `COUNT`→`SEARCH`,
-`BATCH_READ`→`READ`, `BATCH_EDIT`→`UPDATE` for permission purposes.
+`normalize_actions(actions)` drops `batch_read` when `read` is absent.
+`normalize_action(action)` reduces `COUNT`→`SEARCH`, `BATCH_READ`→`READ` for
+permission purposes.
 
 ### Conditional writes
 
-`update` / `delete` (and each `Update` / `Delete` node of a `batch_edit`) take
+`update` / `delete` (and each `Update` / `Delete` node of an `apply_edits` batch) take
 an optional **native** `SearchFilter` condition. The write applies only when the
 row's pre-write value satisfies it; a miss is **indistinguishable from an absent
 row** — `None` for update, `False` for delete — so existence does not leak.

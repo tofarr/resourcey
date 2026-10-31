@@ -1,7 +1,7 @@
 // resource_actions.qnt — formal spec for the standard resource actions.
 //
 // A resource exposes: create, read, update, delete, search, count,
-// batch_read, batch_edit. This spec models the state transitions and
+// batch_read, and a batch write. This spec models the state transitions and
 // invariants that every generated service must satisfy.
 //
 // Two caller-controlled knobs on the read surface are capped at the transport
@@ -37,7 +37,7 @@
 //   - deleteRequiresExisting: delete fails for absent ids.
 
 module resource_actions {
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   // A stored entity is keyed by an id and carries a value.
   type Entity = int
@@ -46,10 +46,10 @@ module resource_actions {
   // Absent when no entity exists for the requested id (models ``null``).
   type BatchResult = Present(Entity) | Absent
 
-  // A single (id, value) update within a batch_edit list.
+  // A single (id, value) update within an edit batch.
   type BatchUpdate = { id: int, value: Entity }
 
-  // One item of a batch_edit: a create (value), an update (id + value), or a
+  // One item of an edit batch: a create (value), an update (id + value), or a
   // delete (id). This mirrors the Edit union (Create / Update / Delete) the
   // service accepts, so one batch can mix all three operations.
   type Edit = CreateEdit(Entity) | UpdateEdit(BatchUpdate) | DeleteEdit(int)
@@ -188,12 +188,12 @@ module resource_actions {
   def cappedBatchRead(ids: List[int], cap: int): List[BatchResult] =
     if (batchReadAccepted(ids.length(), cap)) batch_read(ids) else List()
 
-  // batch_edit: apply a list of edits (create / update / delete) positionally.
+  // apply_edits: apply a list of edits (create / update / delete) positionally.
   // A CreateEdit allocates a new id and stores the value (as create does); an
   // UpdateEdit overwrites an existing id and is a no-op when the id is absent;
   // a DeleteEdit removes an existing id and is a no-op when absent. The
-  // positional result list is computed by ``batch_edit_result``.
-  action batch_edit(edits: List[Edit]): bool = {
+  // positional result list is computed by ``editBatchResult``.
+  action applyEditBatch(edits: List[Edit]): bool = {
     val outcome = apply_edits(entities, nextId, edits)
     all {
       entities' = outcome._1,
@@ -232,11 +232,11 @@ module resource_actions {
       }
     )
 
-  // The positional result a batch_edit would return, computed from the state it
+  // The positional result an edit batch would return, computed from the state it
   // is called in (call it *before* applying to compare against the action). A
   // create / update holds the resulting entity, a delete (nothing to return)
   // and a miss are Absent.
-  def batch_edit_result(edits: List[Edit]): List[BatchResult] =
+  def editBatchResult(edits: List[Edit]): List[BatchResult] =
     apply_edits(entities, nextId, edits)._3
 
   // Invariant: nextId is always greater than every stored key.
@@ -305,7 +305,7 @@ module resource_actions {
         // The positional result of the mixed batch below, predicted from the
         // pre-edit state: updates carry their resulting value, the delete and
         // the absent-id update are Absent, and the create carries its value.
-        assert(batch_edit_result(List(
+        assert(editBatchResult(List(
           UpdateEdit({ id: 1, value: 100 }),
           UpdateEdit({ id: 2, value: 200 }),
           DeleteEdit(1),
@@ -317,7 +317,7 @@ module resource_actions {
       })
       // A mixed batch: update id 1, update id 2, delete id 1, update an absent
       // id 999, then create a new entity.
-      .then(batch_edit(List(
+      .then(applyEditBatch(List(
         UpdateEdit({ id: 1, value: 100 }),
         UpdateEdit({ id: 2, value: 200 }),
         DeleteEdit(1),
@@ -478,7 +478,7 @@ module resource_actions {
 
   // The full action surface a writable resource advertises.
   pure val allActions: Set[Action] =
-    Set(Create, Read, Update, Delete, Search, Count, BatchRead, BatchEdit)
+    Set(Create, Read, Update, Delete, Search, Count, BatchRead)
 
   // The read-only subset a list-backed resource advertises: no write actions.
   pure val readOnlyActions: Set[Action] =
@@ -516,7 +516,6 @@ module resource_actions {
         nextId' = nextId,
       })
       .then(all {
-        assert(not(availableActions(true).contains(BatchEdit))),
         entities' = entities,
         nextId' = nextId,
       })

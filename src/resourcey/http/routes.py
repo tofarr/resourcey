@@ -19,19 +19,15 @@ import inspect
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from email.utils import format_datetime, parsedate_to_datetime
-from typing import Annotated, Any, Literal, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import (
     BaseModel,
-    Field,
     TypeAdapter,
     ValidationError,
-    WithJsonSchema,
-    create_model,
-    field_validator,
 )
 from sqlalchemy.exc import IntegrityError
 
@@ -42,13 +38,10 @@ from resourcey.core.resource import Resource
 from resourcey.core.service import (
     DEFAULT_LIMIT,
     Action,
-    Create,
-    Delete,
     ForbiddenError,
     NotFoundError,
     Service,
     ServiceError,
-    Update,
     normalize_actions,
 )
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
@@ -58,28 +51,6 @@ from resourcey.util.naming import humanize, pluralize
 from resourcey.util.search_filter import SEPARATOR, SearchFilter, build_filter
 
 T = TypeVar("T", bound=BaseModel)
-
-# The batch-edit ``condition`` wire field is typed ``Any`` rather than the native
-# ``SearchFilter`` union: FastAPI re-generates a JSON schema for the parameterised
-# generic base and hits ``DiscriminatedUnionMixin``'s "no subclasses" guard, even
-# under a ``WithJsonSchema`` override.
-_WireCondition = Annotated[Any, WithJsonSchema({"type": "object", "title": "SearchFilter"})]
-
-
-def _resolve_wire_condition(value: Any) -> Any:
-    """Resolve a JSON condition into a :class:`SearchFilter`, else pass through.
-
-    A condition that is neither a filter nor a JSON object is rejected here
-    rather than reaching a backend, which would dereference it as a filter tree
-    and raise an ``AttributeError`` (a ``500`` on malformed input).
-    """
-    if isinstance(value, dict):
-        return SearchFilter.model_validate(value)
-    if value is None or isinstance(value, SearchFilter):
-        return value
-    raise ValueError(
-        f"condition must be a JSON object describing a SearchFilter, not {type(value).__name__}"
-    )
 
 
 def register_routes(
@@ -130,7 +101,7 @@ def register_routes(
     # boundary between the OpenAPI document and the live behaviour.
     limits = RequestLimitsConfig.get_instance()
 
-    # Static sub-paths (search / count / batch-read / batch-edit) are registered
+    # Static sub-paths (search / count / batch-read) are registered
     # before the ``{id}`` routes, otherwise ``batch-read`` would be captured as
     # an id value by the ``/{resource}/{id}`` route.
     if Action.SEARCH in supported:
@@ -150,20 +121,6 @@ def register_routes(
             resource_name,
             route_deps,
             limits,
-        )
-    if Action.BATCH_EDIT in supported:
-        _add_batch_edit_route(
-            router,
-            path,
-            models,
-            dto_model,
-            id_field,
-            id_type,
-            supported,
-            service_dep,
-            strategy,
-            resource_name,
-            route_deps,
         )
     if Action.CREATE in supported:
         _add_create_route(
@@ -438,11 +395,6 @@ def _operation_metadata(action: Action, resource_name: str) -> tuple[str, str]:
             "Batch read {name}",
             "Fetch several {plural} by identifier in one request. "
             "The result is positionally aligned with the requested ids.",
-        ),
-        Action.BATCH_EDIT: (
-            "Batch edit {name}",
-            "Create, update, and delete {plural} in one request. "
-            "The result is positionally aligned with the submitted edits.",
         ),
     }
     summary, description = templates[action]
@@ -741,65 +693,6 @@ def _add_batch_read_route(
     )
 
 
-def _add_batch_edit_route(
-    router: APIRouter,
-    path: str,
-    models: RestModels,
-    dto_model: type[BaseModel],
-    id_field: str,
-    id_type: Any,
-    supported: frozenset[Action],
-    service_dep: Any,
-    strategy: Any,
-    resource_name: str,
-    route_deps: list[Any] | None = None,
-) -> None:
-    """Register ``POST /{resource}/batch-edit`` — mixed create / update / delete.
-
-    Each ``kind`` is only admitted when the resource declares the matching
-    action, so a batch cannot reach an action the resource never exposed.
-    """
-    allow_create = Action.CREATE in supported
-    allow_update = Action.UPDATE in supported
-    allow_delete = Action.DELETE in supported
-    body_model = _batch_edit_body(
-        models.create_request,
-        models.update_request,
-        id_field,
-        id_type,
-        allow_create,
-        allow_update,
-        allow_delete,
-    )
-
-    async def handler(request, payload, service=Depends(service_dep)):  # type: ignore[no-untyped-def]  # noqa: B008
-        edits = [_batch_edit_node(item, dto_model, id_field) for item in payload]
-        edited = await service.batch_edit(edits)
-        context = service.serialization_context()
-        items = [
-            _project_edit_result(edit, result, models, context)
-            for edit, result in zip(edits, edited, strict=True)
-        ]
-        header = _header_for(strategy, items, context, service)
-        return _cached_json_response(request, _dump(items, context), header)
-
-    handler.__annotations__ = {
-        "request": Request,
-        "payload": list[body_model],  # type: ignore[valid-type]
-        "service": Service,
-    }
-    summary, description = _operation_metadata(Action.BATCH_EDIT, resource_name)
-    _route(
-        router,
-        f"{path}/batch-edit",
-        ["POST"],
-        handler,
-        dependencies=route_deps,
-        summary=summary,
-        description=description,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Route escape hatch + projection helpers
 # ---------------------------------------------------------------------------
@@ -1001,107 +894,6 @@ def _id_python_type(models: RestModels, id_field: str) -> Any:
     """The Python type of the identifier, read off the derived read model."""
     annotation = models.read_response.model_fields[id_field].annotation
     return annotation if isinstance(annotation, type) else str
-
-
-def _batch_edit_body(
-    create_request: type[BaseModel],
-    update_request: type[BaseModel],
-    id_field: str,
-    id_type: Any,
-    allow_create: bool,
-    allow_update: bool,
-    allow_delete: bool,
-) -> Any:
-    """Build the ``batch-edit`` body: a ``kind``-discriminated union of edits.
-
-    The wire shapes match the ``Create`` / ``Update`` / ``Delete`` service
-    nodes. ``Delete`` carries the identifier directly rather than nesting it
-    under ``item``: there is no payload to nest.
-
-    The ``allow_*`` flags narrow the union to the declared actions. When none is
-    allowed ``batch_edit`` was already dropped by ``normalize_actions``.
-    """
-    members: list[Any] = []
-    if allow_create:
-        members.append(
-            create_model(
-                f"{create_request.__name__}CreateEdit",
-                kind=(Literal["Create"], ...),
-                item=(create_request, ...),
-            )
-        )
-    if allow_update:
-        update_fields = {
-            name: (field.annotation, field) for name, field in update_request.model_fields.items()
-        }
-        update_item = create_model(  # type: ignore[call-overload]
-            f"{update_request.__name__}BatchUpdateItem",
-            **{id_field: (id_type, ...)},  # the id is required on each update
-            **update_fields,
-        )
-        members.append(
-            create_model(
-                f"{update_request.__name__}UpdateEdit",
-                kind=(Literal["Update"], ...),
-                item=(update_item, ...),
-                condition=(_WireCondition, None),  # optional; applied only if the row matches
-                __validators__={
-                    "resolve_condition": field_validator("condition", mode="before")(
-                        _resolve_wire_condition
-                    )
-                },
-            )
-        )
-    if allow_delete:
-        members.append(
-            create_model(  # type: ignore[call-overload]
-                f"{create_request.__name__}DeleteEdit",
-                kind=(Literal["Delete"], ...),
-                **{id_field: (id_type, ...)},
-                condition=(_WireCondition, None),  # optional; applied only if the row matches
-                __validators__={
-                    "resolve_condition": field_validator("condition", mode="before")(
-                        _resolve_wire_condition
-                    )
-                },
-            )
-        )
-    if not members:
-        raise ServiceError(
-            "batch-edit body has no members: batch_edit must be dropped when no write "
-            "action is exposed (normalize_actions)."
-        )
-    edits = members[0]
-    for member in members[1:]:
-        edits = edits | member
-    return Annotated[edits, Field(discriminator="kind")]
-
-
-def _batch_edit_node(item: BaseModel, dto_model: type[BaseModel], id_field: str) -> Any:
-    """Fold a validated ``batch-edit`` body item into its :class:`Edit` node."""
-    kind = item.kind  # type: ignore[attr-defined]
-    if kind == "Create":
-        return Create(item=request_to_dto(dto_model, item.item))  # type: ignore[attr-defined]
-    condition = getattr(item, "condition", None)
-    if kind == "Update":
-        return Update(item=request_to_dto(dto_model, item.item), condition=condition)  # type: ignore[attr-defined]
-    return Delete(id=getattr(item, id_field), condition=condition)
-
-
-def _project_edit_result(
-    edit: Any, result: BaseModel | None, models: RestModels, context: dict[str, Any] | None = None
-) -> BaseModel | None:
-    """Project a batch-edit result onto the shape for its edit.
-
-    A delete or a miss yields ``None``; a create projects onto the create
-    response (so a one-time-reveal field survives) and an update onto the update
-    response.
-    """
-    if isinstance(edit, Delete) or result is None:
-        return None
-    if isinstance(edit, Create):
-        return _project(result, models.create_response, context)
-    return _project(result, models.update_response, context)
 
 
 def _update_dto(

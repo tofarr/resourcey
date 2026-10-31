@@ -17,7 +17,7 @@ Per-action enforcement:
 * **search** / **count** — the policy's filter is ``and_``-combined with the
   caller's request filter and pushed down, so a denied policy yields an empty page
   / a count of 0 rather than an error.
-* **batch_read** / **batch_edit** — out-of-scope positions write nothing and are
+* **batch_read** / **apply_edits** — out-of-scope positions write nothing and are
   ``None``, positionally aligned with the input.
 
 The wrapper enters its inner service and delegates
@@ -203,19 +203,25 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         filt = await self._permission_filter(Action.BATCH_READ)
         return [item if item is not None and filt.matches(item) else None for item in results]
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
+    async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply only in-scope edits; other positions are ``None``.
 
-        A create is applied when creating is permitted. An update / delete has
-        the ``BATCH_EDIT`` policy filter folded into its own condition, so the
-        backend enforces scope atomically with the write.
+        Each kind is gated on **its own** action — a ``Create`` on ``CREATE``, an
+        ``Update`` on ``UPDATE``, a ``Delete`` on ``DELETE`` — so a policy that
+        grants one write while denying another is enforced per node. Gating a
+        create on a shared write action would let a caller who may update but
+        not create insert rows through a batch. The policy filter for an update /
+        delete is folded into that node's own condition, so the backend enforces
+        scope atomically with the write.
         """
-        filt = await self._permission_filter(Action.BATCH_EDIT)
+        filters: dict[Action, SearchFilter[Any]] = {}
         flags: list[bool] = []
         permitted: list[Create[T] | Update[T] | Delete[K]] = []
         for edit in edits:
             if isinstance(edit, Create):
-                allowed = not isinstance(filt, NoMatchFilter)
+                allowed = not isinstance(
+                    await self._action_filter(filters, Action.CREATE), NoMatchFilter
+                )
                 flags.append(allowed)
                 if allowed:
                     permitted.append(edit)
@@ -226,14 +232,28 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
                 flags.append(False)
                 continue
             flags.append(True)
+            action = Action.UPDATE if isinstance(edit, Update) else Action.DELETE
+            filt = await self._action_filter(filters, action)
             if isinstance(edit, Update):
                 permitted.append(Update(item=edit.item, condition=_combine(filt, edit.condition)))
             else:
                 permitted.append(Delete(id=edit.id, condition=_combine(filt, edit.condition)))
         if not permitted:
             return [None] * len(edits)
-        edited = iter(await self._inner.batch_edit(permitted))
+        edited = iter(await self._inner.apply_edits(permitted))
         return [next(edited) if allowed else None for allowed in flags]
+
+    async def _action_filter(
+        self, cache: dict[Action, SearchFilter[Any]], action: Action
+    ) -> SearchFilter[Any]:
+        """The permission filter for ``action``, resolved at most once per call.
+
+        A batch usually touches one or two kinds, so resolving lazily avoids
+        asking every policy about an action the batch never uses.
+        """
+        if action not in cache:
+            cache[action] = await self._permission_filter(action)
+        return cache[action]
 
     def _payload_id(self, payload: T) -> Any:
         """The identifier carried on an update payload (``MISSING`` if absent)."""

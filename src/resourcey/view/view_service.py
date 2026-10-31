@@ -3,7 +3,7 @@
 The inner service consults the **inner** resource's action set, which is wider
 than the view's whenever the view narrows actions. The transport already narrows
 the ``batch-edit`` body, but a *direct* service caller bypasses that, so this
-wrapper re-asserts the view's action set on ``batch_edit``.
+wrapper re-asserts the view's action set on ``apply_edits``.
 
 Every other action is forwarded verbatim.
 
@@ -118,8 +118,8 @@ class ViewService(Service[T, K], Generic[T, K]):
         self._require_entered()
         return await self._inner.batch_read(ids)
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
-        """Forward ``batch_edit`` after enforcing the view's action set.
+    async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
+        """Forward the edits after enforcing the view's action set.
 
         The inner service guards create / delete against the *inner* resource's
         actions; this re-checks all three kinds against the *view's*, so a batch
@@ -128,9 +128,9 @@ class ViewService(Service[T, K], Generic[T, K]):
         self._require_entered()
         for edit in edits:
             if isinstance(edit, Create) and Action.CREATE not in self._actions:
-                raise InvalidInputError("batch_edit cannot create: create is not exposed")
+                raise InvalidInputError("a batch cannot create: create is not exposed")
             if isinstance(edit, Update) and Action.UPDATE not in self._actions:
-                raise InvalidInputError("batch_edit cannot update: update is not exposed")
+                raise InvalidInputError("a batch cannot update: update is not exposed")
             if isinstance(edit, Delete) and Action.DELETE not in self._actions:
-                raise InvalidInputError("batch_edit cannot delete: delete is not exposed")
-        return await self._inner.batch_edit(edits)
+                raise InvalidInputError("a batch cannot delete: delete is not exposed")
+        return await self._inner.apply_edits(edits)

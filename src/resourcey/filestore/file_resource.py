@@ -17,7 +17,7 @@ Authorization is unaffected — ``AuthorizedService.create()`` checks the
 ``Action.CREATE`` policy regardless of what a resource declares.
 
 Action surface: ``read``, ``delete``, ``search``, ``count``, ``batch_read``,
-``batch_edit`` (narrowed to the ``Delete`` kind only). **No ``update``**: a
+a bulk delete through the app-level ``POST /batch-edit``. **No ``update``**: a
 file's bytes are immutable once uploaded.
 
 ``search`` / ``count`` have no filter or sort surface, and ``search`` omits
@@ -116,7 +116,6 @@ _SUPPORTED_ACTIONS: frozenset[Action] = frozenset(
         Action.SEARCH,
         Action.COUNT,
         Action.BATCH_READ,
-        Action.BATCH_EDIT,
     }
 )
 
@@ -379,21 +378,21 @@ class FileService(Service[T, K]):
             results.append(self._full_dto(found) if found is not None else None)
         return results
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[Any]:
+    async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[Any]:
         self._require_entered()
         supported = self._resource.get_supported_actions()
         results: list[Any] = []
         for edit in edits:
             if isinstance(edit, Create):
                 raise InvalidInputError(
-                    "batch_edit cannot create a file: uploading requires multipart/form-data, "
+                    "a batch cannot create a file: uploading requires multipart/form-data, "
                     "which a JSON batch body cannot carry. POST to the resource directly."
                 )
             elif isinstance(edit, Update):
-                raise InvalidInputError("batch_edit cannot update: files have no update action")
+                raise InvalidInputError("a batch cannot update: files have no update action")
             else:
                 if Action.DELETE not in supported:
-                    raise InvalidInputError("batch_edit cannot delete: delete is not supported")
+                    raise InvalidInputError("a batch cannot delete: delete is not supported")
                 self._reject_condition(edit.condition)
                 found = await self._store.head(str(edit.id))
                 if found is not None:

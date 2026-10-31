@@ -326,13 +326,13 @@ async def test_condition_on_an_unknown_field_fails_closed(resources):
             await service.delete(created.id, condition=build_filter([("secret", "eq", "x")]))
 
 
-async def test_batch_edit_applies_conditions_positionally(resources):
+async def test_apply_edits_applies_conditions_positionally(resources):
     _maker, threads, _messages = resources
     async with await threads.get_service() as service:
         first = await service.create(_dto_type(Thread)(title="one"))
         second = await service.create(_dto_type(Thread)(title="two"))
         dto = _dto_type(Thread)
-        results = await service.batch_edit(
+        results = await service.apply_edits(
             [
                 # holds -> applies
                 Update(
@@ -390,7 +390,7 @@ async def test_batch_read_and_batch_edit(resources):
         # an absent id yields a positional None
         assert (await service.batch_read([a.id, 999]))[1] is None
 
-        edited = await service.batch_edit(
+        edited = await service.apply_edits(
             [
                 Update(item=_dto_type(Thread)(id=a.id, title="a2")),
                 Update(item=_dto_type(Thread)(id=999, title="x")),
@@ -406,7 +406,7 @@ async def test_batch_read_and_batch_edit(resources):
         assert (await service.batch_read([b.id]))[0] is None
 
 
-async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources):
+async def test_apply_edits_refuses_create_and_delete_when_not_supported(resources):
     """The backend guard: a batch cannot create / delete an action the resource omits."""
     _maker, _threads, _messages = resources
 
@@ -419,7 +419,6 @@ async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources
                     Action.SEARCH,
                     Action.COUNT,
                     Action.BATCH_READ,
-                    Action.BATCH_EDIT,
                 }
             )
 
@@ -427,11 +426,11 @@ async def test_batch_edit_refuses_create_and_delete_when_not_supported(resources
     async with await thread.get_service() as service:
         dto = _dto_type(Thread)
         with pytest.raises(InvalidInputError):
-            await service.batch_edit([Create(item=dto(title="nope"))])
+            await service.apply_edits([Create(item=dto(title="nope"))])
         with pytest.raises(InvalidInputError):
-            await service.batch_edit([Delete(id=1)])
+            await service.apply_edits([Delete(id=1)])
         # An update is still fine and wrote nothing (the id is absent).
-        assert await service.batch_edit([Update(item=dto(id=1, title="u"))]) == [None]
+        assert await service.apply_edits([Update(item=dto(id=1, title="u"))]) == [None]
         assert await service.count() == 0
 
 
@@ -969,7 +968,6 @@ def test_full_action_enum_members():
         "search",
         "count",
         "batch_read",
-        "batch_edit",
     }
 
 
@@ -1003,4 +1001,4 @@ async def test_base_service_actions_are_raising_safety_nets():
         with pytest.raises(NotImplementedError):
             await base.batch_read([])
         with pytest.raises(NotImplementedError):
-            await base.batch_edit([])
+            await base.apply_edits([])

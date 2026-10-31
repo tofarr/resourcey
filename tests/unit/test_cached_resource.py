@@ -175,7 +175,7 @@ class FakeService(Service[Row, int]):
         self._require_entered()
         return self._rows.pop(id, None) is not None
 
-    async def batch_edit(
+    async def apply_edits(
         self, edits: list[Create[Row] | Update[Row] | Delete[int]]
     ) -> list[Row | None]:
         self._require_entered()
@@ -509,14 +509,14 @@ async def test_wrapper_serialization_context_delegates():
     await cached.__aexit__()
 
 
-async def test_batch_edit_evicts_and_forwards():
+async def test_apply_edits_evicts_and_forwards():
     inner = FakeResource(strategy=_optimistic())
     cached = await _enter(CachedResource(inner))
     service = await cached.get_service()
     async with service:
         await service.read(1)
         assert inner.service is not None and inner.service.read_calls == 1
-        results = await service.batch_edit([Create(item=Row(id=0, label="c"))])
+        results = await service.apply_edits([Create(item=Row(id=0, label="c"))])
         assert results[0] is not None
         await service.read(1)
         assert inner.service.read_calls == 2

@@ -251,7 +251,7 @@ class TestListActionSurface:
 
     def test_write_actions_not_supported(self) -> None:
         supported = _resource().get_supported_actions()
-        for action in (Action.CREATE, Action.UPDATE, Action.DELETE, Action.BATCH_EDIT):
+        for action in (Action.CREATE, Action.UPDATE, Action.DELETE):
             assert action not in supported
 
     def test_manifest_accepts_the_read_only_action_set(self) -> None:

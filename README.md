@@ -29,7 +29,8 @@ The guiding principles:
 Declaring a resource produces:
 
 * **A REST service** exposing the standard actions:
-  `create`, `read`, `update`, `delete`, `search`, `count`, `batch_read`, `batch_edit`.
+  `create`, `read`, `update`, `delete`, `search`, `count`, `batch_read`, plus one
+  app-level `POST /batch-edit` spanning every resource.
 * **Pydantic models** for request/response validation, projected from the
   resource's DTO declaration — create / update / read / search shapes, never
   hand-written.
@@ -149,9 +150,8 @@ manifest = Manifest(resources=(SqlResource(Thread), SqlResource(Message)))
 
 From those two classes `create_app(manifest)` serves `POST /threads` and
 `GET /threads` (search), `GET|PATCH|DELETE /threads/{id}`, `GET /threads/count`,
-`GET /threads/batch-read`, and `POST /threads/batch-edit` — and the same set for
-`messages` — plus `POST /batch-edit`, which spans both resources, and the
-OpenAPI docs.
+and `GET /threads/batch-read` — and the same set for `messages` — plus
+`POST /batch-edit`, which spans both resources, and the OpenAPI docs.
 
 `POST /batch-edit` takes one ordered list of `create` / `update` / `delete`
 nodes, each naming its target resource, and answers with a positionally aligned
@@ -162,8 +162,10 @@ session factory roll back together). It is mounted by default — pass
 `create_app(manifest, batch_edit=False)` to turn it off, or
 `batch_edit_path="/ops/edits"` to move it. The node count is capped by
 `batch_edit_max_edits`, which defaults to `RequestLimitsConfig.max_batch_edits`
-(`APP_MAX_BATCH_EDITS`, 100). A resource opts out by not
-declaring `batch_edit`, and a hidden resource is never reachable through it.
+(`APP_MAX_BATCH_EDITS`, 100). A resource opts out by declaring no write action,
+and a hidden resource is never reachable through it. It is the **only** batch
+write surface: there is no per-resource `/batch-edit`, and each node is
+authorized against its own singular action.
 
 SQLAlchemy is the schema of record: the DTO and the six REST models are
 inferred from the ORM model, so a developer keeps the mapping they already

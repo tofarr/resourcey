@@ -344,12 +344,13 @@ class TestActions:
         view = ResourceView(inner)
         assert view.get_supported_actions() == normalize_actions(frozenset(Action))
 
-    def test_removing_update_normalizes_batch_edit_kind(self) -> None:
+    def test_removing_update_keeps_the_other_write_actions(self) -> None:
+        """Narrowing one write action leaves the others; nothing else is derived."""
         inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
         view = ResourceView(inner, exposed_actions=frozenset(Action) - {Action.UPDATE})
         actions = view.get_supported_actions()
         assert Action.UPDATE not in actions
-        assert Action.BATCH_EDIT in actions  # create / delete still batch
+        assert {Action.CREATE, Action.DELETE} <= actions
 
     def test_removing_read_drops_batch_read(self) -> None:
         inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
@@ -358,14 +359,12 @@ class TestActions:
         assert Action.READ not in actions
         assert Action.BATCH_READ not in actions  # normalized away
 
-    def test_removing_all_write_actions_drops_batch_edit(self) -> None:
+    def test_a_read_only_view_keeps_batch_read(self) -> None:
         inner: SqlResource[Any, Any] = SqlResource(Secret, session_factory=_maker())
-        read_only = frozenset(
-            {Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ, Action.BATCH_EDIT}
-        )
+        read_only = frozenset({Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ})
         view = ResourceView(inner, exposed_actions=read_only)
         actions = view.get_supported_actions()
-        assert Action.BATCH_EDIT not in actions
+        assert actions == read_only
         assert Action.BATCH_READ in actions
 
 
@@ -424,7 +423,7 @@ class TestServiceSeam:
             assert read.value == "v"
             # A hidden batch kind is refused even though the inner supports it.
             with pytest.raises(InvalidInputError, match="update is not exposed"):
-                await service.batch_edit(
+                await service.apply_edits(
                     [
                         Update(
                             item=view.get_dto_type().model_validate(
@@ -487,7 +486,7 @@ class TestServiceSeam:
                 "a",
                 "b",
             ]
-            created = await service.batch_edit(
+            created = await service.apply_edits(
                 [Create(item=dto_type.model_validate({"description": "c", "value": "3"}))]
             )
             assert len(created) == 1
@@ -499,7 +498,7 @@ class TestServiceSeam:
             assert updated.description == "z"
         await engine.dispose()
 
-    async def test_batch_edit_refuses_create_and_delete_when_hidden(self) -> None:
+    async def test_apply_edits_refuses_create_and_delete_when_hidden(self) -> None:
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         maker = async_sessionmaker(engine, expire_on_commit=False)
         inner = await _inner(engine, maker)
@@ -508,11 +507,11 @@ class TestServiceSeam:
         async with await view.get_service() as service:
             dto_type = view.get_dto_type()
             with pytest.raises(InvalidInputError, match="create is not exposed"):
-                await service.batch_edit(
+                await service.apply_edits(
                     [Create(item=dto_type.model_validate({"description": "d", "value": "v"}))]
                 )
             with pytest.raises(InvalidInputError, match="delete is not exposed"):
-                await service.batch_edit([Delete(id=uuid4())])
+                await service.apply_edits([Delete(id=uuid4())])
         await engine.dispose()
 
     async def test_a_service_used_before_entering_raises(self) -> None:
@@ -616,9 +615,17 @@ class TestSecretEndToEnd:
         assert (
             await secret_client.patch(f"/secrets/{created['id']}", json={"description": "x"})
         ).status_code == 405
+        # The batch write surface cannot reach the hidden update either: the
+        # ``Update`` kind is not in the app-level union for this resource.
         batch = await secret_client.post(
-            "/secrets/batch-edit",
-            json=[{"kind": "Update", "item": {"id": created["id"], "description": "x"}}],
+            "/batch-edit",
+            json=[
+                {
+                    "resource": "secrets",
+                    "kind": "Update",
+                    "item": {"id": created["id"], "description": "x"},
+                }
+            ],
         )
         assert batch.status_code == 422
 

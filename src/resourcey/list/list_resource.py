@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 T = TypeVar("T", bound=BaseModel)
 K = TypeVar("K")
 
-# The read-only action subset: no create / update / delete / batch_edit.
+# The read-only action subset: no create / update / delete.
 _READ_ONLY_ACTIONS: frozenset[Action] = frozenset(
     {Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ}
 )

@@ -7,7 +7,7 @@
 // execution policy rests on:
 //
 //   - editsOnlyFire: only a write action (Create / Update / Delete /
-//     BatchEdit) can fire a trigger; a read-like action (Read / Search /
+//     Delete) can fire a trigger; a read-like action (Read / Search /
 //     Count / BatchRead) never does, regardless of outcome.
 //   - successOnly: a write fires only when the inner service succeeded; an
 //     inner exception fires nothing.
@@ -32,13 +32,13 @@
 // how background_tasks.qnt / exposure.qnt unroll theirs.
 
 module triggers {
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   // Only a write action can ever fire a trigger. Reads -- including the
   // batched / counted derivatives -- never do, no matter the outcome.
   pure def isWriteAction(a: Action): bool =
     match a {
-      Create => true | Update => true | Delete => true | BatchEdit => true |
+      Create => true | Update => true | Delete => true |
       Read => false | Search => false | Count => false | BatchRead => false
     }
 
@@ -114,7 +114,7 @@ module triggers {
       assert(fires(Create, true)),
       assert(fires(Update, true)),
       assert(fires(Delete, true)),
-      assert(fires(BatchEdit, true)),
+      assert(fires(Create, true)),
       // ...and no read-like action ever fires, success or not.
       assert(not(fires(Read, true))),
       assert(not(fires(Search, true))),
@@ -132,7 +132,7 @@ module triggers {
       assert(not(fires(Create, false))),
       assert(not(fires(Update, false))),
       assert(not(fires(Delete, false))),
-      assert(not(fires(BatchEdit, false))),
+      assert(not(fires(Create, false))),
     }
   }
 
@@ -152,14 +152,16 @@ module triggers {
       // A single create/update/delete fires once...
       assert(invocationsPerTrigger(Create, true, single) == 1),
       // ...and a batch of five still fires each trigger exactly once, not
-      // five times: the invocation count is independent of batch size.
-      assert(invocationsPerTrigger(BatchEdit, true, batchOfFive) == 1),
+      // five times: the invocation count is independent of batch size. A batch
+      // is not an action any more (#179), so this is asserted on a write action
+      // carrying five edits rather than on a removed `BatchEdit` member.
+      assert(invocationsPerTrigger(Create, true, batchOfFive) == 1),
       assert(
         invocationsPerTrigger(Create, true, single) ==
-          invocationsPerTrigger(BatchEdit, true, batchOfFive)
+          invocationsPerTrigger(Create, true, batchOfFive)
       ),
       // A failed batch fires zero invocations, whatever its size.
-      assert(invocationsPerTrigger(BatchEdit, false, batchOfFive) == 0),
+      assert(invocationsPerTrigger(Create, false, batchOfFive) == 0),
     }
   }
 

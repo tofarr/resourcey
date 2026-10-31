@@ -27,11 +27,12 @@ real file with no extra client code.
 4. DELETE /files/{id}              -> 204  removes the object -- no orphan row
 ```
 
-`GET /files`, `GET /files/count`, `GET /files/batch-read`, `POST
-/files/batch-edit` (delete only — a JSON batch body cannot carry a file
-upload) are the ordinary generated actions. There is **no `update`** — a
-file's bytes are immutable once uploaded;
-"changing" one means delete the old id and create a new one.
+`GET /files`, `GET /files/count` and `GET /files/batch-read` are the ordinary
+generated actions. There is **no `update`** — a file's bytes are immutable once
+uploaded; "changing" one means delete the old id and create a new one. There is
+no per-resource `POST /files/batch-edit` either: `POST /batch-edit` is the only
+batch write surface, and it cannot address `files` (this resource is mounted
+outside the manifest), so bulk deletion means one `DELETE` per file.
 
 ## `download` vs `content`
 
@@ -276,7 +277,6 @@ uv run --env-file .env alembic upgrade head
 | `GET` | `/files` | search |
 | `GET` | `/files/count` | count |
 | `GET` | `/files/batch-read` | batch_read |
-| `POST` | `/files/batch-edit` | batch_edit (delete only — no `create` / `update`) |
 
 Plus `GET /files/{id}/download`, `GET /files/{id}/content`, and — for the local
 / SQL media only — the framework-signed transfer route `GET /_files/{key}`

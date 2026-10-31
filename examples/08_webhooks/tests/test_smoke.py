@@ -163,11 +163,23 @@ async def test_batch_edit_fires_the_trigger_once(
     caplog.clear()
     with caplog.at_level(logging.INFO, logger=_RECEIVER_LOGGER):
         resp = await client.post(
-            "/messages/batch-edit",
+            "/batch-edit",
             json=[
-                {"kind": "Create", "item": {"thread_id": thread["id"], "text": "first"}},
-                {"kind": "Create", "item": {"thread_id": thread["id"], "text": "second"}},
-                {"kind": "Create", "item": {"thread_id": thread["id"], "text": "third"}},
+                {
+                    "resource": "messages",
+                    "kind": "Create",
+                    "item": {"thread_id": thread["id"], "text": "first"},
+                },
+                {
+                    "resource": "messages",
+                    "kind": "Create",
+                    "item": {"thread_id": thread["id"], "text": "second"},
+                },
+                {
+                    "resource": "messages",
+                    "kind": "Create",
+                    "item": {"thread_id": thread["id"], "text": "third"},
+                },
             ],
         )
     assert resp.status_code == 200

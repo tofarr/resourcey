@@ -108,7 +108,7 @@ class RedisTrigger(Trigger[Any, Any]):
                 id=to_jsonable_python(edit.id),
             )
         if result is None:
-            # A batch_edit miss (an absent id) -- nothing happened, nothing to report.
+            # A batch miss (an absent id) -- nothing happened, nothing to report.
             return None
         item = _project_item(result, read_response)
         row_id = item.get(id_field, to_jsonable_python(getattr(result, id_field, None)))

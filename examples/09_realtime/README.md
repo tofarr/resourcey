@@ -277,7 +277,6 @@ Each resource gets the standard actions (`threads` and `messages` alike):
 | `GET` | `/threads` | search |
 | `GET` | `/threads/count` | count |
 | `GET` | `/threads/batch-read` | batch_read |
-| `POST` | `/threads/batch-edit` | batch_edit |
 
 Realtime publishing is purely a side effect of a successful write on these
 same routes — no *resource* routes are added. Two non-resource endpoints exist

@@ -27,16 +27,20 @@
 //   - wrapperDoesNotDelegate: a wrapper reports itself exposed; delegating the
 //     decision to an inner resource that returns itself would re-expose the
 //     hidden fields (the leak this design avoids).
-//   - batchActionsRequireTheirSingular: a batch action is dropped when the
-//     singular action it batches is absent (batch_read needs read; batch_edit
-//     needs create / update / delete), so narrowing a surface by removing one
-//     action cannot leave a batch side door to it.
-//   - batchEditKindsAreDeclared: every `kind` the batch-edit body admits maps to
-//     a declared singular action (Update included), so a resource that exposes
-//     batch_edit while hiding update cannot update through the batch.
+//   - batchActionsRequireTheirSingular: batch_read is dropped when read is
+//     absent, so narrowing a surface by removing read cannot leave a batch side
+//     door to it. There is no per-resource batch write action any more (#179):
+//     the only batch write surface is the app-level `/batch-edit`.
+//   - batchEditKindsAreDeclared: every `kind` the app-level batch-edit body
+//     admits for a resource maps to a declared singular action (Update
+//     included), so a resource that hides update cannot update through the
+//     batch.
+//   - batchEditTargetsAreWriters: a resource is in the batch-edit union exactly
+//     when it declares at least one write action -- the gate that replaced the
+//     removed `batch_edit` action.
 
 module exposure {
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   // A resource declaration: the fields it stores (the internal truth) and the
   // actions its service can fulfil.
@@ -131,18 +135,19 @@ module exposure {
     // A resource may narrow its actions, never widen beyond the declaration.
     supported.subseteq(r.actions)
 
-  // The `kind`s a batch-edit body admits, given the actions a resource
-  // declares. Each kind is admitted only when the matching singular action is
-  // declared -- `Update` included, because a resource can expose `batch_edit`
-  // while hiding `update`, and batch_edit must not then be a side door to it.
+  // The `kind`s the app-level batch-edit body admits for a resource, given the
+  // actions it declares. Each kind is admitted only when the matching singular
+  // action is declared -- `Update` included, because a resource can be a batch
+  // target while hiding `update`, and the batch must not then be a side door to
+  // it.
   pure def batchEditKinds(supported: Set[Action]): Set[str] =
     Set()
       .union(if (supported.contains(Create)) Set("Create") else Set())
       .union(if (supported.contains(Update)) Set("Update") else Set())
       .union(if (supported.contains(Delete)) Set("Delete") else Set())
 
-  // Every body `kind` a batch_edit admits maps to a declared action, and every
-  // kind whose action is absent is rejected: "Create" <-> Create, "Update" <->
+  // Every body `kind` the batch admits maps to a declared action, and every kind
+  // whose action is absent is rejected: "Create" <-> Create, "Update" <->
   // Update, "Delete" <-> Delete.
   pure def batchEditKindsAreDeclared(supported: Set[Action]): bool =
     all {
@@ -158,15 +163,9 @@ module exposure {
     }
 
   // Normalise a declared action set: a batch action is dropped when the
-  // singular action it batches is absent. batch_read reads, so it needs read;
-  // batch_edit edits, so it needs at least one of create / update / delete.
+  // singular action it batches is absent. batch_read reads, so it needs read.
   pure def normalizedActions(actions: Set[Action]): Set[Action] =
-    actions
-      .exclude(if (actions.contains(Read)) Set() else Set(BatchRead))
-      .exclude(
-        if (actions.intersect(Set(Create, Update, Delete)).size() > 0) Set()
-        else Set(BatchEdit)
-      )
+    actions.exclude(if (actions.contains(Read)) Set() else Set(BatchRead))
 
   // Normalisation removes only batch actions, only when their prerequisite is
   // gone, and is idempotent. A batch action never survives without its singular
@@ -175,11 +174,24 @@ module exposure {
     val n = normalizedActions(actions)
     all {
       n.contains(BatchRead) implies n.contains(Read),
-      n.contains(BatchEdit) implies n.intersect(Set(Create, Update, Delete)).size() > 0,
       actions.intersect(Set(Read, Create, Update, Delete)).subseteq(n),
       normalizedActions(n) == n,
     }
   }
+
+  // Whether a resource appears in the app-level `/batch-edit` union. This is
+  // the gate that replaced `Action.BATCH_EDIT`: a resource with no write action
+  // has no node kind to accept, so it is skipped.
+  pure def isBatchEditTarget(actions: Set[Action]): bool =
+    actions.intersect(Set(Create, Update, Delete)).size() > 0
+
+  // A target admits at least one kind, and a non-target admits none: the gate
+  // and the body cannot disagree.
+  pure def batchEditTargetsAreWriters(actions: Set[Action]): bool =
+    all {
+      isBatchEditTarget(actions) implies batchEditKinds(actions).size() > 0,
+      not(isBatchEditTarget(actions)) implies batchEditKinds(actions) == Set(),
+    }
 
   // Tests
 
@@ -269,13 +281,12 @@ module exposure {
   }
 
   run batchEditAdmitsOnlyDeclaredActions = {
-    // A resource exposing batch_edit but not update / create / delete: its body
-    // admits no kind at all.
-    val readOnly = Set(Read, Search, Count, BatchEdit)
-    // A resource exposing batch_edit and update but not create / delete.
-    val readUpdate = Set(Read, Update, Search, Count, BatchEdit)
+    // A resource with no write action: its body admits no kind at all.
+    val readOnly = Set(Read, Search, Count)
+    // A resource exposing update but not create / delete.
+    val readUpdate = Set(Read, Update, Search, Count)
     // A resource that also declares create / delete admits all three kinds.
-    val allActions = Set(Read, Update, Create, Delete, Search, Count, BatchEdit)
+    val allActions = Set(Read, Update, Create, Delete, Search, Count)
     all {
       assert(batchEditKinds(readOnly) == Set()),
       assert(batchEditKinds(readUpdate) == Set("Update")),
@@ -286,10 +297,22 @@ module exposure {
     }
   }
 
+  run batchEditTargetsAreWritersTest = {
+    all {
+      assert(not(isBatchEditTarget(Set(Read, Search, Count)))),
+      assert(isBatchEditTarget(Set(Read, Create))),
+      assert(isBatchEditTarget(Set(Read, Update))),
+      assert(isBatchEditTarget(Set(Read, Delete))),
+      assert(batchEditTargetsAreWriters(Set(Read, Search, Count))),
+      assert(batchEditTargetsAreWriters(Set(Read, Update))),
+      assert(batchEditTargetsAreWriters(Set(Read, Create, Update, Delete))),
+    }
+  }
+
   run batchActionsRequireTheirSingularTest = {
-    // Removing read drops batch_read; removing every write drops batch_edit.
-    val withRead = Set(Read, Search, Count, BatchRead, BatchEdit)
-    val noRead = Set(Search, Count, BatchRead, BatchEdit)
+    // Removing read drops batch_read; nothing else is derived.
+    val withRead = Set(Read, Search, Count, BatchRead)
+    val noRead = Set(Search, Count, BatchRead)
     all {
       assert(batchActionsRequireTheirSingular(withRead)),
       assert(batchActionsRequireTheirSingular(noRead)),
@@ -297,9 +320,7 @@ module exposure {
       assert(normalizedActions(withRead).contains(BatchRead)),
       // read absent -> batch_read is dropped.
       assert(not(normalizedActions(noRead).contains(BatchRead))),
-      // No create / update / delete -> batch_edit is dropped.
-      assert(not(normalizedActions(Set(Search, Count, BatchEdit)).contains(BatchEdit))),
-      assert(batchActionsRequireTheirSingular(Set(Search, Count, BatchEdit))),
+      assert(batchActionsRequireTheirSingular(Set(Search, Count))),
     }
   }
 
@@ -314,6 +335,7 @@ module exposure {
       assert(defaultBuilderIsIdentity(r)),
       assert(wrappedBuilderPreservesTheActionContract(r, Secured)),
       assert(batchEditKindsAreDeclared(r.actions)),
+      assert(batchEditTargetsAreWriters(r.actions)),
       assert(batchActionsRequireTheirSingular(r.actions)),
     }
   }

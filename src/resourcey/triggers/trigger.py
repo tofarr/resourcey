@@ -18,7 +18,7 @@ trigger instance may be attached to resources serving different DTOs.
 
 :meth:`callback` is invoked **once per edit operation** (never per item): a
 single ``create()`` normalizes to ``[Create(item=payload)]`` / ``[result]``; a
-``batch_edit`` of five passes its five ``Edit`` nodes and their five results
+batch of five edits passes its five ``Edit`` nodes and their five results
 verbatim. ``results`` is positionally aligned with ``edits`` — a delete or a miss
 is ``None``, and a miss still fires. The trigger receives the **inner DTO**
 instances, not the projected REST models.

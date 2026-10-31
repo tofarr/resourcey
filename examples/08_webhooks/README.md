@@ -168,12 +168,12 @@ A **batch edit** delivers **one** webhook request, not one per item — the
 whole batch is one edit operation:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8088/messages/batch-edit \
+curl -s -X POST http://127.0.0.1:8088/batch-edit \
   -H "Content-Type: application/json" \
   -d '[
-        {"kind":"Create","item":{"thread_id":1,"text":"first"}},
-        {"kind":"Create","item":{"thread_id":1,"text":"second"}},
-        {"kind":"Create","item":{"thread_id":1,"text":"third"}}
+        {"resource":"messages","kind":"Create","item":{"thread_id":1,"text":"first"}},
+        {"resource":"messages","kind":"Create","item":{"thread_id":1,"text":"second"}},
+        {"resource":"messages","kind":"Create","item":{"thread_id":1,"text":"third"}}
       ]'
 # → exactly one WEBHOOK RECEIVED banner, naming all three records:
 #   [{"kind": "create", ..., "text": "first"}, {"kind": "create", ..., "text": "second"}, {"kind": "create", ..., "text": "third"}]
@@ -248,7 +248,6 @@ Each resource gets the standard actions (`threads` and `messages` alike):
 | `GET` | `/threads` | search |
 | `GET` | `/threads/count` | count |
 | `GET` | `/threads/batch-read` | batch_read |
-| `POST` | `/threads/batch-edit` | batch_edit |
 
 Triggers are purely a side effect of a successful write on these same routes —
 no *resource* routes are added. One extra, non-resource endpoint exists purely

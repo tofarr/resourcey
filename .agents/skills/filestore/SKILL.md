@@ -24,7 +24,7 @@ GET    /files/{id}            read, resolved against the medium 200
 GET    /files                  search the medium's own objects   200
 GET    /files/count            count_objects                      200
 GET    /files/batch-read       repeated ?id=                      200
-POST   /files/batch-edit       Delete only                        200
+POST   /batch-edit             not reachable (see below)          n/a
 GET    /files/{id}/download    a `get` capability (JSON)          200
 GET    /files/{id}/content     the bytes themselves               200/307
 DELETE /files/{id}             remove the object                  204
@@ -93,6 +93,10 @@ for one `create` call and is never projected onto any REST shape.
 * `delete` accepts the shared `condition` signature for parity but **rejects** a
   non-`None` condition (`_reject_condition`): the medium-native record has no
   filterable metadata to evaluate one against.
+* **No batch write.** `register_file_routes` must be the sole mounter of the
+  `files` routes, so the resource is not in the `Manifest` and the app-level
+  `POST /batch-edit` cannot address it; `apply_edits` still works when called
+  directly (delete only). Bulk deletion means one `DELETE` per file (#179).
 
 `FileResource` mixes in `DefaultCacheStrategyMixin`; `files` advertises writes,
 so it resolves to `LastModifiedCacheStrategy` over `updated_at`.

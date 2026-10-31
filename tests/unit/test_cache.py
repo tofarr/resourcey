@@ -4,7 +4,11 @@ Covers the value objects and strategies, the default selection on
 :class:`~resourcey.sql.sql_resource.SqlResource`, and the HTTP-layer integration:
 ``ETag`` / ``Last-Modified`` / ``Cache-Control`` / ``Expires`` emission and
 ``304 Not Modified`` conditional-request short-circuit on read / search / count
-/ batch-read / batch-edit / create.
+/ batch-read / create.
+
+The app-level ``POST /batch-edit`` is a write, so it emits no cache validator:
+a batch spans resources with independent strategies, so there is no single
+validator to send.
 """
 
 from __future__ import annotations
@@ -466,13 +470,22 @@ async def test_batch_read_emits_etag_and_304(client: AsyncClient):
     assert second.status_code == 304
 
 
-async def test_batch_edit_emits_etag(client: AsyncClient):
+async def test_the_batch_edit_route_emits_no_cache_validator(client: AsyncClient):
+    """A batch write spans resources with independent strategies, so it sends none."""
     created = (await client.post("/items", json={"label": "a"})).json()
     edited = await client.post(
-        "/items/batch-edit", json=[{"kind": "Update", "item": {"id": created["id"], "label": "b"}}]
+        "/batch-edit",
+        json=[
+            {
+                "resource": "items",
+                "kind": "Update",
+                "item": {"id": created["id"], "label": "b"},
+            }
+        ],
     )
     assert edited.status_code == 200
-    assert "etag" in edited.headers
+    assert "etag" not in edited.headers
+    assert "cache-control" not in edited.headers
 
 
 async def test_validator_only_last_modified_emits_no_cache():
