@@ -33,7 +33,7 @@ from resourcey.cache.cache_strategy import CacheStrategy as ConcreteCacheStrateg
 from resourcey.cache.cached_service import CachedService
 from resourcey.core.dto import DTO, RestModels
 from resourcey.core.resource import Resource
-from resourcey.core.service import Action, CacheStrategy, Service, ServiceError
+from resourcey.core.service import Action, CacheStrategy, Service, ServiceError, StorageKey
 from resourcey.util.search_filter import SearchFilter
 from resourcey.util.sort_order import SortOrder
 
@@ -146,6 +146,10 @@ class CachedResource(Resource[T, K], Generic[T, K]):
             private=self._private,
             path=self.get_resource_path(),
         )
+
+    async def get_storage_key(self) -> StorageKey:
+        """The inner resource's storage key: a wrapper adds no storage of its own."""
+        return await self._inner.get_storage_key()
 
     # ------------------------------------------------------------------
     # Registration / lifecycle

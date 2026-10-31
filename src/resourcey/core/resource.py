@@ -1,7 +1,9 @@
 """``Resource`` — the abstract, storage-agnostic resource contract.
 
-A :class:`Resource` is a genuine abstract base class: every method is abstract
-and a backend supplies all of them, so ``core`` keeps no behaviour here::
+A :class:`Resource` is a genuine abstract base class: the storage-agnostic
+surface is abstract and a backend supplies it, so ``core`` keeps almost no
+behaviour here (the one exception, :meth:`Resource.get_storage_key`, has a safe
+path-based default that a backend narrows to its real storage identity)::
 
     manifest = Manifest(resources=[SqlResource(Thread, session_factory=factory)])
 
@@ -18,9 +20,14 @@ both storage strategies coexist:
     Whoever opens the storage owns its commit and close. A resource that finds
     storage already in ``ctx`` reuses it and neither commits nor closes it.
 
-``ctx`` is a plain ``MutableMapping`` keyed by module-level sentinels
-(:data:`~resourcey.core.service.STORAGE_KEY`), so an escape-hatch caller can
-pre-seed storage and every resource in the call adopts it.
+``ctx`` is a plain ``MutableMapping`` keyed by
+:class:`~resourcey.core.service.StorageKey` values (built with
+:func:`~resourcey.core.service.storage_key`), so an escape-hatch caller can
+pre-seed storage and every resource in the call that addresses *that* storage
+adopts it. Sharing is **per storage, not per request**: two resources share one
+service's storage only when both address the same connection (the same SQL
+engine, Mongo collection, list, or file store), so a resource on one connection
+is never served another connection's rows.
 
 This module is part of the ``core`` bottom layer: it imports no other project
 package, and deliberately knows nothing about HTTP — resolving a per-request
@@ -36,7 +43,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 from pydantic import BaseModel
 
 from resourcey.core.dto import RestModels
-from resourcey.core.service import Action, CacheStrategy, Service
+from resourcey.core.service import Action, CacheStrategy, Service, StorageKey, storage_key
 from resourcey.util.search_filter import SearchFilter
 from resourcey.util.sort_order import SortOrder
 
@@ -168,8 +175,23 @@ class Resource(ABC, Generic[T, K]):
         maker) as part of building. The returned
         :class:`~resourcey.core.service.Service` is the async context manager
         that owns the storage lifetime. Pass ``ctx`` to share storage across
-        services.
+        services: storage is shared **per connection**, so a service adopts
+        another's storage only when both address the same one (the same SQL
+        engine, collection, list, or file store) — never merely because both
+        were handed the same ``ctx``.
         """
+
+    async def get_storage_key(self) -> StorageKey:
+        """The ctx key this resource's service stores its storage under.
+
+        The default names the resource path, which is unique per registered
+        resource and so never collides. A backend overrides this with the
+        identity that *actually* identifies its storage (a SQL engine, a
+        collection, a list, a medium), so two resources sharing one connection
+        share one key — and an escape-hatch caller can seed storage exactly
+        where a service will look for it.
+        """
+        return storage_key("resource", self.get_resource_path())
 
     # ------------------------------------------------------------------
     # Registration

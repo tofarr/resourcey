@@ -58,6 +58,8 @@ specs:
 	quint test specs/triggers.qnt --main=triggers --match "^(editsOnlyFire|successOnly|alignmentTest|perOperationNotPerItemTest|perTriggerIsolationTest|backgroundNeverBlocksTest|exitSettlesEveryRunTest|invariantsHold)$$"
 	quint typecheck specs/jobs.qnt
 	quint test specs/jobs.qnt --main=jobs --match "^(claimSingleWinner|claimNeedsRunnable|terminalSticky|completionOnlyIfOwner|attemptCap|staleRecoverable|scheduleAndRunnerGates)$$"
+	quint typecheck specs/storage_sharing.qnt
+	quint test specs/storage_sharing.qnt --main=storage_sharing --match "^(sameStorageSharesOneStorage|differentStoragesAreIsolated|crossBackendIsIsolated|entryOrderDoesNotChangeTheResult|ownerReleasesAndAdopterDoesNot|singleKeyIsolationFails|invariantsHold)$$"
 	quint typecheck specs/realtime.qnt
 	quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$$"
 	quint typecheck specs/me.qnt

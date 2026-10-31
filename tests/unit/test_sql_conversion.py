@@ -460,9 +460,10 @@ async def test_model_crud_round_trip(widget_resources):
 
 
 def resource_ctx(session: AsyncSession) -> dict[Any, Any]:
-    from resourcey.core.service import STORAGE_KEY
+    from resourcey.core.service import storage_key
 
-    return {STORAGE_KEY: session}
+    # A SQL service keys on the maker's bound engine, so seed under that key.
+    return {storage_key("sql", session.bind): session}
 
 
 async def test_model_values_bind_to_the_right_columns(widget_resources):

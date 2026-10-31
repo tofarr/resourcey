@@ -38,7 +38,7 @@ from resourcey.cache.cache_defaults import DefaultCacheStrategyMixin
 from resourcey.core.dto import DTO, RestModels
 from resourcey.core.errors import InvalidInputError, ResourceyConfigError
 from resourcey.core.resource import Resource
-from resourcey.core.service import STORAGE_KEY, Action, Service, ServiceError
+from resourcey.core.service import Action, Service, ServiceError, StorageKey, storage_key
 from resourcey.encryption.encryption_service import get_encryption_service
 from resourcey.list.list_service import ListService
 from resourcey.list.pydantic_2_dto import pydantic_2_dto
@@ -204,13 +204,17 @@ class ListResource(DefaultCacheStrategyMixin, Resource[T, K]):
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build a :class:`ListService` over ``ctx`` and the served items.
 
-        A list already seeded on ``ctx`` wins, mirroring the SQL / Mongo services.
+        A list already seeded on ``ctx`` *under this resource's own key* wins,
+        mirroring the SQL / Mongo services. The served list is the storage
+        identity, so two list resources never adopt one another's items.
         """
         mapping = ctx if ctx is not None else {}
-        items = mapping.get(STORAGE_KEY)
-        if items is None:
-            items = self._models
-        return self.make_service(mapping, items)
+        items = mapping.get(storage_key("list", self._models))
+        return self.make_service(mapping, self._models if items is None else items)
+
+    async def get_storage_key(self) -> StorageKey:
+        """The ctx key a service of this resource stores its items under."""
+        return storage_key("list", self._models)
 
     def make_service(self, ctx: MutableMapping[Any, Any], items: list[Any]) -> Service[T, K]:
         """Build the service for this resource — the subclass seam.

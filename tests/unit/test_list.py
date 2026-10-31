@@ -46,6 +46,13 @@ class Country(BaseModel):
     population: int = 0
 
 
+class City(BaseModel):
+    """A second served model, for the cross-resource storage-isolation test."""
+
+    id: str
+    name: str
+
+
 def _countries() -> list[Country]:
     return [
         Country(id="us", name="United States", iso3="USA", population=331_000_000),
@@ -306,12 +313,24 @@ class TestListServiceRead:
             pass
         async with await resource.get_service({"unused": 1}) as service:
             assert await service.count() == 3
-        # A ctx carrying the storage key is adopted instead of the resource's list.
-        from resourcey.core.service import STORAGE_KEY
-
-        async with await resource.get_service({STORAGE_KEY: seeded}) as service:
+        # A ctx carrying this resource's own storage key is adopted instead of
+        # the resource's list.
+        key = await resource.get_storage_key()
+        async with await resource.get_service({key: seeded}) as service:
             assert await service.count() == 1
             assert (await service.read("fr")).name == "France"
+
+    async def test_two_list_resources_in_one_ctx_keep_their_own_rows(self) -> None:
+        """Issue #178: one ctx must not make a resource adopt a sibling's list."""
+        countries = _resource()
+        cities = ListResource([City(id="nyc", name="New York")], model=City, path="cities")
+        ctx: dict[Any, Any] = {}
+        async with (
+            await countries.get_service(ctx) as country_service,
+            await cities.get_service(ctx) as city_service,
+        ):
+            assert await city_service.read("nyc") == City(id="nyc", name="New York")
+            assert await country_service.count() == 3
 
 
 # ---------------------------------------------------------------------------
