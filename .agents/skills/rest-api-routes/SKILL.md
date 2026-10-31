@@ -47,7 +47,12 @@ GET /{resource}?limit=20&cursor=<opaque>&sort=size&desc=true&size__gt=10&name__c
 * A cursor reused under a different `sort` / `desc` (or no sort) is
   `400 invalid_input` rather than silently applying the key against the wrong
   column. A malformed or tampered cursor is also 400.
-* `limit` defaults to `20` (`DEFAULT_LIMIT`).
+* `limit` defaults to `20` (`DEFAULT_LIMIT`) and is capped at **100** (the
+  `RequestLimitsConfig.max_search_limit` default, `APP_MAX_SEARCH_LIMIT`). An
+  explicit `limit` outside `1..cap` is `400 invalid_input`; `limit=0` and a
+  negative `limit` are rejected too. When the cap is configured below 20, an
+  **omitted** `limit` defaults to the cap rather than being rejected. The bound
+  appears in the generated OpenAPI `limit` schema as `minimum` / `maximum`.
 * `sort` names a **sortable** field (derived from the read model); `desc=true`
   flips it. With no `sort`, the identifier order is used and `desc` is ignored.
 * An unknown or non-sortable `sort` is `400`.
@@ -89,6 +94,11 @@ response length always equals the input length.
 
 * `batch_read` is a `GET` (a pure read), so ids are repeated query params:
   `?id=a&id=b`. A miss is `null`.
+* `batch_read` accepts at most **100** ids (the
+  `RequestLimitsConfig.max_batch_read_ids` default, `APP_MAX_BATCH_READ_IDS`).
+  More than the cap is `400 invalid_input` — never a truncated list, which would
+  misalign every position after the cut. The cap is the OpenAPI `maxItems` on
+  the `id` param.
 * `batch_edit`'s body is a **`kind`-discriminated union**, so one batch can mix
   operations:
 

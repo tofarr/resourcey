@@ -76,6 +76,7 @@ The blocks, each living with what it configures:
 | `IdpConfig` | `APP_OAUTH_CLIENTS_<n>_*` | verification + flow fields, flow paths, state TTL, JWKS cache |
 | `SessionCookieConfig` | `APP_SESSION_COOKIE_*` | cookie name / max-age / refresh margin |
 | `FileStoreConfig` | `APP_MEDIUM_*`, `APP_DOWNLOAD_URL_TTL_SECONDS`, `APP_MAX_SIZE` | the selected medium's fields + limits |
+| `RequestLimitsConfig` | `APP_MAX_SEARCH_LIMIT`, `APP_MAX_BATCH_READ_IDS` | the read surface's request caps (both default 100, both `>= 1`) |
 | `RealtimeConfig` | `APP_CHANNEL_*`, `APP_HEARTBEAT_SECONDS` | the selected channel's fields |
 | `BackgroundTasksConfig` | `APP_BACKGROUND_TASKS_*` | timezone, scheduler enabled, per-task entries |
 | `JobsConfig` | `APP_JOBS_*` | sweep interval, concurrency, attempts, runner enabled |
