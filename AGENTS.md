@@ -16,17 +16,16 @@ conversation. Subsystem detail lives in on-demand skills
 
 ## Release state
 
-Releases are published to PyPI as `resourcey` from a tagged GitHub release. The
-version lives in **two** places — `pyproject.toml` and `uv.lock` — so bump it
-with `uv version <x.y.z>`, which updates both. Editing `pyproject.toml` by hand
-leaves the lock stale: CI's `uv sync` silently rewrites it, but `uv lock
---check` (and the release build) fails.
+Releases are published to PyPI as `resourcey` from a tagged GitHub release.
+**Load the `release` skill before bumping a version, tagging, or touching
+`release.yml`** — it carries the procedure, the recovery steps for a mis-tagged
+release, and the troubleshooting table.
 
-To release: bump the version and merge it, then publish a GitHub release tagged
-`v<version>`. `release.yml` refuses to build when the tag and the lock/version
-disagree, runs the full `ci.yml` first, and uploads with PyPI trusted
-publishing (OIDC — no stored token) plus Sigstore attestations. A
-`workflow_dispatch` run with `dry_run` publishes to TestPyPI instead.
+The one rule worth repeating here: the version lives in **two** places —
+`pyproject.toml` and `uv.lock` — so bump it with `uv version <x.y.z>`, which
+updates both. Editing `pyproject.toml` by hand leaves the lock stale: CI's
+`uv sync` silently rewrites it, but `uv lock --check` (and the release build)
+fails.
 
 Still pre-1.0, so backward-compatibility shims are not required when changing
 the public API: removed query params (e.g. a dropped `offset` after switching
@@ -176,6 +175,7 @@ Load the skill for the area you are touching:
 * `migrations` — Alembic autogeneration.
 * `testing` — hermetic test setup and how to run the suite.
 * `quint-specs` — when to update specs and how to verify them.
+* `release` — version bump, tag, publish, and recovery from a failed release.
 * `rest-api-routes` — wire conventions (paths, verbs, batch bodies, errors).
 * `pr-quality-checks` — the gates to run before opening or updating a PR.
 * `pr-review-checklist` — what to verify when reviewing a PR.

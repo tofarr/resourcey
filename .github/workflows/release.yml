@@ -46,6 +46,10 @@ jobs:
             fi
             if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
               echo "::error::tag ${GITHUB_REF_NAME} does not match v${version} in pyproject.toml"
+              echo "::error::bump the version in a commit on main first, then re-tag that commit:"
+              echo "::error::  uv version ${GITHUB_REF_NAME#v} && git commit -am 'Release ${GITHUB_REF_NAME}'"
+              echo "::error::  git tag -d ${GITHUB_REF_NAME} && git tag ${GITHUB_REF_NAME} <that commit>"
+              echo "::error::see .agents/skills/release/SKILL.md"
               exit 1
             fi
           elif [ "${DRY_RUN}" != "true" ]; then
