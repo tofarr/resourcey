@@ -38,9 +38,7 @@ from resourcey.core.service import CacheStrategy as CoreCacheStrategy
 DEFAULT_READ_ONLY_EXPIRE_IN = 600
 
 # The write actions: a resource advertising none of these is read-only.
-_WRITE_ACTIONS: frozenset[Action] = frozenset(
-    {Action.CREATE, Action.UPDATE, Action.DELETE, Action.BATCH_EDIT}
-)
+_WRITE_ACTIONS: frozenset[Action] = frozenset({Action.CREATE, Action.UPDATE, Action.DELETE})
 
 
 def is_read_only(supported_actions: frozenset[Action]) -> bool:

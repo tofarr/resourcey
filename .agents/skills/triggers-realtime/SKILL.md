@@ -26,7 +26,7 @@ env-parseable by dotted path.
 `callback` runs **once per edit operation, never per item**:
 
 * a single `create()` normalizes to `[Create(item=payload)]` / `[result]`;
-* a `batch_edit` of five passes its five `Edit` nodes and their five results
+* a batch of five edits passes its five `Edit` nodes and their five results
   verbatim, positionally aligned.
 
 A delete or a miss is `None` in `results`, and **a miss still fires** — it is
@@ -91,7 +91,7 @@ constructor list wins.
 ## `TriggeredService` — execution policy
 
 Forwards every action to the inner verbatim and, after a **write** (`create` /
-`update` / `delete` / `batch_edit`) returns successfully, fires every configured
+`update` / `delete`, or a batch of them) returns successfully, fires every configured
 trigger once with that operation's whole `(edits, results)`.
 
 * Reads never fire; an inner exception on a write fires nothing — a trigger only
@@ -159,7 +159,7 @@ See `specs/triggers.qnt` and `examples/08_webhooks`.
 
 `resourcey.triggers.redis_trigger.RedisTrigger(channel=..., resource_path=None)`
 publishes one `ResourceEvent` per `(edit, result)` pair after a successful
-write — a `batch_edit` of five publishes five discrete events. Despite the name,
+write — a batch of five edits publishes five discrete events. Despite the name,
 `channel=` defaults to `InMemoryChannel`; "Redis" names the production case the
 trigger exists for, not a hard requirement. Attach it exactly like a
 `WebhookTrigger`:

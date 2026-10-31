@@ -59,7 +59,7 @@ declarative base to manage.
 pagination ordered by the identifier, or by a validated sort field with the
 identifier as a stable tie-breaker. `_apply_filters` pushes the filter into the
 `WHERE`; `_apply_condition` pushes a write's condition there too and **refuses**
-the in-memory fallback (see the `services` skill). `batch_edit` refuses a node
+the in-memory fallback (see the `services` skill). `apply_edits` refuses a node
 whose action the resource does not declare.
 
 ## Mongo — DTO-first
@@ -155,7 +155,7 @@ field overrides force the whole exposed surface to be recomputed:
 * **Actions** are normalized and must be a subset of the inner's: a view
   **narrows**, never widens.
 
-`ViewService` re-asserts the view's actions on `batch_edit` — defense in depth,
+`ViewService` re-asserts the view's actions on `apply_edits` — defense in depth,
 since the inner service consults the inner (wider) action set. `__aenter__` /
 `__aexit__` / `on_register` delegate to the inner so its lifecycle still runs.
 Register the **view**, not the inner (registering both double-enters the inner

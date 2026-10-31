@@ -20,10 +20,10 @@ sees.
 | `search` | GET | `/{resource}` | query params | 200 + page |
 | `count` | GET | `/{resource}/count` | filter query params | 200 + bare integer |
 | `batch_read` | GET | `/{resource}/batch-read` | repeated `?id=` | 200 + list |
-| `batch_edit` | POST | `/{resource}/batch-edit` | edit union | 200 + list |
 
 Plus one app-level route that is not per resource: `POST /batch-edit`, spanning
-every exposed resource (see the batch section below).
+every exposed resource (see the batch section below). There is **no**
+per-resource batch write: one batch surface, not two (#179).
 
 A route exists **only** for a declared action. A write against a read-only
 resource is a `405`, not a handler that raises.
@@ -32,7 +32,7 @@ resource is a `405`, not a handler that raises.
 
 * `{resource}` is plural, lower-case, kebab-case, from
   `get_resource_path()` (default: `pluralize(camel_to_kebab(DTO name))`).
-* Action sub-paths are dash-separated (`batch-read`, `batch-edit`, `count`).
+* Action sub-paths are dash-separated (`batch-read`, `count`).
   Python method names stay snake_case (`batch_read`) — only the URL uses dashes.
 * `{id}` is the DTO's identifier (`id` unless `id_field_name` says otherwise).
 
@@ -102,7 +102,7 @@ response length always equals the input length.
   More than the cap is `400 invalid_input` — never a truncated list, which would
   misalign every position after the cut. The cap is the OpenAPI `maxItems` on
   the `id` param.
-* `batch_edit`'s body is a **`kind`-discriminated union**, so one batch can mix
+* The batch write body is a **`kind`-discriminated union**, so one batch can mix
   operations:
 
 ```json
@@ -117,11 +117,13 @@ A `Create` yields the entity projected onto the create response (so a
 one-time-reveal field survives); an `Update` onto the update response; a
 `Delete`, an absent id, or a failed `condition` yields `null`. The union is
 narrowed to the actions the resource declares, so a batch cannot reach an action
-the resource never exposed.
+the resource never exposed — and each kind is authorized against **its own**
+singular action (`Create` against `create`, not a shared write action), so the
+batch is never a way around a policy that refuses one of them.
 
 ### The app-level `POST /batch-edit`
 
-`POST /batch-edit` is the cross-resource counterpart: the same body with a
+`POST /batch-edit` is the only batch write surface: the same body with a
 `resource` field naming the target by **path segment**, and the same
 positionally aligned response with `resource` / `kind` echoed back:
 
@@ -135,9 +137,9 @@ positionally aligned response with `resource` / `kind` echoed back:
 * Mounted by default by `create_app` / `add_to_app`; `batch_edit=False`
   suppresses it, `batch_edit_path` relocates it.
 * The body is a **static** two-level union (`resource` → `kind`) built at
-  registration from the exposed resources that declare `batch_edit`, so a node
-  naming an unknown resource, a hidden one, or a `kind` the resource does not
-  declare is a `422`.
+  registration from the exposed resources that declare at least one write
+  action, so a node naming an unknown resource, a hidden one, a read-only one,
+  or a `kind` the resource does not declare is a `422`.
 * Nodes apply in **strict list order** — never grouped by resource, which would
   reorder dependent edits. A `Create` then an `Update` of the same
   client-supplied id works.

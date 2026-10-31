@@ -157,10 +157,10 @@ class TriggeredService(Service[T, K], Generic[T, K]):
         await self._fire([Delete(id=id, condition=condition)], [None])
         return deleted
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
-        """Forward ``batch_edit`` then fire each trigger once with the whole batch."""
+    async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
+        """Forward the edits then fire each trigger once with the whole batch."""
         self._require_entered()
-        results = await self._inner.batch_edit(edits)
+        results = await self._inner.apply_edits(edits)
         await self._fire(edits, results)
         return results
 

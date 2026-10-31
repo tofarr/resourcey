@@ -346,7 +346,7 @@ class TestFiring:
         assert edits[0].id == created.id
         assert results == [None]
 
-    async def test_batch_edit_fires_once_not_per_item(self, inner: SqlResource[Any, Any]) -> None:
+    async def test_apply_edits_fires_once_not_per_item(self, inner: SqlResource[Any, Any]) -> None:
         trigger = RecordingTrigger()
         wrapped = TriggeredResource(inner, on_edit=[trigger], background=False)
         async with await wrapped.get_service() as service:
@@ -356,7 +356,7 @@ class TestFiring:
                 Create(item=dto_type.model_validate({"title": "b"})),
                 Create(item=dto_type.model_validate({"title": "c"})),
             ]
-            await service.batch_edit(batch)
+            await service.apply_edits(batch)
         # One invocation for the whole operation, carrying all three edits,
         # not three separate invocations.
         assert len(trigger.calls) == 1

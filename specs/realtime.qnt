@@ -50,7 +50,7 @@ module realtime {
   // ---- The subscription gate (RealtimeHub.subscribe) -----------------------
   // Mirrors core/service.Action; only membership in Read matters here (the
   // normalize_actions reduction itself is exposure.qnt's concern).
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   pure def subscribable(exposedActions: Set[Action]): bool =
     exposedActions.contains(Read)

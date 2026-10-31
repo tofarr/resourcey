@@ -294,7 +294,7 @@ class SqlService(Service[T, K]):
         by_id = {row[id_column.name]: self._to_dto(row) for row in rows}
         return [by_id.get(i) for i in ids]
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
+    async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply each :class:`Edit`; results align positionally with ``edits``.
 
         A create / update yields the resulting DTO; a delete or a miss yields
@@ -307,15 +307,15 @@ class SqlService(Service[T, K]):
         for edit in edits:
             if isinstance(edit, Create):
                 if Action.CREATE not in supported:
-                    raise InvalidInputError("batch_edit cannot create: create is not supported")
+                    raise InvalidInputError("a batch cannot create: create is not supported")
                 results.append(await self.create(edit.item))
             elif isinstance(edit, Update):
                 if Action.UPDATE not in supported:
-                    raise InvalidInputError("batch_edit cannot update: update is not supported")
+                    raise InvalidInputError("a batch cannot update: update is not supported")
                 results.append(await self.update(edit.item, condition=edit.condition))
             else:
                 if Action.DELETE not in supported:
-                    raise InvalidInputError("batch_edit cannot delete: delete is not supported")
+                    raise InvalidInputError("a batch cannot delete: delete is not supported")
                 await self.delete(edit.id, condition=edit.condition)
                 results.append(None)
         return results

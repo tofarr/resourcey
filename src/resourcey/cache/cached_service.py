@@ -240,8 +240,8 @@ class CachedService(Service[T, K], Generic[T, K]):
         await self._evict()
         return deleted
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
+    async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         self._require_entered()
-        results = await self._inner.batch_edit(edits)
+        results = await self._inner.apply_edits(edits)
         await self._evict()
         return results

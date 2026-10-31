@@ -160,11 +160,23 @@ class TestRealtimeDelivery:
             ws.receive_json()  # ack
 
             resp = client.post(
-                "/messages/batch-edit",
+                "/batch-edit",
                 json=[
-                    {"kind": "Create", "item": {"thread_id": thread["id"], "text": "first"}},
-                    {"kind": "Create", "item": {"thread_id": thread["id"], "text": "second"}},
-                    {"kind": "Create", "item": {"thread_id": thread["id"], "text": "third"}},
+                    {
+                        "resource": "messages",
+                        "kind": "Create",
+                        "item": {"thread_id": thread["id"], "text": "first"},
+                    },
+                    {
+                        "resource": "messages",
+                        "kind": "Create",
+                        "item": {"thread_id": thread["id"], "text": "second"},
+                    },
+                    {
+                        "resource": "messages",
+                        "kind": "Create",
+                        "item": {"thread_id": thread["id"], "text": "third"},
+                    },
                 ],
             )
             assert resp.status_code == 200

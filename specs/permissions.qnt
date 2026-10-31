@@ -31,7 +31,7 @@
 
 module permissions {
   // The standard resource actions, mirroring core/service.Action.
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   // A filter over rows: All (match everything) or None (match nothing). Mirrors
   // the SearchFilter vocabulary (AllFilter / NoMatchFilter). Suffixed with F to
@@ -56,13 +56,11 @@ module permissions {
   // An enforcement decision, mirroring the AuthorizedService matrix.
   type Decision = Allowed | Forbidden | Hidden | Empty
 
-  // Reduce COUNT / BATCH_* to their singular CRUD action (normalize_action):
-  // counting reuses the search permission and batching reuses the action it
-  // batches.
+  // Reduce a derived action to its singular CRUD action (normalize_action):
+  // counting reuses the search permission and batch_read reuses read.
   pure def normalizeAction(act: Action): Action =
     if (act == Count) Search
     else if (act == BatchRead) Read
-    else if (act == BatchEdit) Update
     else act
 
   // Reduce a single policy to its Filter for an action.
@@ -112,7 +110,7 @@ module permissions {
       Read => Hidden |
       Update => Hidden |
       Delete => Hidden |
-      _ => Empty  // Search / Count / BatchRead / BatchEdit -> empty / None positions
+      _ => Empty  // Search / Count / BatchRead -> empty / None positions
     }
 
   // Invariant: a deny policy never suppresses a grant from another policy.
@@ -149,7 +147,7 @@ module permissions {
 
   // Every action.
   pure val allActions: Set[Action] =
-    Set(Create, Read, Update, Delete, Search, Count, BatchRead, BatchEdit)
+    Set(Create, Read, Update, Delete, Search, Count, BatchRead)
 
   // Tests
 
@@ -170,7 +168,6 @@ module permissions {
       assert(reducePolicy(ReadOnly, Create) == NoneF),
       assert(reducePolicy(ReadOnly, Update) == NoneF),
       assert(reducePolicy(ReadOnly, Delete) == NoneF),
-      assert(reducePolicy(ReadOnly, BatchEdit) == NoneF),
     }
   }
 
@@ -178,7 +175,6 @@ module permissions {
     all {
       assert(normalizeAction(Count) == Search),
       assert(normalizeAction(BatchRead) == Read),
-      assert(normalizeAction(BatchEdit) == Update),
       assert(normalizeAction(Create) == Create),
     }
   }
@@ -194,7 +190,6 @@ module permissions {
       assert(enforce(Search, NoneF) == Empty),
       assert(enforce(Count, NoneF) == Empty),
       assert(enforce(BatchRead, NoneF) == Empty),
-      assert(enforce(BatchEdit, NoneF) == Empty),
     }
   }
 
@@ -208,7 +203,6 @@ module permissions {
     all {
       assert(isPermitted("alice", Read, ps)),
       assert(isPermitted("alice", Create, ps)),
-      assert(isPermitted("alice", BatchEdit, ps)),
     }
   }
 

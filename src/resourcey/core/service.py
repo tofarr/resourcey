@@ -1,7 +1,7 @@
 """``Service`` — the storage-agnostic action contract — plus ``Action`` and friends.
 
 A service exposes the standard resource actions (create, read, update, delete,
-search, count, batch_read, batch_edit) as async methods. It is generic over the
+search, count, batch_read) as async methods. It is generic over the
 DTO type it serves (``T``) and the identifier type (``K``).
 
 The service is the **async context manager**: it owns its storage lifetime, not
@@ -54,7 +54,6 @@ class Action(enum.StrEnum):
     SEARCH = "search"
     COUNT = "count"
     BATCH_READ = "batch_read"
-    BATCH_EDIT = "batch_edit"
 
 
 @dataclass(frozen=True)
@@ -170,16 +169,20 @@ class Page(Generic[T]):
 
 
 # ---------------------------------------------------------------------------
-# Edits - the batch_edit item union
+# Edits - the write-item union
 # ---------------------------------------------------------------------------
 
 
 class Edit(DiscriminatedUnionMixin, ABC):
-    """One item of a ``batch_edit``: a create, an update, or a delete.
+    """One item of an edit batch: a create, an update, or a delete.
 
     The union is discriminated by ``kind`` (the class name, from
     :class:`~resourcey.util.models.DiscriminatedUnionMixin`), so a single
-    batch can mix all three operations.
+    batch can mix all three operations. It is the vocabulary of
+    :meth:`Service.apply_edits` and of the ``Trigger`` callback -- it is
+    deliberately *not* an :class:`Action`, because no resource action is a
+    batch any more: the only batch write surface is the app-level
+    ``POST /batch-edit``.
 
     It is generic over the DTO type ``T`` and the identifier type ``K``; a
     backend builds the concrete nodes with those parameters bound to its own
@@ -188,7 +191,7 @@ class Edit(DiscriminatedUnionMixin, ABC):
 
 
 class Create(Edit, Generic[T]):
-    """A ``batch_edit`` item that creates a new entity from ``item``."""
+    """An edit item that creates a new entity from ``item``."""
 
     item: T
 
@@ -207,7 +210,7 @@ def _resolve_condition(value: Any) -> Any:
 
 
 class Update(Edit, Generic[T]):
-    """A ``batch_edit`` item that updates the entity identified by ``item``.
+    """An edit item that updates the entity identified by ``item``.
 
     ``condition`` is an optional :class:`SearchFilter` tree the stored row must
     satisfy for the update to apply; ``None`` means no condition. A failed
@@ -225,7 +228,7 @@ class Update(Edit, Generic[T]):
 
 
 class Delete(Edit, Generic[K]):
-    """A ``batch_edit`` item that deletes the entity identified by ``id``.
+    """An edit item that deletes the entity identified by ``id``.
 
     ``condition`` is an optional :class:`SearchFilter` tree the stored row must
     satisfy for the delete to apply; ``None`` means no condition. A failed
@@ -395,13 +398,19 @@ class Service(Generic[T, K]):
         self._require_entered()
         raise NotImplementedError
 
-    async def batch_edit(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
+    async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply a list of :class:`Edit` nodes; results align positionally with ``edits``.
 
         A :class:`Create` / :class:`Update` yields the resulting DTO, a
         :class:`Delete` yields ``None`` (nothing to return), and a miss — an
         absent id, or an :class:`Update` / :class:`Delete` whose ``condition``
         the stored row no longer satisfies — also yields ``None``.
+
+        Deliberately **not** an :class:`Action` and not a route: the only
+        batch write surface is the app-level ``POST /batch-edit``. This is the
+        seam it calls, and the shape a ``Trigger`` receives -- one call per
+        run, so a trigger fires once for a batch rather than once per item.
+        A resource refusing a kind raises ``InvalidInputError``.
         """
         self._require_entered()
         raise NotImplementedError
@@ -422,12 +431,10 @@ def assert_real_actions(name: str, actions: frozenset[Any]) -> None:
         )
 
 
-# The singular actions a batch action is a batch *of*. A batch action cannot
-# outlive the singular action it batches: batch_read reads, so it needs read;
-# batch_edit edits, so it needs at least one of create / update / delete.
+# The singular action a batch action is a batch *of*. A batch action cannot
+# outlive the singular action it batches: batch_read reads, so it needs read.
 _BATCH_PREREQUISITES: dict[Action, frozenset[Action]] = {
     Action.BATCH_READ: frozenset({Action.READ}),
-    Action.BATCH_EDIT: frozenset({Action.CREATE, Action.UPDATE, Action.DELETE}),
 }
 
 
@@ -435,14 +442,13 @@ def normalize_actions(actions: frozenset[Action]) -> frozenset[Action]:
     """Drop any batch action whose singular action is absent.
 
     A batch action is only meaningful when the singular action it batches is
-    also exposed: ``batch_read`` reads (so it requires ``read``), and
-    ``batch_edit`` creates / updates / deletes (so it requires at least one of
-    those). Normalising here — rather than raising — means a caller who narrows
-    a surface by removing, say, only ``read`` or only ``update`` gets a coherent
-    action set without having to remember to also remove the batch action.
+    also exposed: ``batch_read`` reads, so it requires ``read``. Normalising
+    here — rather than raising — means a caller who narrows a surface by
+    removing ``read`` gets a coherent action set without having to remember to
+    also remove the batch action.
 
     Idempotent, so it is safe to apply at every layer that consumes a narrowed
-    action set (the route builder, the backends' ``batch_edit``, and a
+    action set (the route builder, the app-level ``/batch-edit`` gate, and a
     ``ResourceView``).
     """
     normalized = set(actions)
@@ -456,18 +462,16 @@ def normalize_actions(actions: frozenset[Action]) -> frozenset[Action]:
 _ACTION_EQUIVALENT: dict[Action, Action] = {
     Action.COUNT: Action.SEARCH,
     Action.BATCH_READ: Action.READ,
-    Action.BATCH_EDIT: Action.UPDATE,
 }
 
 
 def normalize_action(action: Action) -> Action:
-    """Reduce ``COUNT`` / ``BATCH_*`` to their closest singular CRUD action.
+    """Reduce a derived action to its closest singular CRUD action.
 
-    ``COUNT`` reuses the ``SEARCH`` permission, ``BATCH_READ`` reuses ``READ``,
-    and ``BATCH_EDIT`` reuses ``UPDATE`` — the same equivalences
-    :func:`normalize_actions` uses to prune a batch action whose singular action
-    is absent. A policy may instead list the derived members it grants
-    explicitly; either way the reduction agrees.
+    ``COUNT`` reuses the ``SEARCH`` permission and ``BATCH_READ`` reuses
+    ``READ`` — the same equivalences :func:`normalize_actions` uses to prune a
+    batch action whose singular action is absent. A policy may instead list the
+    derived members it grants explicitly; either way the reduction agrees.
     ``CREATE`` / ``READ`` / ``UPDATE`` / ``DELETE`` / ``SEARCH`` are unchanged.
     """
     return _ACTION_EQUIVALENT.get(action, action)

@@ -204,17 +204,17 @@ Each resource gets the standard actions:
 | `GET`    | `/threads`              | search      |
 | `GET`    | `/threads/count`        | count       |
 | `GET`    | `/threads/batch-read`   | batch_read  |
-| `POST`   | `/threads/batch-edit`   | batch_edit  |
 
 …and the same actions for `/messages`. Search is `limit` + `cursor` + `sort` /
 `desc` plus the `<field>__<op>` filter params; responses carry `ETag` /
 `Last-Modified` / `Cache-Control` and a conditional `GET` can return `304`.
 
-Plus one app-level route that is not per resource:
+Plus one app-level route that is not per resource — the **only** batch write
+surface (there is no per-resource `/batch-edit`):
 
-| Method | Path          | Action                        |
-| ------ | ------------- | ----------------------------- |
-| `POST` | `/batch-edit` | batch_edit across every resource |
+| Method | Path          | Action                            |
+| ------ | ------------- | --------------------------------- |
+| `POST` | `/batch-edit` | a batch across every resource     |
 
 ## Migrations
 

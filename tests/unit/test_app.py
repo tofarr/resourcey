@@ -154,7 +154,7 @@ async def test_search_and_count_over_http(client: AsyncClient):
     assert titles == {"a", "b"}
 
 
-async def test_batch_read_and_batch_edit_over_http(client: AsyncClient):
+async def test_batch_read_and_cross_resource_edit_over_http(client: AsyncClient):
     created = (await client.post("/threads", json={"title": "t"})).json()
 
     read = await client.get("/threads/batch-read", params={"id": [created["id"], 999]})
@@ -162,23 +162,27 @@ async def test_batch_read_and_batch_edit_over_http(client: AsyncClient):
     assert read.json() == [{"id": created["id"], "title": "t"}, None]
 
     edited = await client.post(
-        "/threads/batch-edit",
+        "/batch-edit",
         json=[
-            {"kind": "Update", "item": {"id": created["id"], "title": "edited"}},
-            {"kind": "Update", "item": {"id": 999, "title": "nope"}},
-            {"kind": "Create", "item": {"title": "created"}},
-            {"kind": "Delete", "id": created["id"]},
+            {
+                "resource": "threads",
+                "kind": "Update",
+                "item": {"id": created["id"], "title": "edited"},
+            },
+            {"resource": "threads", "kind": "Update", "item": {"id": 999, "title": "nope"}},
+            {"resource": "threads", "kind": "Create", "item": {"title": "created"}},
+            {"resource": "threads", "kind": "Delete", "id": created["id"]},
         ],
     )
     assert edited.status_code == 200
-    body = edited.json()
+    body = [item["result"] for item in edited.json()]
     assert body[0] == {"id": created["id"], "title": "edited"}
     assert body[1] is None
     assert body[2]["title"] == "created"
     assert body[3] is None
 
 
-async def test_batch_edit_honours_a_condition(client: AsyncClient):
+async def test_apply_edits_honours_a_condition(client: AsyncClient):
     """A batch item's optional ``condition`` gates the write; a miss is ``None``."""
     created = (await client.post("/threads", json={"title": "t"})).json()
     holds = {
@@ -193,26 +197,28 @@ async def test_batch_edit_honours_a_condition(client: AsyncClient):
     }
 
     edited = await client.post(
-        "/threads/batch-edit",
+        "/batch-edit",
         json=[
             # Condition holds -> applies.
             {
+                "resource": "threads",
                 "kind": "Update",
                 "item": {"id": created["id"], "title": "edited"},
                 "condition": holds,
             },
             # Condition fails -> None, row untouched.
             {
+                "resource": "threads",
                 "kind": "Update",
                 "item": {"id": created["id"], "title": "hacked"},
                 "condition": fails,
             },
             # Delete condition fails -> None.
-            {"kind": "Delete", "id": created["id"], "condition": fails},
+            {"resource": "threads", "kind": "Delete", "id": created["id"], "condition": fails},
         ],
     )
     assert edited.status_code == 200
-    body = edited.json()
+    body = [item["result"] for item in edited.json()]
     assert body[0] == {"id": created["id"], "title": "edited"}
     assert body[1] is None
     assert body[2] is None
@@ -222,9 +228,10 @@ async def test_batch_edit_honours_a_condition(client: AsyncClient):
 
     # A delete whose condition now holds removes it.
     deleted = await client.post(
-        "/threads/batch-edit",
+        "/batch-edit",
         json=[
             {
+                "resource": "threads",
                 "kind": "Delete",
                 "id": created["id"],
                 "condition": {
@@ -236,44 +243,46 @@ async def test_batch_edit_honours_a_condition(client: AsyncClient):
         ],
     )
     assert deleted.status_code == 200
-    assert deleted.json() == [None]
+    assert [item["result"] for item in deleted.json()] == [None]
     assert (await client.get(f"/threads/{created['id']}")).status_code == 404
 
 
 async def test_openapi_schema_builds_with_a_condition_field(client: AsyncClient):
     """The condition field's JSON-schema override keeps OpenAPI generation working."""
     schema = (await client.get("/openapi.json")).json()
-    assert schema["paths"]["/threads/batch-edit"]["post"] is not None
-    body_ref = schema["paths"]["/threads/batch-edit"]["post"]["requestBody"]["content"][
-        "application/json"
-    ]["schema"]
+    assert schema["paths"]["/batch-edit"]["post"] is not None
+    body_ref = schema["paths"]["/batch-edit"]["post"]["requestBody"]["content"]["application/json"][
+        "schema"
+    ]
     assert body_ref  # a concrete schema was produced
 
 
-async def test_batch_edit_rejects_an_unknown_kind(client: AsyncClient):
+async def test_apply_edits_rejects_an_unknown_kind(client: AsyncClient):
     rejected = await client.post(
-        "/threads/batch-edit",
-        json=[{"kind": "Frobnicate", "id": 1}],
+        "/batch-edit",
+        json=[{"resource": "threads", "kind": "Frobnicate", "id": 1}],
     )
     assert rejected.status_code == 422
 
     # ``kind`` is required, so an untagged item is rejected too.
-    untagged = await client.post("/threads/batch-edit", json=[{"item": {"title": "x"}}])
+    untagged = await client.post(
+        "/batch-edit", json=[{"resource": "threads", "item": {"title": "x"}}]
+    )
     assert untagged.status_code == 422
 
 
-def test_batch_edit_body_refuses_an_empty_union():
-    """The defensive guard fires if ``batch_edit`` reaches the body builder with no writes.
+def test_apply_edits_body_refuses_an_empty_union():
+    """The defensive guard fires if the body builder is handed no write kinds.
 
-    ``register_routes`` drops ``batch_edit`` when ``normalize_actions`` finds no
-    write action, so this is unreachable through the transport; the guard keeps a
-    future direct caller from building an empty ``kind`` union.
+    ``_batch_targets`` skips a resource with no write action, so this is
+    unreachable through the transport; the guard keeps a future direct caller
+    from building an empty ``kind`` union.
     """
-    from resourcey.http.routes import _batch_edit_body
+    from resourcey.http.batch_routes import _resource_edit_body
 
     models = SqlResource(Thread, session_factory=_dummy_maker()).get_rest_models()
     with pytest.raises(ServiceError, match="no members"):
-        _batch_edit_body(
+        _resource_edit_body(
             models.create_request,
             models.update_request,
             "id",
@@ -284,21 +293,18 @@ def test_batch_edit_body_refuses_an_empty_union():
         )
 
 
-async def test_batch_edit_rejects_update_when_update_is_not_declared():
-    """A resource declaring batch_edit without update cannot update through it.
+async def test_apply_edits_rejects_update_when_update_is_not_declared():
+    """A resource hiding ``update`` cannot update through the batch route.
 
     The ``Update`` kind is gated on ``Action.UPDATE`` (like create / delete), so
-    a resource that hides ``update`` cannot reach it via ``batch-edit`` — the
-    latent hole this closes.
+    a resource that does not declare it is not admitted through ``/batch-edit``.
     """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
     class CreateOnlyThread(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Action]:
-            return frozenset(
-                {Action.CREATE, Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_EDIT}
-            )
+            return frozenset({Action.CREATE, Action.READ, Action.SEARCH, Action.COUNT})
 
     threads = CreateOnlyThread(Thread, session_factory=maker)
     async with engine.begin() as conn:
@@ -309,26 +315,34 @@ async def test_batch_edit_rejects_update_when_update_is_not_declared():
         created = (await c.post("/threads", json={"title": "t"})).json()
         # The update route is correctly not mounted...
         assert (await c.patch(f"/threads/{created['id']}", json={"title": "x"})).status_code == 405
-        # ...and the Update kind is not admitted through batch-edit.
+        # ...and the Update kind is not admitted through /batch-edit.
         rejected = await c.post(
-            "/threads/batch-edit",
-            json=[{"kind": "Update", "item": {"id": created["id"], "title": "x"}}],
+            "/batch-edit",
+            json=[
+                {
+                    "resource": "threads",
+                    "kind": "Update",
+                    "item": {"id": created["id"], "title": "x"},
+                }
+            ],
         )
         assert rejected.status_code == 422
-        # Create still works through batch-edit.
-        ok = await c.post("/threads/batch-edit", json=[{"kind": "Create", "item": {"title": "u"}}])
+        # Create still works through /batch-edit.
+        ok = await c.post(
+            "/batch-edit", json=[{"resource": "threads", "kind": "Create", "item": {"title": "u"}}]
+        )
         assert ok.status_code == 200
     await engine.dispose()
 
 
-async def test_batch_edit_rejects_update_at_the_service_level():
+async def test_apply_edits_rejects_update_at_the_service_level():
     """The backend's own guard refuses an ``Update`` when the resource hides it."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
 
     class CreateOnlyThread(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Action]:
-            return frozenset({Action.CREATE, Action.READ, Action.BATCH_EDIT})
+            return frozenset({Action.CREATE, Action.READ})
 
     threads = CreateOnlyThread(Thread, session_factory=maker)
     async with engine.begin() as conn:
@@ -337,11 +351,11 @@ async def test_batch_edit_rejects_update_at_the_service_level():
     async with threads, await threads.get_service() as service:
         dto = threads.get_dto_type().model_validate({"title": "t"})
         with pytest.raises(InvalidInputError, match="update is not supported"):
-            await service.batch_edit([Update(item=dto)])
+            await service.apply_edits([Update(item=dto)])
     await engine.dispose()
 
 
-async def test_batch_edit_narrows_to_declared_actions():
+async def test_apply_edits_narrows_to_declared_actions():
     """A resource that exposes no create / delete cannot reach them via batch-edit."""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -355,7 +369,6 @@ async def test_batch_edit_narrows_to_declared_actions():
                     Action.SEARCH,
                     Action.COUNT,
                     Action.BATCH_READ,
-                    Action.BATCH_EDIT,
                 }
             )
 
@@ -367,20 +380,33 @@ async def test_batch_edit_narrows_to_declared_actions():
     async for c in _make_client(manifest, create_app(manifest)):
         # The create / delete routes are correctly not mounted...
         assert (await c.post("/threads", json={"title": "t"})).status_code == 405
-        # ...and neither kind is accepted through batch-edit.
+        # ...and neither kind is accepted through /batch-edit.
         assert (
-            await c.post("/threads/batch-edit", json=[{"kind": "Create", "item": {"title": "x"}}])
+            await c.post(
+                "/batch-edit",
+                json=[{"resource": "threads", "kind": "Create", "item": {"title": "x"}}],
+            )
         ).status_code == 422
         assert (
-            await c.post("/threads/batch-edit", json=[{"kind": "Delete", "id": 1}])
+            await c.post("/batch-edit", json=[{"resource": "threads", "kind": "Delete", "id": 1}])
         ).status_code == 422
         # An update of a missing id is a no-op (never a write), so nothing was
         # created and nothing exists.
-        assert (
-            await c.post(
-                "/threads/batch-edit", json=[{"kind": "Update", "item": {"id": 1, "title": "u"}}]
-            )
-        ).json() == [None]
+        assert [
+            item["result"]
+            for item in (
+                await c.post(
+                    "/batch-edit",
+                    json=[
+                        {
+                            "resource": "threads",
+                            "kind": "Update",
+                            "item": {"id": 1, "title": "u"},
+                        }
+                    ],
+                )
+            ).json()
+        ] == [None]
         assert (await c.get("/threads/count")).json() == 0
     await engine.dispose()
 
@@ -553,7 +579,8 @@ async def test_register_routes_registers_every_action_and_tags_the_router():
     assert ("/threads", "GET") in paths
     assert ("/threads/count", "GET") in paths
     assert ("/threads/batch-read", "GET") in paths
-    assert ("/threads/batch-edit", "POST") in paths
+    # No per-resource batch write: the app-level ``/batch-edit`` is the only one.
+    assert ("/threads/batch-edit", "POST") not in paths
     assert ("/threads/{id}", "GET") in paths
     assert ("/threads/{id}", "PATCH") in paths
     assert ("/threads/{id}", "DELETE") in paths

@@ -40,7 +40,7 @@ module rbac {
   type Row = { id: int, owner: int, group: int }
 
   // The standard resource actions, mirroring core/service.Action.
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   // A filter as the set of rows it matches.
   type Filter = Set[Row]
@@ -73,7 +73,6 @@ module rbac {
   pure def normalizeAction(act: Action): Action =
     if (act == Count) Search
     else if (act == BatchRead) Read
-    else if (act == BatchEdit) Update
     else act
 
   // Whether an action reads (ReadOnly grants these).
@@ -242,7 +241,6 @@ module rbac {
   run creatorScopesToOwnedRows = {
     all {
       assert(reducePolicy(Creator, Read, 1, true) == Set({ id: 1, owner: 1, group: 10 }, { id: 2, owner: 1, group: 20 })),
-      assert(reducePolicy(Creator, BatchEdit, 2, true) == Set({ id: 3, owner: 2, group: 10 }, { id: 4, owner: 2, group: 30 })),
       assert(reducePolicy(Creator, Create, 1, true) == allRows),
       assert(reducePolicy(Creator, Read, 1, false) == Set()),
       assert(reducePolicy(Creator, Create, 1, false) == Set()),
@@ -405,7 +403,7 @@ module rbac {
   }
 
   pure val allActions: Set[Action] =
-    Set(Create, Read, Update, Delete, Search, Count, BatchRead, BatchEdit)
+    Set(Create, Read, Update, Delete, Search, Count, BatchRead)
 
   pure val users: Set[int] = Set(1, 2, 3, 99)
 

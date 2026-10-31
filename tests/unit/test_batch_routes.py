@@ -87,7 +87,7 @@ async def client() -> AsyncIterator[AsyncClient]:
 # ---------------------------------------------------------------------------
 
 
-async def test_batch_edit_spans_resources_in_one_request(client: AsyncClient):
+async def test_apply_edits_spans_resources_in_one_request(client: AsyncClient):
     thread = (await client.post("/threads", json={"title": "t"})).json()
 
     response = await client.post(
@@ -408,7 +408,7 @@ async def test_a_kind_the_resource_does_not_declare_is_rejected(client: AsyncCli
     async with manifest:
         transport = ASGITransport(app=create_app(manifest))
         async with AsyncClient(transport=transport, base_url="http://test") as c:
-            # ``threads`` declares no batch_edit, so it is not in the union at all.
+            # ``threads`` declares no write action, so it is not in the union at all.
             assert (
                 await c.post(
                     "/batch-edit", json=[{"resource": "threads", "kind": "Delete", "id": 1}]
@@ -454,17 +454,17 @@ async def test_a_hidden_resource_is_not_reachable():
 # ---------------------------------------------------------------------------
 
 
-async def test_batch_edit_is_mounted_by_default(client: AsyncClient):
+async def test_apply_edits_is_mounted_by_default(client: AsyncClient):
     assert "/batch-edit" in (await client.get("/openapi.json")).json()["paths"]
 
 
-def test_batch_edit_can_be_disabled():
+def test_apply_edits_can_be_disabled():
     threads = SqlResource(Thread, session_factory=_dummy_maker())
     manifest: Manifest = Manifest(resources=[threads])
     assert "/batch-edit" not in create_app(manifest, batch_edit=False).openapi()["paths"]
 
 
-def test_batch_edit_can_be_mounted_on_a_custom_path():
+def test_apply_edits_can_be_mounted_on_a_custom_path():
     threads = SqlResource(Thread, session_factory=_dummy_maker())
     manifest: Manifest = Manifest(resources=[threads])
     paths = create_app(manifest, batch_edit_path="/ops/edits").openapi()["paths"]
@@ -697,9 +697,9 @@ async def test_a_custom_builder_wraps_the_service_the_route_uses(client: AsyncCl
         async def __aexit__(self, *exc: object) -> None:
             await self._inner.__aexit__(*exc)
 
-        async def batch_edit(self, edits: Any) -> Any:
-            seen.append("batch_edit")
-            return await self._inner.batch_edit(edits)
+        async def apply_edits(self, edits: Any) -> Any:
+            seen.append("apply_edits")
+            return await self._inner.apply_edits(edits)
 
     class Wrapping(DependencyBuilder):
         async def build_service(self, request: Request, resource: Resource[Any, Any]) -> Any:
@@ -718,7 +718,7 @@ async def test_a_custom_builder_wraps_the_service_the_route_uses(client: AsyncCl
                 json=[{"resource": "threads", "kind": "Create", "item": {"title": "t"}}],
             )
             assert response.status_code == 200
-    assert seen == ["batch_edit"]
+    assert seen == ["apply_edits"]
     await engine.dispose()
 
 
@@ -781,9 +781,9 @@ async def test_a_denying_policy_blocks_a_batch_edit():
     bypass: the batch calls the builder, so the same wrapper that guards
     ``POST /threads`` guards ``POST /batch-edit``.
 
-    A denied edit answers ``null`` rather than ``403``, matching the
-    per-resource ``batch-edit`` contract (``AuthorizedService.batch_edit``): the
-    position is a miss, and the row is never written.
+    A denied edit answers ``null`` rather than ``403``, matching the singular
+    batch contract (``AuthorizedService.apply_edits``): the position is a miss,
+    and the row is never written.
     """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -933,7 +933,6 @@ class _MutableListResource(ListResource[Any, Any]):
                 Action.SEARCH,
                 Action.UPDATE,
                 Action.DELETE,
-                Action.BATCH_EDIT,
             }
         )
 

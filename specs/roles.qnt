@@ -40,7 +40,7 @@
 
 module roles {
   // The standard resource actions, mirroring core/service.Action.
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   // A filter over rows: the chain NoMatchF <= OwnF <= AllF.
   type Filter = NoMatchF | OwnF | AllF
@@ -52,7 +52,6 @@ module roles {
   pure def normalizeAction(act: Action): Action =
     if (act == Count) Search
     else if (act == BatchRead) Read
-    else if (act == BatchEdit) Update
     else act
 
   // Whether an action reads (ReadOnly grants these).
@@ -141,7 +140,7 @@ module roles {
   pure val resources: Set[str] = Set("threads", "messages")
 
   pure val allActions: Set[Action] =
-    Set(Create, Read, Update, Delete, Search, Count, BatchRead, BatchEdit)
+    Set(Create, Read, Update, Delete, Search, Count, BatchRead)
 
   // Every role set over the five names (2^5 = 32), enumerated compositionally.
   pure val roleSets: Set[Set[str]] =
@@ -168,7 +167,6 @@ module roles {
       assert(reducePolicy(ReadOnly, Create, true) == NoMatchF),
       assert(reducePolicy(ReadOnly, Update, true) == NoMatchF),
       assert(reducePolicy(ReadOnly, Delete, true) == NoMatchF),
-      assert(reducePolicy(ReadOnly, BatchEdit, true) == NoMatchF),
     }
   }
 
@@ -176,7 +174,6 @@ module roles {
     all {
       assert(normalizeAction(Count) == Search),
       assert(normalizeAction(BatchRead) == Read),
-      assert(normalizeAction(BatchEdit) == Update),
       assert(normalizeAction(Create) == Create),
     }
   }

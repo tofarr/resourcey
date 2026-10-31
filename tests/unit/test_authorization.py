@@ -114,14 +114,13 @@ async def test_read_only_grants_read_like_and_denies_the_rest():
     policy = ReadOnly()
     for action in (Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ):
         assert isinstance(await policy.to_search_filter(None, action), AllFilter), action
-    for action in (Action.CREATE, Action.UPDATE, Action.DELETE, Action.BATCH_EDIT):
+    for action in (Action.CREATE, Action.UPDATE, Action.DELETE):
         assert isinstance(await policy.to_search_filter(None, action), NoMatchFilter), action
 
 
 def test_normalize_action_reduces_the_derived_members():
     assert normalize_action(Action.COUNT) is Action.SEARCH
     assert normalize_action(Action.BATCH_READ) is Action.READ
-    assert normalize_action(Action.BATCH_EDIT) is Action.UPDATE
     for action in (Action.CREATE, Action.READ, Action.UPDATE, Action.DELETE, Action.SEARCH):
         assert normalize_action(action) is action
 
@@ -185,7 +184,7 @@ async def test_allow_all_permits_the_full_action_surface(sql_resource):
         assert [item.label for item in page.items] == ["b"]
         batch = await service.batch_read([created.id, 999])
         assert batch[0].label == "b" and batch[1] is None
-        edits = await service.batch_edit(
+        edits = await service.apply_edits(
             [
                 Create(item=_dto(resource)(label="c")),
                 Update(item=_dto(resource)(id=created.id, label="d")),
@@ -217,9 +216,9 @@ async def test_deny_all_enforces_the_matrix(sql_resource):
         assert await service.count() == 0
         # Batch positions are None (no read, no write).
         assert await service.batch_read([seeded.id]) == [None]
-        assert await service.batch_edit([Update(item=_dto(resource)(id=seeded.id, label="z"))]) == [
-            None
-        ]
+        assert await service.apply_edits(
+            [Update(item=_dto(resource)(id=seeded.id, label="z"))]
+        ) == [None]
 
 
 async def test_read_only_allows_reads_and_denies_writes(sql_resource):
@@ -236,10 +235,10 @@ async def test_read_only_allows_reads_and_denies_writes(sql_resource):
             await service.update(_dto(resource)(id=seeded.id, label="y"))
         with pytest.raises(NotFoundError):
             await service.delete(seeded.id)
-        # A batch_edit update is denied (no write); the position is None.
-        assert await service.batch_edit([Update(item=_dto(resource)(id=seeded.id, label="z"))]) == [
-            None
-        ]
+        # A batch update is denied (no write); the position is None.
+        assert await service.apply_edits(
+            [Update(item=_dto(resource)(id=seeded.id, label="z"))]
+        ) == [None]
 
 
 async def test_search_pushes_the_permission_filter_into_the_request(sql_resource):
@@ -304,10 +303,10 @@ async def test_update_without_an_identifier_reaches_the_inner(sql_resource):
             await service.update(_dto(resource)(label="x"))
 
 
-async def test_batch_edit_with_an_absent_or_idless_target_is_none(sql_resource):
+async def test_apply_edits_with_an_absent_or_idless_target_is_none(sql_resource):
     _maker, resource = sql_resource
     async with _authorized(await resource.get_service({}), AllowAll(), resource) as service:
-        edits = await service.batch_edit(
+        edits = await service.apply_edits(
             [
                 Update(item=_dto(resource)(id=999, label="x")),  # absent -> None
                 Update(item=_dto(resource)(label="y")),  # no id -> None
@@ -370,13 +369,13 @@ async def test_update_combines_the_policy_filter_with_the_caller_condition(sql_r
         assert (await raw.read(mine.id)).label == "mine!"
 
 
-async def test_batch_edit_folds_the_policy_into_each_update(sql_resource):
+async def test_apply_edits_folds_the_policy_into_each_update(sql_resource):
     _maker, resource = sql_resource
     mine, theirs = await _seed(resource, "mine", "theirs")
     async with _authorized(
         await resource.get_service({}), LabelPolicy(label="mine"), resource
     ) as service:
-        results = await service.batch_edit(
+        results = await service.apply_edits(
             [
                 Update(item=_dto(resource)(id=mine.id, label="mine!")),
                 Update(item=_dto(resource)(id=theirs.id, label="hacked")),
@@ -504,3 +503,64 @@ async def test_absent_key_is_unauthorized_under_any_policy(authz_app):
     app, manifest = authz_app(AllowAll())
     async with manifest, await _client(app) as client:
         assert (await client.get("/items")).status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# The batch write gates each kind on its own action (issue #179)
+# ---------------------------------------------------------------------------
+
+
+class _UpdateOnlyUpdateDeniesCreate(Policy):
+    """May update and delete, but never create — the split a single write gate hides."""
+
+    async def to_search_filter(self, user_id: Any, action: Action) -> Any:
+        from resourcey.auth.auth_policy import AllFilter, NoMatchFilter
+
+        if action is Action.CREATE:
+            return NoMatchFilter()
+        return AllFilter()
+
+
+async def test_a_batch_create_is_gated_on_create_not_on_a_shared_write_action(sql_resource):
+    """A ``Create`` node asks ``Action.CREATE``; a policy denying create refuses it.
+
+    Gating the create on a single write action (``batch_edit``, which reduced to
+    ``UPDATE``) let a caller who may update but not create insert rows through a
+    batch. The singular ``create()`` was correctly refused, so the two paths
+    disagreed — a privilege escalation.
+    """
+    _maker, resource = sql_resource
+    (seeded,) = await _seed(resource, "a")
+    policy = _UpdateOnlyUpdateDeniesCreate()
+    async with _authorized(await resource.get_service({}), policy, resource) as service:
+        # The singular path refuses the create.
+        with pytest.raises(ForbiddenError):
+            await service.create(_dto(resource)(label="singular"))
+        # ...and so must the batch path: a refused node writes nothing.
+        results = await service.apply_edits([Create(item=_dto(resource)(label="batched"))])
+        assert results == [None]
+        # Nothing was inserted; the seeded row is untouched and the update works.
+        assert await service.count() == 1
+        assert (await service.update(_dto(resource)(id=seeded.id, label="b"))).label == "b"
+
+
+async def test_a_batch_create_is_gated_on_create_over_the_default_route(authz_app):
+    """The same gate holds through ``POST /batch-edit``, which is mounted by default."""
+    from resourcey.auth.auth_policy import Acl
+
+    app, manifest = authz_app(Acl(ids=frozenset({1}), on_create=DenyAll()))
+    async with manifest, await _client(app) as client:
+        headers = {API_KEY_HEADER_NAME: "secret-one"}
+        # The singular route refuses the create.
+        assert (
+            await client.post("/items", json={"label": "single"}, headers=headers)
+        ).status_code == 403
+        # The cross-resource route must refuse it too, and write nothing.
+        cross = await client.post(
+            "/batch-edit",
+            json=[{"resource": "items", "kind": "Create", "item": {"label": "cross"}}],
+            headers=headers,
+        )
+        assert cross.status_code == 200
+        assert [item["result"] for item in cross.json()] == [None]
+        assert (await client.get("/items", headers=headers)).json()["items"] == []

@@ -27,13 +27,13 @@
 
 module cache_defaults {
   // The standard actions, as far as read-only detection cares.
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | BatchEdit
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
 
   // The strategy the default selection can return.
   type Strategy = Optimistic | LastModified | Etag
 
   // The write actions: advertising any of these makes a resource writable.
-  pure val writeActions: Set[Action] = Set(Create, Update, Delete, BatchEdit)
+  pure val writeActions: Set[Action] = Set(Create, Update, Delete)
 
   // A resource is read-only when it advertises no write action.
   pure def isReadOnly(supported: Set[Action]): bool =
@@ -62,7 +62,7 @@ module cache_defaults {
 
   val readOnlyActions: Set[Action] = Set(Read, Search, Count, BatchRead)
   val allActions: Set[Action] = Set(
-    Create, Read, Update, Delete, Search, Count, BatchRead, BatchEdit
+    Create, Read, Update, Delete, Search, Count, BatchRead
   )
 
   run readOnlyIsOptimistic = {
@@ -136,7 +136,6 @@ module cache_defaults {
       not(isReadOnly(Set(Read, Create))),
       not(isReadOnly(Set(Read, Update))),
       not(isReadOnly(Set(Read, Delete))),
-      not(isReadOnly(Set(Read, BatchEdit))),
       // selectionIsTotal.
       readOnlyExpireIn > 0,
       // readOnlyWindowIsPrivate.

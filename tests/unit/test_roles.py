@@ -112,7 +112,7 @@ async def test_owner_scopes_reads_and_writes_to_the_caller():
     owner = Owner(owner_field="owner_id")
     for action in (Action.READ, Action.SEARCH, Action.COUNT, Action.BATCH_READ):
         assert isinstance(await owner.to_search_filter(ALICE, action), AttrFilter), action
-    for action in (Action.UPDATE, Action.DELETE, Action.BATCH_EDIT):
+    for action in (Action.UPDATE, Action.DELETE):
         assert isinstance(await owner.to_search_filter(ALICE, action), AttrFilter), action
     # Create is unscoped (the row has no owner yet).
     assert isinstance(await owner.to_search_filter(ALICE, Action.CREATE), AllFilter)

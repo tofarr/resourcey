@@ -180,8 +180,11 @@ filter per action:
   (404), so existence is not leaked;
 * a denied **search** / **count** `and_`-pushes the filter down and yields an
   empty page / `0` (never an error);
-* **batch_read** / **batch_edit** positions are `None`;
-* for **update** / **delete** (and each write node of a **batch_edit**) the
+* **batch_read** / **apply_edits** positions are `None`;
+* each write node of an **apply_edits** batch is authorized against **its own**
+  singular action — a `Create` node asks `Action.CREATE`, never a shared write
+  action — so a policy that refuses create refuses the batch create too;
+* for **update** / **delete** (and each write node of a batch) the
   action's filter is folded into the write's own **condition** as an additional
   (AND) constraint — scope is enforced by the *same* atomic write, and a row the
   policy does not grant is a condition miss.

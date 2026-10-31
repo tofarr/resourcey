@@ -325,7 +325,7 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         """The inner service, wrapped so the view's action set is enforced.
 
         The transport projects the inner DTOs onto the view's REST models; the
-        wrapper re-checks ``batch_edit`` against the view's actions.
+        wrapper re-checks ``apply_edits`` against the view's actions.
         """
         inner = await self._inner.get_service(ctx)
         return ViewService(inner, self._actions)

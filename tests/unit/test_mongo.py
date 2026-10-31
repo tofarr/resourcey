@@ -765,12 +765,12 @@ class TestActions:
             with pytest.raises(UnsupportedFilterError):
                 await service.delete(created.id, condition=condition)
 
-    async def test_batch_edit_applies_conditions_positionally(self, widgets) -> None:
+    async def test_apply_edits_applies_conditions_positionally(self, widgets) -> None:
         first = await _seed(widgets, label="one")
         second = await _seed(widgets, label="two")
         dto = widgets.get_dto_type()
         async with await widgets.get_service() as service:
-            results = await service.batch_edit(
+            results = await service.apply_edits(
                 [
                     Update(
                         item=dto(id=first.id, label="one!"),
@@ -824,10 +824,10 @@ class TestActions:
         async with await widgets.get_service() as service:
             assert await service.batch_read([]) == []
 
-    async def test_batch_edit_mixes_create_update_delete(self, widgets) -> None:
+    async def test_apply_edits_mixes_create_update_delete(self, widgets) -> None:
         existing = await _seed(widgets, label="existing")
         async with await widgets.get_service() as service:
-            results = await service.batch_edit(
+            results = await service.apply_edits(
                 [
                     Create(item=widgets.get_dto_type()(label="new")),
                     Update(item=widgets.get_dto_type()(id=existing.id, label="changed")),
@@ -838,9 +838,9 @@ class TestActions:
         assert results[1] is not None and results[1].label == "changed"
         assert results[2] is None
 
-    async def test_batch_edit_update_miss_yields_none(self, widgets) -> None:
+    async def test_apply_edits_update_miss_yields_none(self, widgets) -> None:
         async with await widgets.get_service() as service:
-            results = await service.batch_edit(
+            results = await service.apply_edits(
                 [Update(item=widgets.get_dto_type()(id=uuid4(), label="x"))]
             )
         assert results == [None]
@@ -871,17 +871,17 @@ class TestActions:
             updated = await service.update(payload)
         assert updated.label == "stays"
 
-    async def test_batch_edit_rejects_a_disallowed_create(self) -> None:
+    async def test_apply_edits_rejects_a_disallowed_create(self) -> None:
         manager, resource = await _resource(WidgetDTO, ReadOnlyResource)
         async with manager, resource, await resource.get_service() as service:
             with pytest.raises(InvalidInputError, match="cannot create"):
-                await service.batch_edit([Create(item=resource.get_dto_type()(label="x"))])
+                await service.apply_edits([Create(item=resource.get_dto_type()(label="x"))])
 
-    async def test_batch_edit_rejects_a_disallowed_delete(self) -> None:
+    async def test_apply_edits_rejects_a_disallowed_delete(self) -> None:
         manager, resource = await _resource(WidgetDTO, ReadOnlyResource)
         async with manager, resource, await resource.get_service() as service:
             with pytest.raises(InvalidInputError, match="cannot delete"):
-                await service.batch_edit([Delete(id=uuid4())])
+                await service.apply_edits([Delete(id=uuid4())])
 
     async def test_iterated_documents_without_a_filter(self) -> None:
         manager, resource = await _resource(WidgetDTO, IteratingResource)

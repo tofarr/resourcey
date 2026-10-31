@@ -196,10 +196,18 @@ class TestTriggers:
         caplog.clear()
         with caplog.at_level(logging.INFO, logger=_RECEIVER_LOGGER):
             resp = await client.post(
-                "/messages/batch-edit",
+                "/batch-edit",
                 json=[
-                    {"kind": "Create", "item": {"thread_id": thread["id"], "text": "a"}},
-                    {"kind": "Create", "item": {"thread_id": thread["id"], "text": "b"}},
+                    {
+                        "resource": "messages",
+                        "kind": "Create",
+                        "item": {"thread_id": thread["id"], "text": "a"},
+                    },
+                    {
+                        "resource": "messages",
+                        "kind": "Create",
+                        "item": {"thread_id": thread["id"], "text": "b"},
+                    },
                 ],
             )
         assert resp.status_code == 200

@@ -1,12 +1,12 @@
 """The app-level ``POST /batch-edit`` route: one batch across every exposed resource.
 
-``POST /{resource}/batch-edit`` edits **one** resource. This module adds the
-cross-resource counterpart, so a client can change a graph — a thread and its
+This is the **only** batch write surface: there is no per-resource
+``/{resource}/batch-edit``. A client changes a graph — a thread and its
 messages — in one request.
 
-The wire contract is the per-resource one with a ``resource`` field added:
-a flat, ordered list of ``Create`` / ``Update`` / ``Delete`` nodes, each naming
-its target by path segment, answered by a positionally aligned list.
+The wire contract is a flat, ordered list of ``Create`` / ``Update`` /
+``Delete`` nodes, each naming its target resource by path segment, answered by a
+positionally aligned list.
 
 Two properties are deliberate:
 
@@ -37,35 +37,60 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Request
-from pydantic import BaseModel, Field, create_model
+from pydantic import (
+    BaseModel,
+    Field,
+    WithJsonSchema,
+    create_model,
+    field_validator,
+)
 
+from resourcey.core.dto import RestModels, request_to_dto
 from resourcey.core.errors import InvalidInputError
 from resourcey.core.manifest import Manifest
 from resourcey.core.resource import Resource
 from resourcey.core.service import (
     Action,
     Create,
+    Delete,
     Edit,
+    ServiceError,
     Update,
     normalize_actions,
 )
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
 from resourcey.http.http_config import RequestLimitsConfig
 
-# The per-resource batch route and this one build the same edit shapes and
-# project the same results, so the helpers are shared rather than duplicated.
-from resourcey.http.routes import (
-    _batch_edit_body,
-    _batch_edit_node,
-    _dump,
-    _id_python_type,
-    _project_edit_result,
-    _route,
-)
+# Shared with the singular routes: a batch response is projected and serialised
+# exactly like a single write, so the helpers live there.
+from resourcey.http.routes import _dump, _id_python_type, _project, _route
+from resourcey.util.search_filter import SearchFilter
 
 DEFAULT_BATCH_PATH = "/batch-edit"
 
 _TAGS = ["Batch"]
+
+# The ``condition`` wire field is typed ``Any`` rather than the native
+# ``SearchFilter`` union: FastAPI re-generates a JSON schema for the parameterised
+# generic base and hits ``DiscriminatedUnionMixin``'s "no subclasses" guard, even
+# under a ``WithJsonSchema`` override.
+_WireCondition = Annotated[Any, WithJsonSchema({"type": "object", "title": "SearchFilter"})]
+
+
+def _resolve_wire_condition(value: Any) -> Any:
+    """Resolve a JSON condition into a :class:`SearchFilter`, else pass through.
+
+    A condition that is neither a filter nor a JSON object is rejected here
+    rather than reaching a backend, which would dereference it as a filter tree
+    and raise an ``AttributeError`` (a ``500`` on malformed input).
+    """
+    if isinstance(value, dict):
+        return SearchFilter.model_validate(value)
+    if value is None or isinstance(value, SearchFilter):
+        return value
+    raise ValueError(
+        f"condition must be a JSON object describing a SearchFilter, not {type(value).__name__}"
+    )
 
 
 def register_batch_routes(
@@ -83,7 +108,7 @@ def register_batch_routes(
     Mounted by :func:`~resourcey.http.app.create_app` /
     :func:`~resourcey.http.app.add_to_app` by default; call it directly to mount
     on a custom ``path`` / ``prefix``. Nothing is registered when the manifest has
-    no exposed resource, or when no exposed resource declares ``batch_edit``.
+    no exposed resource, or when no exposed resource declares a write action.
 
     ``dependency_builder`` decides how each resource's service is built. Every
     node goes through it, so an authorizing builder applies its policy to each
@@ -170,13 +195,16 @@ class _BatchTarget:
         self.id_type = _id_python_type(self.models, self.id_field)
 
 
+# The actions a resource must declare at least one of to be a batch-edit target.
+_WRITE_ACTIONS: frozenset[Action] = frozenset({Action.CREATE, Action.UPDATE, Action.DELETE})
+
+
 def _batch_targets(manifest: Manifest) -> dict[str, _BatchTarget]:
-    """The exposed resources that admit a ``batch_edit``, keyed by path segment.
+    """The exposed resources that admit a write, keyed by path segment.
 
     A hidden resource contributes nothing, so the endpoint cannot reach one. A
-    resource without ``batch_edit`` (after normalisation, so one with no write
-    action at all) is skipped too, which is the same gate that decides whether
-    its own ``/{resource}/batch-edit`` route exists.
+    resource declaring no write action at all is skipped: there is no node kind
+    it could accept.
     """
     targets: dict[str, _BatchTarget] = {}
     for resource in manifest.resources:
@@ -184,7 +212,7 @@ def _batch_targets(manifest: Manifest) -> dict[str, _BatchTarget]:
         if exposed is None:
             continue
         actions = normalize_actions(exposed.get_supported_actions())
-        if Action.BATCH_EDIT not in actions:
+        if actions.isdisjoint(_WRITE_ACTIONS):
             continue
         targets[exposed.get_resource_path()] = _BatchTarget(exposed, actions)
     return targets
@@ -198,10 +226,10 @@ def _batch_targets(manifest: Manifest) -> dict[str, _BatchTarget]:
 def _cross_batch_body(targets: dict[str, _BatchTarget]) -> Any:
     """Build the batch body: a ``resource``-discriminated union of per-resource unions.
 
-    Each resource contributes the *same* ``kind`` union its own
-    ``/{resource}/batch-edit`` accepts, wrapped with a ``resource`` tag, so a
-    node's ``kind`` is checked against that resource's declared actions at
-    validation time and the two routes cannot drift apart.
+    Each resource contributes its own ``kind`` union, narrowed to the actions it
+    declares and wrapped with a ``resource`` tag, so a node's ``kind`` is checked
+    against that resource's declared actions at validation time rather than at
+    execution.
     """
     members = [_resource_members(target) for target in targets.values()]
     union = members[0]
@@ -212,7 +240,7 @@ def _cross_batch_body(targets: dict[str, _BatchTarget]) -> Any:
 
 def _resource_members(target: _BatchTarget) -> Any:
     """One resource's nested ``kind`` union, tagged with its path segment."""
-    inner = _batch_edit_body(
+    inner = _resource_edit_body(
         target.models.create_request,
         target.models.update_request,
         target.id_field,
@@ -301,7 +329,7 @@ async def _apply_run(
     """Apply one resource's consecutive edits through a single service held on ``stack``."""
     service = await stack.enter_async_context(await builder.build_service(request, target.resource))
     edits = [_edit_node(item, target) for item in run]
-    edited = await service.batch_edit(edits)
+    edited = await service.apply_edits(edits)
     context = service.serialization_context()
     return [
         _result_body(target, edit, result, context)
@@ -311,7 +339,13 @@ async def _apply_run(
 
 def _edit_node(item: BaseModel, target: _BatchTarget) -> Any:
     """Fold a validated body item into its :class:`Edit` service node."""
-    return _batch_edit_node(item, target.dto_model, target.id_field)
+    kind = item.kind  # type: ignore[attr-defined]
+    if kind == "Create":
+        return Create(item=request_to_dto(target.dto_model, item.item))  # type: ignore[attr-defined]
+    condition = getattr(item, "condition", None)
+    if kind == "Update":
+        return Update(item=request_to_dto(target.dto_model, item.item), condition=condition)  # type: ignore[attr-defined]
+    return Delete(id=getattr(item, target.id_field), condition=condition)
 
 
 def _result_body(
@@ -340,3 +374,93 @@ def _edit_kind(edit: Edit) -> str:
     if isinstance(edit, Update):
         return "Update"
     return "Delete"
+
+
+def _resource_edit_body(
+    create_request: type[BaseModel],
+    update_request: type[BaseModel],
+    id_field: str,
+    id_type: Any,
+    allow_create: bool,
+    allow_update: bool,
+    allow_delete: bool,
+) -> Any:
+    """Build the ``batch-edit`` body: a ``kind``-discriminated union of edits.
+
+    The wire shapes match the ``Create`` / ``Update`` / ``Delete`` service
+    nodes. ``Delete`` carries the identifier directly rather than nesting it
+    under ``item``: there is no payload to nest.
+
+    The ``allow_*`` flags narrow the union to the declared actions. A resource
+    allowing none is not a batch target at all, so this guard is unreachable
+    from :func:`register_batch_routes` and only catches a direct caller.
+    """
+    members: list[Any] = []
+    if allow_create:
+        members.append(
+            create_model(
+                f"{create_request.__name__}CreateEdit",
+                kind=(Literal["Create"], ...),
+                item=(create_request, ...),
+            )
+        )
+    if allow_update:
+        update_fields = {
+            name: (field.annotation, field) for name, field in update_request.model_fields.items()
+        }
+        update_item = create_model(  # type: ignore[call-overload]
+            f"{update_request.__name__}BatchUpdateItem",
+            **{id_field: (id_type, ...)},  # the id is required on each update
+            **update_fields,
+        )
+        members.append(
+            create_model(
+                f"{update_request.__name__}UpdateEdit",
+                kind=(Literal["Update"], ...),
+                item=(update_item, ...),
+                condition=(_WireCondition, None),  # optional; applied only if the row matches
+                __validators__={
+                    "resolve_condition": field_validator("condition", mode="before")(
+                        _resolve_wire_condition
+                    )
+                },
+            )
+        )
+    if allow_delete:
+        members.append(
+            create_model(  # type: ignore[call-overload]
+                f"{create_request.__name__}DeleteEdit",
+                kind=(Literal["Delete"], ...),
+                **{id_field: (id_type, ...)},
+                condition=(_WireCondition, None),  # optional; applied only if the row matches
+                __validators__={
+                    "resolve_condition": field_validator("condition", mode="before")(
+                        _resolve_wire_condition
+                    )
+                },
+            )
+        )
+    if not members:
+        raise ServiceError(
+            "batch-edit body has no members: a resource with no write action is not a batch target."
+        )
+    edits = members[0]
+    for member in members[1:]:
+        edits = edits | member
+    return Annotated[edits, Field(discriminator="kind")]
+
+
+def _project_edit_result(
+    edit: Any, result: BaseModel | None, models: RestModels, context: dict[str, Any] | None = None
+) -> BaseModel | None:
+    """Project a batch-edit result onto the shape for its edit.
+
+    A delete or a miss yields ``None``; a create projects onto the create
+    response (so a one-time-reveal field survives) and an update onto the update
+    response.
+    """
+    if isinstance(edit, Delete) or result is None:
+        return None
+    if isinstance(edit, Create):
+        return _project(result, models.create_response, context)
+    return _project(result, models.update_response, context)

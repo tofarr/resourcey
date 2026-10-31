@@ -159,20 +159,10 @@ async def test_delete_removes_the_object(client: AsyncClient) -> None:
     assert (await client.get(f"/files/{created['id']}")).status_code == 404
 
 
-async def test_batch_edit_cannot_create(client: AsyncClient) -> None:
-    """A JSON batch body cannot carry a file upload -- only delete is offered."""
-    resp = await client.post("/files/batch-edit", json=[{"kind": "Create", "item": {}}])
-    assert resp.status_code == 422
-
-
-async def test_batch_edit_can_delete(client: AsyncClient) -> None:
-    created = await _create_file(client)
-    resp = await client.post(
-        "/files/batch-edit", json=[{"kind": "Delete", "id": created["id"]}]
-    )
-    assert resp.status_code == 200
-    assert resp.json() == [None]
-    assert (await client.get(f"/files/{created['id']}")).status_code == 404
+async def test_there_is_no_per_resource_batch_edit(client: AsyncClient) -> None:
+    """``POST /batch-edit`` is the only batch write; ``files`` has no route of its own."""
+    resp = await client.post("/files/batch-edit", json=[{"kind": "Delete", "id": "x"}])
+    assert resp.status_code == 405
 
 
 async def test_max_size_rejects_an_oversize_upload(tmp_path: Path) -> None:
