@@ -21,11 +21,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from resourcey.core.manifest import Manifest
-from resourcey.http.batch_routes import (
-    DEFAULT_BATCH_PATH,
-    DEFAULT_MAX_EDITS,
-    register_batch_routes,
-)
+from resourcey.http.batch_routes import DEFAULT_BATCH_PATH, register_batch_routes
 from resourcey.http.dependency_builder import DependencyBuilder
 from resourcey.http.routes import register_error_handlers, register_routes
 
@@ -38,7 +34,7 @@ def create_app(
     tags: Sequence[str] | None = None,
     batch_edit: bool = True,
     batch_edit_path: str = DEFAULT_BATCH_PATH,
-    batch_edit_max_edits: int | None = DEFAULT_MAX_EDITS,
+    batch_edit_max_edits: int | None = None,
 ) -> FastAPI:
     """Build a fresh FastAPI app wired to this manifest's lifecycle.
 
@@ -55,9 +51,10 @@ def create_app(
         batch_edit: Mount the app-level ``POST /batch-edit`` that spans every
             exposed resource. On by default; ``False`` removes that write surface.
         batch_edit_path: The path for that route (default ``/batch-edit``).
-        batch_edit_max_edits: Cap on nodes in one batch (``None`` disables it).
-            A cross-resource batch is the easiest way to turn one request into
-            unbounded work, so the cap is on by default.
+        batch_edit_max_edits: Cap on nodes in one batch. ``None`` (the default)
+            reads ``RequestLimitsConfig.max_batch_edits`` — ``APP_MAX_BATCH_EDITS``,
+            default 100. A cross-resource batch is the easiest way to turn one
+            request into unbounded work, so it is never uncapped.
     """
     app = FastAPI(lifespan=_lifespan(manifest))
     _configure_cors(app, cors_origins)
@@ -82,7 +79,7 @@ def add_to_app(
     tags: Sequence[str] | None = None,
     batch_edit: bool = True,
     batch_edit_path: str = DEFAULT_BATCH_PATH,
-    batch_edit_max_edits: int | None = DEFAULT_MAX_EDITS,
+    batch_edit_max_edits: int | None = None,
 ) -> None:
     """Mount routes + error handlers onto a user-owned FastAPI app.
 

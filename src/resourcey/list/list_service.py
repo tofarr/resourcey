@@ -23,10 +23,10 @@ from pydantic import BaseModel
 from resourcey.core.errors import InvalidInputError
 from resourcey.core.service import (
     DEFAULT_LIMIT,
-    STORAGE_KEY,
     NotFoundError,
     Page,
     Service,
+    storage_key,
 )
 from resourcey.util.cursor import decode_cursor, encode_cursor
 from resourcey.util.search_filter import SearchFilter
@@ -57,6 +57,7 @@ class ListService(Service[T, K]):
         self._resource = resource
         self._ctx = ctx
         self._items = items
+        self._storage_key = storage_key("list", items)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -64,7 +65,7 @@ class ListService(Service[T, K]):
 
     async def __aenter__(self) -> ListService[T, K]:
         await super().__aenter__()
-        self._ctx.setdefault(STORAGE_KEY, self._items)
+        self._ctx.setdefault(self._storage_key, self._items)
         return self
 
     # ------------------------------------------------------------------

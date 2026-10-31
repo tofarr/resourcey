@@ -22,13 +22,16 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder, Posture
 from resourcey.auth.auth_policy import AllowAll, PolicyResolver
 from resourcey.auth.auth_principal import Authenticator
+from resourcey.config.config_base import _reset_config_prefix
 from resourcey.core.dto import DtoField
+from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.manifest import Manifest
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action
 from resourcey.http.app import add_to_app, create_app
 from resourcey.http.batch_routes import register_batch_routes
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
+from resourcey.http.http_config import RequestLimitsConfig
 from resourcey.list.list_resource import ListResource
 from resourcey.sql.sql_resource import SqlResource
 from resourcey.triggers.trigger import Trigger
@@ -554,8 +557,6 @@ async def test_a_batch_over_the_cap_is_rejected_before_any_write():
         await conn.run_sync(BatchBase.metadata.create_all)
 
     manifest: Manifest = Manifest(resources=[threads])
-    # The cap is not a ``create_app`` knob, so mount the routes there and then
-    # replace the batch route with a capped one at the same path.
     app = create_app(manifest, batch_edit=False)
     register_batch_routes(app, manifest, max_edits=2)
     async with manifest:
@@ -576,13 +577,49 @@ async def test_a_batch_over_the_cap_is_rejected_before_any_write():
     await engine.dispose()
 
 
-def test_the_cap_is_none_by_default_when_disabled():
-    """``max_edits=None`` is the documented way to lift the cap."""
-    threads = SqlResource(Thread, session_factory=_dummy_maker())
+async def test_the_cap_comes_from_config_when_not_passed(monkeypatch: pytest.MonkeyPatch):
+    """``max_edits=None`` means "read the config", not "uncapped"."""
+    monkeypatch.setenv("APP_MAX_BATCH_EDITS", "1")
+    _reset_config_prefix()
+    RequestLimitsConfig.clear_instance_cache()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    threads = SqlResource(Thread, session_factory=maker)
+    async with engine.begin() as conn:
+        await conn.run_sync(BatchBase.metadata.create_all)
+
     manifest: Manifest = Manifest(resources=[threads])
-    app = FastAPI()
-    register_batch_routes(app, manifest, max_edits=None)
-    assert "/batch-edit" in app.openapi()["paths"]
+    async with manifest:
+        transport = ASGITransport(app=create_app(manifest))
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/batch-edit",
+                json=[
+                    {"resource": "threads", "kind": "Create", "item": {"title": "a"}},
+                    {"resource": "threads", "kind": "Create", "item": {"title": "b"}},
+                ],
+            )
+            assert response.status_code == 400
+            assert response.json()["error"]["code"] == "invalid_input"
+            assert (await c.get("/threads/count")).json() == 0
+    await engine.dispose()
+
+    RequestLimitsConfig.clear_instance_cache()
+    _reset_config_prefix()
+
+
+def test_a_non_positive_configured_cap_is_a_config_error(monkeypatch: pytest.MonkeyPatch):
+    """``None`` is not an "unlimited" spelling, matching the other request caps."""
+    monkeypatch.setenv("APP_MAX_BATCH_EDITS", "0")
+    _reset_config_prefix()
+    RequestLimitsConfig.clear_instance_cache()
+
+    with pytest.raises(ResourceyConfigError):
+        RequestLimitsConfig.get_instance()
+
+    RequestLimitsConfig.clear_instance_cache()
+    _reset_config_prefix()
 
 
 # ---------------------------------------------------------------------------

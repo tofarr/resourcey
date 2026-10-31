@@ -26,7 +26,6 @@ from resourcey.core.dto import apply_operation_defaults
 from resourcey.core.errors import ConflictError, InvalidInputError, UnsupportedFilterError
 from resourcey.core.service import (
     DEFAULT_LIMIT,
-    STORAGE_KEY,
     Action,
     Create,
     Delete,
@@ -34,6 +33,7 @@ from resourcey.core.service import (
     Page,
     Service,
     ServiceError,
+    StorageKey,
     Update,
 )
 from resourcey.util.cursor import decode_cursor, encode_cursor
@@ -89,11 +89,13 @@ class MongoService(Service[T, K]):
         resource: MongoResource[T, K],
         ctx: MutableMapping[Any, Any],
         collection: Any,
+        storage_key: StorageKey,
     ) -> None:
         super().__init__()
         self._resource = resource
         self._ctx = ctx
         self._collection = collection
+        self._storage_key = storage_key
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -101,7 +103,7 @@ class MongoService(Service[T, K]):
 
     async def __aenter__(self) -> MongoService[T, K]:
         await super().__aenter__()
-        self._ctx.setdefault(STORAGE_KEY, self._collection)
+        self._ctx.setdefault(self._storage_key, self._collection)
         return self
 
     # ------------------------------------------------------------------

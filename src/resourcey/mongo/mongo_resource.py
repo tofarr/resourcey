@@ -38,7 +38,7 @@ from resourcey.cache.cache_defaults import DefaultCacheStrategyMixin
 from resourcey.core.dto import DTO, RestModels
 from resourcey.core.errors import InvalidInputError
 from resourcey.core.resource import Resource
-from resourcey.core.service import STORAGE_KEY, Action, Service, ServiceError
+from resourcey.core.service import Action, Service, ServiceError, StorageKey, storage_key
 from resourcey.encryption.encryption_service import get_encryption_service
 from resourcey.mongo.mongo_client import (
     DEFAULT_MONGO_DATABASE,
@@ -243,14 +243,44 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     async def get_service(self, ctx: MutableMapping[Any, Any] | None = None) -> Service[T, K]:
         """Build a :class:`MongoService` over ``ctx`` and a collection.
 
-        A collection already seeded on ``ctx`` wins, mirroring the SQL service;
-        an explicit ``client`` wins over the manager.
+        A collection seeded on ``ctx`` under *this* resource's storage key wins;
+        one seeded for another connection or collection name is not adopted, so
+        two resources in one ctx never read each other's documents. An explicit
+        ``client`` wins over the manager.
         """
         mapping = ctx if ctx is not None else {}
-        collection = mapping.get(STORAGE_KEY)
-        if collection is None:
-            collection = await self._resolve_collection()
-        return MongoService(self, mapping, collection)
+        key = await self.get_storage_key()
+        seeded = mapping.get(key)
+        collection = seeded if seeded is not None else await self._resolve_collection()
+        return MongoService(self, mapping, collection, key)
+
+    async def get_storage_key(self) -> StorageKey:
+        """The ctx key a service of this resource stores its collection under.
+
+        Names the *connection* (manager or explicit client, connection name,
+        database, collection), so it is computable without opening the client —
+        which is what lets an escape-hatch caller seed a collection.
+        """
+        if self._client is not None:
+            # An explicit client resolves no connection, so the database is the
+            # configured one or the default -- name it exactly as the resolver does.
+            return storage_key(
+                "mongo",
+                self._client,
+                self._database_name or DEFAULT_MONGO_DATABASE,
+                self._collection_name_or_default(),
+            )
+        manager = self._client_manager or get_mongo_client_manager()
+        return storage_key(
+            "mongo",
+            manager,
+            self._connection_name,
+            self._database_name,
+            self._collection_name_or_default(),
+        )
+
+    def _collection_name_or_default(self) -> str:
+        return self._collection_name or self.get_collection_name()
 
     async def _resolve_collection(self) -> Any:
         """The collection this resource serves, resolved lazily and cached."""
@@ -261,7 +291,7 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
             manager = self._client_manager or get_mongo_client_manager()
             client, resolved_name = await manager.get_client(self._connection_name)
             database_name = database_name or resolved_name
-        name = self._collection_name or self.get_collection_name()
+        name = self._collection_name_or_default()
         self._collection = client[database_name or DEFAULT_MONGO_DATABASE][name]
         return self._collection
 

@@ -15,9 +15,10 @@ Two properties are deliberate:
   Grouping nodes by resource would reorder dependent edits, so it is not done.
 * **Fail fast, best-effort rollback.** The first failure aborts the batch and
   propagates to the normal error envelope. Each service's ``__aexit__`` then
-  rolls back if its backend supports it — same-connection SQL shares one
-  session, so it rolls back together; other backends and other connections do
-  not, and a failed request may have applied a prefix of the nodes.
+  rolls back if its backend supports it. Storage is keyed per connection
+  (:func:`~resourcey.core.service.storage_key`), so SQL resources over one engine
+  adopt one session and the owner rolls the whole run back; two engines, or two
+  backends, do not, and a failed request may have applied a prefix of the nodes.
 
 The body is a **static** two-level discriminated union built at registration
 from every exposed resource (``resource`` -> ``kind``), so a node naming a
@@ -49,6 +50,7 @@ from resourcey.core.service import (
     normalize_actions,
 )
 from resourcey.http.dependency_builder import DependencyBuilder, OpenDependencyBuilder
+from resourcey.http.http_config import RequestLimitsConfig
 
 # The per-resource batch route and this one build the same edit shapes and
 # project the same results, so the helpers are shared rather than duplicated.
@@ -63,10 +65,6 @@ from resourcey.http.routes import (
 
 DEFAULT_BATCH_PATH = "/batch-edit"
 
-# One batch is one request's worth of writes, so an unbounded list would let a
-# caller turn a single request into arbitrary work.
-DEFAULT_MAX_EDITS = 500
-
 _TAGS = ["Batch"]
 
 
@@ -77,7 +75,7 @@ def register_batch_routes(
     path: str = DEFAULT_BATCH_PATH,
     prefix: str = "",
     dependency_builder: DependencyBuilder | None = None,
-    max_edits: int | None = DEFAULT_MAX_EDITS,
+    max_edits: int | None = None,
     tags: Sequence[str] | None = None,
 ) -> APIRouter:
     """Mount ``POST /batch-edit`` spanning every exposed resource in ``manifest``.
@@ -91,13 +89,18 @@ def register_batch_routes(
     node goes through it, so an authorizing builder applies its policy to each
     node exactly as it would on a single-resource route.
 
-    ``max_edits`` caps the number of nodes in one batch (``None`` disables the
-    cap); exceeding it is an ``InvalidInputError``, not a timeout.
+    ``max_edits`` caps the number of nodes in one batch; ``None`` reads
+    ``RequestLimitsConfig.max_batch_edits`` (``APP_MAX_BATCH_EDITS``, default
+    100). Exceeding it is an ``InvalidInputError``, not a timeout. Like the
+    other request caps it is read once here, at registration, and is never
+    unbounded — a cross-resource batch is the easiest way to turn one request
+    into arbitrary work.
 
     ``tags`` overrides the OpenAPI tag, matching ``create_app``'s app-wide
     override so the batch route groups with the rest of the app.
     """
     builder = dependency_builder if dependency_builder is not None else OpenDependencyBuilder()
+    cap = max_edits if max_edits is not None else RequestLimitsConfig.get_instance().max_batch_edits
     router_tags: list[str | Enum] = list(tags) if tags is not None else list(_TAGS)
     router = APIRouter(tags=router_tags)
 
@@ -111,9 +114,9 @@ def register_batch_routes(
 
     async def handler(request: Request, payload: Any) -> Any:
         edits = list(payload)
-        if max_edits is not None and len(edits) > max_edits:
+        if len(edits) > cap:
             raise InvalidInputError(
-                f"batch-edit accepts at most {max_edits} edits per request; got {len(edits)}."
+                f"batch-edit accepts at most {cap} edits per request; got {len(edits)}."
             )
         return await _apply_batch(request, targets, edits, builder)
 

@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from resourcey.cache.cache_strategy import ETagCacheStrategy
+from resourcey.cache.cached_resource import CachedResource
 from resourcey.config.config_base import _reset_config_prefix
 from resourcey.core.errors import (
     InvalidInputError,
@@ -35,18 +36,20 @@ from resourcey.core.errors import (
 from resourcey.core.manifest import Manifest
 from resourcey.core.resource import Resource
 from resourcey.core.service import (
-    STORAGE_KEY,
     Action,
     Create,
     Delete,
     NotFoundError,
     Service,
     ServiceError,
+    StorageKey,
     Update,
     assert_real_actions,
+    storage_key,
 )
 from resourcey.http.dependency_builder import OpenDependencyBuilder
 from resourcey.http.routes import _service_dependency
+from resourcey.list.list_resource import ListResource
 from resourcey.sql.db_config import DbConfig
 from resourcey.sql.session_manager import (
     SqlSessionManager,
@@ -55,7 +58,9 @@ from resourcey.sql.session_manager import (
 )
 from resourcey.sql.sql_config import SqlConfig
 from resourcey.sql.sql_resource import SqlResource
+from resourcey.triggers.triggered_resource import TriggeredResource
 from resourcey.util.search_filter import AttrFilter, EqFilter, build_filter
+from resourcey.view.resource_view import ResourceView
 
 
 class CoreBase(DeclarativeBase):
@@ -75,6 +80,24 @@ class Message(CoreBase):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     thread_id: Mapped[int] = mapped_column(Integer)
     body: Mapped[str] = mapped_column(String(200))
+
+
+class Country(BaseModel):
+    """A plain Pydantic model, served by a ``ListResource`` in the isolation test."""
+
+    id: str
+    name: str
+
+
+def _country_rows() -> list[Country]:
+    return [Country(id="us", name="United States")]
+
+
+class _DefaultKeyResource(ListResource[Country, str]):
+    """A resource whose storage key is the ABC default, not a backend's."""
+
+    async def get_storage_key(self) -> StorageKey:
+        return await Resource.get_storage_key(self)
 
 
 class RecordingResource(SqlResource[Any, Any]):
@@ -463,13 +486,14 @@ async def test_search_orders_by_id_ascending(resources):
 async def test_owner_opens_and_commits_its_own_storage(resources):
     _maker, threads, _messages = resources
     ctx: dict[Any, Any] = {}
+    key = await threads.get_storage_key()
     service = await threads.get_service(ctx)
-    assert STORAGE_KEY not in ctx
+    assert key not in ctx
     async with service:
-        assert STORAGE_KEY in ctx
+        assert key in ctx
         await service.create(_dto_type(Thread)(title="owned"))
     # The opener closed and cleared its storage on exit.
-    assert STORAGE_KEY not in ctx
+    assert key not in ctx
     # And the row was committed.
     async with await threads.get_service() as fresh:
         assert await fresh.count() == 1
@@ -478,13 +502,14 @@ async def test_owner_opens_and_commits_its_own_storage(resources):
 async def test_reusing_seeded_storage_does_not_commit_or_close(resources):
     maker, threads, _messages = resources
     shared = maker()
-    ctx: dict[Any, Any] = {STORAGE_KEY: shared}
+    key = await threads.get_storage_key()
+    ctx: dict[Any, Any] = {key: shared}
     service = await threads.get_service(ctx)
     async with service:
         await service.create(_dto_type(Thread)(title="shared"))
-        assert ctx[STORAGE_KEY] is shared
+        assert ctx[key] is shared
     # The reusing service neither closed the session nor dropped the key.
-    assert STORAGE_KEY in ctx
+    assert key in ctx
     assert shared.is_active  # still usable: the owner left it open
     await shared.rollback()
     await shared.close()
@@ -511,6 +536,119 @@ async def test_exception_in_owned_storage_rolls_back(resources):
             raise RuntimeError("boom")
     async with await threads.get_service() as fresh:
         assert await fresh.count() == 0
+
+
+async def test_two_connections_in_one_ctx_do_not_share_a_session():
+    """Issue #178: one ctx over two databases must not leak rows across them."""
+    engine_a = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine_b = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    maker_b = async_sessionmaker(engine_b, expire_on_commit=False)
+    threads_a = SqlResource(Thread, session_factory=maker_a)
+    threads_b = SqlResource(Thread, session_factory=maker_b)
+    try:
+        for engine in (engine_a, engine_b):
+            async with engine.begin() as conn:
+                await conn.run_sync(CoreBase.metadata.create_all)
+        ctx: dict[Any, Any] = {}
+        async with await threads_a.get_service(ctx) as service_a:
+            await service_a.create(_dto_type(Thread)(title="SECRET-FROM-DB-A"))
+            async with await threads_b.get_service(ctx) as service_b:
+                assert service_b._session is not service_a._session
+                # B reads only its own (empty) database: no cross-tenant leak.
+                assert await service_b.count() == 0
+                assert [row.title for row in (await service_b.search(limit=10)).items] == []
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_two_makers_over_one_engine_still_share_a_session():
+    """Issue #178: the key names the engine, so one database is one storage.
+
+    Two ``async_sessionmaker`` objects over the same engine are two objects but
+    one database; a resource built with each must still share a session, so
+    #177's same-connection rollback keeps working.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    first = SqlResource(Thread, session_factory=async_sessionmaker(engine, expire_on_commit=False))
+    second = SqlResource(Thread, session_factory=async_sessionmaker(engine, expire_on_commit=False))
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(CoreBase.metadata.create_all)
+        ctx: dict[Any, Any] = {}
+        async with await first.get_service(ctx) as service_a:
+            await service_a.create(_dto_type(Thread)(title="shared"))
+            async with await second.get_service(ctx) as service_b:
+                assert service_b._session is service_a._session
+                assert await service_b.count() == 1
+    finally:
+        await engine.dispose()
+
+
+async def test_storage_keys_differ_across_engines_but_agree_on_one():
+    """The key itself distinguishes databases, not the maker objects."""
+    engine_a = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine_b = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        a1 = SqlResource(Thread, session_factory=async_sessionmaker(engine_a))
+        a2 = SqlResource(Message, session_factory=async_sessionmaker(engine_a))
+        b = SqlResource(Thread, session_factory=async_sessionmaker(engine_b))
+        assert await a1.get_storage_key() == await a2.get_storage_key()
+        assert await a1.get_storage_key() != await b.get_storage_key()
+    finally:
+        await engine_a.dispose()
+        await engine_b.dispose()
+
+
+async def test_an_unbound_maker_keys_on_itself():
+    """A maker with no bound engine has no database identity, so it keys on itself."""
+    maker = async_sessionmaker()
+    resource = SqlResource(Thread, session_factory=maker)
+    other = SqlResource(Thread, session_factory=async_sessionmaker())
+    assert await resource.get_storage_key() != await other.get_storage_key()
+
+
+async def test_the_default_storage_key_names_the_resource_path():
+    """A resource with no backend identity still gets a collision-free key."""
+    resource = _DefaultKeyResource(_country_rows(), path="countries")
+    assert await resource.get_storage_key() == storage_key("resource", "countries")
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [CachedResource, ResourceView, TriggeredResource],
+    ids=["cached", "view", "triggered"],
+)
+async def test_a_wrapper_forwards_the_inner_storage_key(wrap) -> None:
+    """A wrapper adds no storage, so it must not invent a key of its own."""
+    inner = ListResource(_country_rows(), path="countries")
+    assert await wrap(inner).get_storage_key() == await inner.get_storage_key()
+
+
+@pytest.mark.parametrize("sql_first", [True, False])
+async def test_a_sql_and_a_list_resource_in_one_ctx_do_not_cross_adopt(sql_first: bool) -> None:
+    """Issue #178: differing backends never adopt each other's storage."""
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    threads = SqlResource(Thread, session_factory=maker)
+    countries = ListResource(_country_rows(), path="countries")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(CoreBase.metadata.create_all)
+        ctx: dict[Any, Any] = {}
+        first, second = (threads, countries) if sql_first else (countries, threads)
+        async with (
+            await first.get_service(ctx) as first_service,
+            await second.get_service(ctx) as second_service,
+        ):
+            sql_service, list_service = (
+                (first_service, second_service) if sql_first else (second_service, first_service)
+            )
+            assert await sql_service.count() == 0
+            assert await list_service.count() == 1
+    finally:
+        await engine.dispose()
 
 
 # ---------------------------------------------------------------------------

@@ -113,7 +113,7 @@ util < core < {sql, mongo, list, view, filestore, http, config, cache,
 | `sql` / `mongo` / `list` | the three storage backends | `backends` |
 | `view` | `ResourceView` — the configured narrowing wrapper | `backends` |
 | `filestore` | `FileStore` mediums, `FileResource`, `register_file_routes` | `filestore` |
-| `http` | `create_app` / `add_to_app`, `DependencyBuilder`, `register_routes`, `register_batch_routes`, error envelope | `transport` |
+| `http` | `create_app` / `add_to_app`, `DependencyBuilder`, `register_routes`, `register_batch_routes`, error envelope, `RequestLimitsConfig` (the `search` / `batch_read` caps) | `transport` |
 | `auth` | principals, authenticators, policies, roles, RBAC store, OAuth, `me` | `auth-rbac` |
 | `tasks` | cron parsing, `BackgroundTaskScheduler` | `background-work` |
 | `triggers` | `Trigger`, `TriggeredResource`, `WebhookTrigger`, `RedisTrigger` | `triggers-realtime` |

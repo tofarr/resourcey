@@ -28,12 +28,12 @@ from resourcey.cache.cache_defaults import DefaultCacheStrategyMixin
 from resourcey.core.dto import DTO, RestModels
 from resourcey.core.errors import InvalidInputError
 from resourcey.core.resource import Resource
-from resourcey.core.service import Action, Service, ServiceError
+from resourcey.core.service import Action, Service, ServiceError, StorageKey, storage_key
 from resourcey.encryption.encryption_service import get_encryption_service
 from resourcey.sql.filter_converter import SqlFilterContext, SqlFilterConverter
 from resourcey.sql.session_manager import SqlSessionManager, get_sql_session_manager
 from resourcey.sql.sort_converter import SqlSortContext, SqlSortConverter
-from resourcey.sql.sql_service import SqlService
+from resourcey.sql.sql_service import SqlService, sql_storage_identity
 from resourcey.sql.sqlalchemy_2_dto import sqlalchemy_2_dto
 from resourcey.util.naming import camel_to_kebab, pluralize
 from resourcey.util.search_filter import SearchFilter, operators_for_annotation
@@ -265,11 +265,23 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         resolved from ``session_manager`` by ``connection_name``, which makes
         this method async.
         """
-        maker = self._session_factory
-        if maker is None:
-            manager = self._session_manager or get_sql_session_manager()
-            maker = await manager.get_session_maker(self._connection_name)
-        return self.make_service(ctx if ctx is not None else {}, maker)
+        return self.make_service(ctx if ctx is not None else {}, await self._resolve_maker())
+
+    async def get_storage_key(self) -> StorageKey:
+        """The ctx key a service of this resource stores its session under.
+
+        Lets an escape-hatch caller seed a session into a ctx, exactly where this
+        resource's service will look for it. Async because resolving the session
+        maker can be (the manager is entered before any service is built).
+        """
+        return storage_key("sql", sql_storage_identity(await self._resolve_maker()))
+
+    async def _resolve_maker(self) -> async_sessionmaker[AsyncSession]:
+        """The session maker this resource's service opens sessions from."""
+        if self._session_factory is not None:
+            return self._session_factory
+        manager = self._session_manager or get_sql_session_manager()
+        return await manager.get_session_maker(self._connection_name)
 
     def make_service(
         self, ctx: MutableMapping[Any, Any], session_factory: async_sessionmaker[AsyncSession]

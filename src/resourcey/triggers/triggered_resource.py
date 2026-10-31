@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from resourcey.core.dto import DTO, RestModels
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.resource import Resource
-from resourcey.core.service import Action, CacheStrategy, Service, ServiceError
+from resourcey.core.service import Action, CacheStrategy, Service, ServiceError, StorageKey
 from resourcey.triggers.trigger import ResourceBoundTrigger, Trigger
 from resourcey.triggers.trigger_runner import TriggerRunner
 from resourcey.triggers.triggered_service import TriggeredService
@@ -153,6 +153,10 @@ class TriggeredResource(Resource[T, K], Generic[T, K]):
         return TriggeredService(
             inner, self._triggers, background=self._background, runner=self._runner
         )
+
+    async def get_storage_key(self) -> StorageKey:
+        """The inner resource's storage key: a wrapper adds no storage of its own."""
+        return await self._inner.get_storage_key()
 
     # ------------------------------------------------------------------
     # Registration / lifecycle (delegated to the inner resource)

@@ -57,10 +57,37 @@ class Action(enum.StrEnum):
     BATCH_EDIT = "batch_edit"
 
 
-# Call-scoped context key under which a service caches the storage it opened.
-# A plain ``object()`` so two independent modules cannot collide on a string;
-# module scope so every resource in the process shares the one key.
-STORAGE_KEY: Any = object()
+@dataclass(frozen=True)
+class StorageKey:
+    """The identity of one piece of storage inside a call-scoped ``ctx``.
+
+    Storage is shared **per connection**, not per request: two services adopt
+    one another's storage only when they address the same storage, so a resource
+    on one connection can never be served another connection's rows.
+
+    ``tokens`` compare by value for a name (``str``) and by identity (an ``id``
+    token) for a storage object: ``==`` on a driver client, a session maker or a
+    list would equate two distinct storages. ``refs`` keeps every object whose
+    ``id`` is a token alive, so a token cannot be recycled onto another object
+    while the key sits in a ctx.
+    """
+
+    backend: str
+    tokens: tuple[int | str, ...]
+    refs: tuple[Any, ...] = field(default=(), compare=False)
+
+
+def storage_key(backend: str, *parts: Any) -> StorageKey:
+    """The :class:`StorageKey` naming the storage ``backend`` addresses via ``parts``.
+
+    A ``str`` part (a connection / database / collection name) compares by value;
+    any other part (a session maker, a client, a list, a file store) by identity.
+    """
+    return StorageKey(
+        backend,
+        tuple(part if isinstance(part, str) else id(part) for part in parts),
+        tuple(part for part in parts if not isinstance(part, str)),
+    )
 
 
 class ServiceError(ResourceyError):

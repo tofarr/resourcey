@@ -29,7 +29,7 @@ specs:
 	quint typecheck specs/secret_serialization.qnt
 	quint typecheck specs/principal_store.qnt
 	quint typecheck specs/dto_defaults.qnt
-	quint test specs/resource_actions.qnt --main=resource_actions --match "^(createThenRead|createUpdateDelete|batchReadAndEdit|searchEmptyFilterMatchesAll|searchEqualityPredicate|searchInPredicate|searchEmptyInMatchesNothing|searchAndCombinesPredicates|searchNoFilterDeclaredRejectsNonEmptyFilter|countEmptyFilterCountsAll|countEqualityPredicate|countNoFilterDeclaredRejectsNonEmptyFilter|readOnlyResourceExposesReadSubset|writableResourceExposesAllActions|readOnlyResourceServesReads|defensiveReadIsolated|nonDefensiveServesStore)$$"
+	quint test specs/resource_actions.qnt --main=resource_actions --match "^(createThenRead|createUpdateDelete|batchReadAndEdit|searchEmptyFilterMatchesAll|searchEqualityPredicate|searchInPredicate|searchEmptyInMatchesNothing|searchAndCombinesPredicates|searchNoFilterDeclaredRejectsNonEmptyFilter|countEmptyFilterCountsAll|countEqualityPredicate|countNoFilterDeclaredRejectsNonEmptyFilter|readOnlyResourceExposesReadSubset|writableResourceExposesAllActions|readOnlyResourceServesReads|defensiveReadIsolated|nonDefensiveServesStore|searchLimitCapBoundary|searchDefaultLimitClamped|batchReadCapBoundary)$$"
 	quint typecheck specs/conditional_write.qnt
 	quint test specs/conditional_write.qnt --main=conditional_write --match "^(updateWithHoldingConditionApplies|updateWithFailingConditionIsAbsentAndUnchanged|conditionMissMatchesAbsentTarget|deleteWithHoldingConditionRemoves|deleteWithFailingConditionIsFalseAndUnchanged|policyScopeGatesTheWrite|policyScopeNarrowsNeverWidens|neverConditionIsAlwaysAbsent|batchEditAlignsConditionalResults)$$"
 	quint test specs/exposure.qnt --main=exposure --match "^(selfIsTheDefault|hiddenRegistersNoRoutesTest|wrapperHidesAnExposedResource|wrapperNarrowsTheQuerySurface|delegatedWrapperWouldLeak|builderDoesNotChangeExposure|narrowingIsAllowedWideningIsRejected|batchEditAdmitsOnlyDeclaredActions|batchActionsRequireTheirSingularTest|defaultBuilderIsIdentityTest|wrappedBuilderPreservesTheActionContractTest|invariantsHold)$$"
@@ -58,6 +58,8 @@ specs:
 	quint test specs/triggers.qnt --main=triggers --match "^(editsOnlyFire|successOnly|alignmentTest|perOperationNotPerItemTest|perTriggerIsolationTest|backgroundNeverBlocksTest|exitSettlesEveryRunTest|invariantsHold)$$"
 	quint typecheck specs/jobs.qnt
 	quint test specs/jobs.qnt --main=jobs --match "^(claimSingleWinner|claimNeedsRunnable|terminalSticky|completionOnlyIfOwner|attemptCap|staleRecoverable|scheduleAndRunnerGates)$$"
+	quint typecheck specs/storage_sharing.qnt
+	quint test specs/storage_sharing.qnt --main=storage_sharing --match "^(sameStorageSharesOneStorage|differentStoragesAreIsolated|crossBackendIsIsolated|entryOrderDoesNotChangeTheResult|ownerReleasesAndAdopterDoesNot|singleKeyIsolationFails|invariantsHold)$$"
 	quint typecheck specs/realtime.qnt
 	quint test specs/realtime.qnt --main=realtime --match "^(subscribableGateTest|handshakeAuthenticatedAlwaysGrantsTest|handshakeInvalidAlwaysRejectedTest|handshakeAbsentGatedByPostureTest|createdUpdatedMatchBothFiltersTest|crossResourceNeverDeliversTest|subFilterNeverWidensBeyondPolicyTest|deleteFailsClosedWhenScopedTest|noMatchDeliversNothingTest|unscopedAlwaysDeliversTest|invariantsHold)$$"
 	quint typecheck specs/me.qnt
