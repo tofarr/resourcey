@@ -80,6 +80,14 @@ dependency.
   repository, or by raw SQLAlchemy — nothing breaks when you drop a rung.
 * **Escape hatches.** FastAPI, SQLAlchemy, and Alembic are first-class. Never
   hide them behind an abstraction that cannot be bypassed.
+* **Runtime-selected routes use `DependencyBuilder.build_service`.** A route
+  whose target resource comes from the request body (the app-level
+  `POST /batch-edit`) cannot use `get_service_dependency`, because FastAPI
+  introspects a static signature. It calls `build_service` and enters the
+  returned `Service` itself. Any builder that wraps the service in
+  `get_service_dependency` **must** override `build_service` too, or that route
+  bypasses the wrapping — which for an authorizing builder is an authorization
+  bypass. Pinned by `tests/unit/test_batch_routes.py`.
 
 ## Framework map
 
@@ -105,7 +113,7 @@ util < core < {sql, mongo, list, view, filestore, http, config, cache,
 | `sql` / `mongo` / `list` | the three storage backends | `backends` |
 | `view` | `ResourceView` — the configured narrowing wrapper | `backends` |
 | `filestore` | `FileStore` mediums, `FileResource`, `register_file_routes` | `filestore` |
-| `http` | `create_app` / `add_to_app`, `DependencyBuilder`, `register_routes`, error envelope | `transport` |
+| `http` | `create_app` / `add_to_app`, `DependencyBuilder`, `register_routes`, `register_batch_routes`, error envelope | `transport` |
 | `auth` | principals, authenticators, policies, roles, RBAC store, OAuth, `me` | `auth-rbac` |
 | `tasks` | cron parsing, `BackgroundTaskScheduler` | `background-work` |
 | `triggers` | `Trigger`, `TriggeredResource`, `WebhookTrigger`, `RedisTrigger` | `triggers-realtime` |

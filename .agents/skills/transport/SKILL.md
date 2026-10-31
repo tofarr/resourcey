@@ -153,6 +153,38 @@ Only the projected REST representation is hashed, so the ETag validates exactly
 the bytes sent. `_project` / `_dump` / `_header_for` all thread the service's
 `serialization_context()`.
 
+## register_batch_routes
+
+```python
+register_batch_routes(app_or_router, manifest, *, path="/batch-edit", prefix="",
+                      dependency_builder=None, max_edits=500, tags=None)
+```
+
+The app-level `POST /batch-edit`: one ordered list of create / update / delete
+nodes spanning **every** exposed resource, answered positionally. `create_app` /
+`add_to_app` mount it by default (`batch_edit=False` opts out,
+`batch_edit_path=...` moves it, `batch_edit_max_edits=...` sets the cap).
+
+* The body is a **static** two-level discriminated union built at registration:
+  `resource` → `kind`. Each resource contributes the same union its own
+  `/{resource}/batch-edit` accepts (`_batch_edit_body`, shared not copied), so
+  a `kind` the resource does not declare is a `422` and the two routes cannot
+  drift.
+* Targets are exposed resources whose normalized actions include `batch_edit` —
+  the same gate as the per-resource route. A hidden resource contributes
+  nothing, so it is unreachable here.
+* Nodes apply in **list order**, never grouped, so a later node sees an earlier
+  node's write. Consecutive nodes for one resource share one service (and one
+  transaction where the backend has one).
+* Every service stays open on an `AsyncExitStack` until the batch finishes:
+  closing a run early would commit it and defeat rollback. The first failure
+  propagates to the error envelope; rollback is **best effort** and holds where
+  the backend provides a shared transaction (SQL on one session factory).
+* `build_service` on the `DependencyBuilder` is the seam — the route selects a
+  resource at runtime, so it cannot use the static `get_service_dependency`.
+  An authorizing builder therefore wraps each node's service, which is what
+  keeps this route from being an authorization bypass.
+
 ## Escape hatches
 
 `add_to_app` (mount on your own app), `register_routes` (mount one resource on

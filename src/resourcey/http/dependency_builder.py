@@ -66,6 +66,24 @@ class DependencyBuilder(DiscriminatedUnionMixin, ABC):
         """
         return None
 
+    async def build_service(
+        self, request: Request, resource: Resource[Any, Any]
+    ) -> Service[Any, Any]:
+        """Build ``resource``'s per-request service for a route that picks resources at runtime.
+
+        :meth:`get_service_dependency` works only because FastAPI introspects a
+        **static** route signature. A handler that chooses its resources from the
+        request body (the cross-resource ``batch-edit``) cannot use it, so it
+        calls this instead and enters the returned context manager itself.
+
+        The default matches :class:`OpenDependencyBuilder` — the resource's own
+        service over the request-scoped ctx. A builder that customises
+        :meth:`get_service_dependency` (wrapping the service, applying
+        authorization) **must** override this too, or a runtime-selected route
+        would bypass that customisation.
+        """
+        return await resource.get_service(request_ctx(request))
+
 
 class OpenDependencyBuilder(DependencyBuilder):
     """The no-auth default: the resource's own service over the request-scoped ctx.
@@ -74,9 +92,15 @@ class OpenDependencyBuilder(DependencyBuilder):
     authenticating builder instead.
     """
 
+    async def build_service(
+        self, request: Request, resource: Resource[Any, Any]
+    ) -> Service[Any, Any]:
+        """The resource's own service over the request-scoped ctx (no wrapping)."""
+        return await resource.get_service(request_ctx(request))
+
     def get_service_dependency(self, resource: Resource[Any, Any]) -> Callable[..., object]:
         async def dependency(request: Request) -> AsyncIterator[Service[Any, Any]]:
-            service = await resource.get_service(request_ctx(request))
+            service = await self.build_service(request, resource)
             async with service:
                 yield service
 

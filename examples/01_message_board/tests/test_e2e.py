@@ -330,3 +330,67 @@ class TestBatchRead:
         assert len(body) == 2
         assert body[0]["id"] == created["id"]
         assert body[1] is None
+
+
+# ---------------------------------------------------------------------------
+# App-level batch edit — one request across both resources
+# ---------------------------------------------------------------------------
+
+
+class TestCrossResourceBatchEdit:
+    async def test_a_thread_and_its_messages_in_one_request(self, client: AsyncClient) -> None:
+        thread = (await client.post("/threads", json={"title": "Draft"})).json()
+
+        resp = await client.post(
+            "/batch-edit",
+            json=[
+                {
+                    "resource": "threads",
+                    "kind": "Update",
+                    "item": {"id": thread["id"], "title": "Final"},
+                },
+                {
+                    "resource": "messages",
+                    "kind": "Create",
+                    "item": {"thread_id": thread["id"], "text": "one"},
+                },
+                {
+                    "resource": "messages",
+                    "kind": "Create",
+                    "item": {"thread_id": thread["id"], "text": "two"},
+                },
+            ],
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [item["resource"] for item in body] == ["threads", "messages", "messages"]
+        assert body[0]["result"]["title"] == "Final"
+        assert [item["result"]["text"] for item in body[1:]] == ["one", "two"]
+
+        assert (await client.get(f"/threads/{thread['id']}")).json()["title"] == "Final"
+        assert (await client.get("/messages/count")).json() == 2
+
+    async def test_a_missed_node_is_null_and_does_not_block_the_rest(
+        self, client: AsyncClient
+    ) -> None:
+        """A node that matches nothing answers ``null``; its neighbours still apply."""
+        thread = (await client.post("/threads", json={"title": "Keep"})).json()
+
+        resp = await client.post(
+            "/batch-edit",
+            json=[
+                {"resource": "threads", "kind": "Update", "item": {"id": 9999, "title": "Ghost"}},
+                {
+                    "resource": "threads",
+                    "kind": "Update",
+                    "item": {"id": thread["id"], "title": "Changed"},
+                },
+            ],
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body[0]["result"] is None
+        assert body[1]["result"]["title"] == "Changed"
+        assert (await client.get(f"/threads/{thread['id']}")).json()["title"] == "Changed"
