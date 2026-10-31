@@ -1,0 +1,131 @@
+name: Release
+
+# Publishing a GitHub release uploads that exact version to PyPI. The tag must
+# be `v<version from pyproject.toml>`; a mismatch fails before anything is
+# built, because an upload cannot be undone.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Publish to TestPyPI instead of PyPI
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+# Never cancel a release mid-upload.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+
+      - name: Validate tag against package version
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          version=$(uv version --short)
+          echo "package version: $version"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if ! printf '%s' "${GITHUB_REF_NAME}" \
+                | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::tag ${GITHUB_REF_NAME} is not of the form vX.Y.Z"
+              exit 1
+            fi
+            if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match v${version} in pyproject.toml"
+              exit 1
+            fi
+          elif [ "${DRY_RUN}" != "true" ]; then
+            # A branch build would publish whatever version main happens to be at.
+            echo "::error::only a tagged release may publish to PyPI; set dry_run"
+            exit 1
+          fi
+
+      # Fails if pyproject.toml was changed without re-locking (uv version does both).
+      - run: uv lock --check
+
+      - run: uv build --clear
+
+      - run: uvx twine check dist/*
+
+      - name: Assert distribution contents
+        run: |
+          python3 - <<'PY'
+          import glob, sys, tarfile, zipfile
+
+          wheel, = glob.glob("dist/*.whl")
+          entries = zipfile.ZipFile(wheel).namelist()
+          missing = [n for n in ("resourcey/py.typed",) if n not in entries]
+          if not any(n.endswith(".dist-info/licenses/LICENSE") for n in entries):
+              missing.append("*.dist-info/licenses/LICENSE")
+          if missing:
+              sys.exit(f"{wheel} is missing {missing}")
+
+          sdist, = glob.glob("dist/*.tar.gz")
+          names = tarfile.open(sdist).getnames()
+          top = {n.split("/", 1)[1].split("/", 1)[0] for n in names if "/" in n}
+          if "examples" in top:
+              sys.exit(f"examples/ leaked into the sdist: {sorted(top)}")
+          absent = {"src", "tests", "specs", "LICENSE", "README.md",
+                    "pyproject.toml"} - top
+          if absent:
+              sys.exit(f"{sdist} is missing {sorted(absent)}")
+
+          print(f"wheel ok ({len(entries)} entries), sdist ok: {sorted(top)}")
+          PY
+
+      # Install the built wheel, with its declared dependencies, into a clean
+      # interpreter: proves Requires-Dist is complete and the package imports.
+      - name: Smoke-test the built wheel
+        run: |
+          python3 -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install --quiet dist/*.whl
+          /tmp/smoke/bin/python -c "
+          import resourcey
+          import resourcey.sql.sql_resource
+          import resourcey.mongo.mongo_resource
+          import resourcey.http.app
+          print('import ok')
+          "
+          /tmp/smoke/bin/python -m resourcey --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.dry_run && 'testpypi' || 'pypi' }}
+      url: ${{ inputs.dry_run && 'https://test.pypi.org/p/resourcey' || 'https://pypi.org/p/resourcey' }}
+    permissions:
+      # Trusted publishing: PyPI verifies this workflow's OIDC identity, so no
+      # long-lived token is stored. Also what signs the attestations.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to ${{ inputs.dry_run && 'TestPyPI' || 'PyPI' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.dry_run && 'https://test.pypi.org/legacy/' || 'https://pypi.org/legacy/' }}
+          packages-dir: dist/
+          attestations: true
