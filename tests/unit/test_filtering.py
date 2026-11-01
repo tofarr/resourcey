@@ -169,6 +169,19 @@ class TestCoreFilterMatches:
         assert flt.matches(Row(score="3"))
         assert not flt.matches(Row(score="2"))
 
+    def test_walk_visits_every_node_pre_order(self) -> None:
+        """The traversal ``resolve()`` uses reaches nested children and filters."""
+        leaf = attr("score", EqFilter(value=1))
+        tree = and_(not_(leaf), or_(attr("name", EqFilter(value="a")), leaf))
+        walked = list(tree.walk())
+        assert walked[0] is tree
+        assert leaf in walked
+        assert attr("name", EqFilter(value="a")) in walked
+        # and, not, attr, eq, or, attr, eq, and the repeated leaf (attr, eq)
+        assert len(walked) == 9
+        # A leaf has no children.
+        assert list(EqFilter(value=1).walk()) == [EqFilter(value=1)]
+
     def test_operators_for_annotation(self) -> None:
         assert operators_for_annotation(int) == frozenset({"eq", "in", "gt", "ge", "lt", "le"})
         assert "contains" in operators_for_annotation(str)
@@ -281,8 +294,8 @@ async def _ids(resource: SqlResource[Any, Any], filter_: SearchFilter[Any]) -> l
 
     async with resource._session_factory() as session:
         converter = resource.build_filter_converter(session)
-        await converter.resolve()
         standard = filter_.create_standard_filter()
+        await converter.resolve(standard)
         stmt = converter.apply(select(Thing.__table__.c.id), standard)
         return list((await session.execute(stmt)).scalars().all())
 

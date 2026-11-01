@@ -160,6 +160,14 @@ The built-in reductions use the unparameterized `AllFilter()` /
 `NoMatchFilter()` leaves; the pydantic parameterization `AllFilter[Any](...)`
 is a distinct class the SQL / Mongo registries do not know.
 
+A policy may reduce to a **custom** node — one registered with
+`register_logical`, written as `EXISTS` over a related table. That is how a rule
+like "the sandbox's parent project belongs to a tenant they administer" becomes
+a scope filter without a `PolicyContext` storage read (see #193). The node must
+be registered before the policy resolves, and it inherits the pushdown rules in
+the `backends` skill: `(positive, negated)` pair, raise-don't-skip, and a
+`matches` that agrees with its SQL or raises.
+
 `PolicyResolver` (a `DiscriminatedUnionMixin`) declares
 `async resolve(resource, principal) -> list[Policy]`, with `AllowAllResolver`
 (the default — a valid credential grants full access) and `DenyAllResolver`.

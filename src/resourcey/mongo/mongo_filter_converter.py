@@ -26,8 +26,8 @@ This module imports no code outside the framework.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, MutableMapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -139,7 +139,19 @@ def register_logical(
     positive: LogicalHandler,
     negated: LogicalHandler,
 ) -> None:
-    """Register a logical node handler pair (positive + exact-complement negated)."""
+    """Register a logical node handler pair (positive + exact-complement negated).
+
+    A custom node is a per-backend concern: ``$lookup`` is not a plain
+    query-dict fragment, so an SQL handler written over ``EXISTS`` has no Mongo
+    twin. The pair must be an exact complement, and registration is a
+    **process-global mutation** of a module-level registry — one meaning per node
+    type per process, and re-registering a class replaces its handlers.
+
+    A handler that needs one query first declares ``async def resolve(self,
+    ctx)`` on the node; the converter awaits it before conversion. See
+    :func:`resourcey.sql.filter_converter.register_logical` for the full
+    escape-hatch contract.
+    """
     _LOGICAL_REGISTRY[filter_type] = (positive, negated)
 
 
@@ -148,7 +160,11 @@ def register_operator(
     positive: OperatorHandler,
     negated: OperatorHandler,
 ) -> None:
-    """Register a value-leaf handler pair (positive + exact-complement negated)."""
+    """Register a value-leaf handler pair (positive + exact-complement negated).
+
+    A value leaf is reached only *with* a bound field. The global-registry and
+    ``resolve`` rules in :func:`register_logical` apply here unchanged.
+    """
     _OPERATOR_REGISTRY[filter_type] = (positive, negated)
 
 
@@ -280,11 +296,13 @@ class MongoFilterContext:
     """Everything a conversion handler needs, passed as one frozen object.
 
     ``fields`` holds only the resource's *queryable* fields, so a field projected
-    away from the read model cannot be filtered.
+    away from the read model cannot be filtered. ``meta`` is the mutable cache a
+    node's async ``resolve`` writes to and its handler reads back.
     """
 
     fields: Mapping[str, str]
     id_field: str = "id"
+    meta: MutableMapping[Any, Any] = field(default_factory=dict)
 
     def field_for(self, attribute: str) -> str:
         """The Mongo field for ``attribute``; raise :class:`UnsupportedFilterError` if absent."""
@@ -302,13 +320,19 @@ class MongoFilterConverter:
     def __init__(self, ctx: MongoFilterContext) -> None:
         self.ctx = ctx
 
-    async def resolve(self) -> None:
-        """Run any IO-needing handlers and cache their results onto ``ctx``.
+    async def resolve(self, filter_: SearchFilter[Any]) -> None:
+        """Await every node's ``resolve`` hook, caching onto ``ctx.meta``.
 
-        Empty today: every standard handler is pure. It exists so a future
-        relationship-traversal handler can query without changing signatures.
+        A node type that needs one query before it can build its query defines
+        ``async def resolve(self, ctx: MongoFilterContext) -> None`` and stores
+        the result in ``ctx.meta[self]``. Standard nodes define no hook, so this
+        is a no-op for them. Equal nodes share a cache entry.
         """
-        return None
+        for node in filter_.walk():
+            hook = getattr(node, "resolve", None)
+            if hook is None or node in self.ctx.meta:
+                continue
+            await hook(self.ctx)
 
     def apply(self, filter_: SearchFilter[Any]) -> Query:
         """The Mongo query for ``filter_`` (``None`` when it imposes no restriction)."""

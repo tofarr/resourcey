@@ -24,6 +24,15 @@
 //   its NULL-safe negated form agrees with the in-memory complement; an empty
 //   set matches nothing (fail-closed), unlike a naive "no restriction".
 //
+//   Law 6 (custom node, #195): the same soundness applies to a node an app
+//   registers itself over a related table. Modelled as `EXISTS`: the pushed-down
+//   criterion is true iff the row has at least one related row satisfying the
+//   predicate, and the in-memory reference is "the related set contains one".
+//   `NOT EXISTS` is the exact complement including the no-related-row case,
+//   which is what makes it safe under negation. A `JOIN` is provably wrong:
+//   it yields one output row per match, so a row with two matches is counted
+//   twice and paging sees it twice.
+//
 // Quint rejects recursive type declarations (QNT099), so a genuine recursive
 // filter tree cannot be written; the tree is unrolled into a flat clause list,
 // matching how resource_actions.qnt already models filters.
@@ -240,9 +249,52 @@ module filtering {
         ((sqlGt(row, v) == T) == memGt(row, v))
     )
 
+  // ---- Law 6: a custom node over a related table (#195) -----------------
+  // An app registers a node whose criterion lives on another table. Its
+  // pushed-down form is `EXISTS (SELECT 1 FROM related WHERE ...)`: true iff the
+  // row has at least one related row satisfying the predicate.
+
+  // The related-table membership of one row: the set of related keys it has.
+  type Related = Set[int]
+
+  pure def memExists(related: Related, wanted: Set[int]): bool =
+    related.intersect(wanted) != Set()
+
+  // SQL `EXISTS (...)`: false when there is no related row at all, so the
+  // no-related-row case is *decided* rather than Unknown.
+  pure def sqlExists(related: Related, wanted: Set[int]): Tri =
+    if (memExists(related, wanted)) T else F
+
+  // SQL `NOT EXISTS (...)`: the exact complement, no-related-row included.
+  pure def sqlNotExists(related: Related, wanted: Set[int]): Tri =
+    if (memExists(related, wanted)) F else T
+
+  pure def existsAgreesWithMatches(wanted: Set[int]): bool =
+    relatedRows.foldl(
+      true,
+      (acc, related) =>
+        acc and
+        ((sqlExists(related, wanted) == T) == memExists(related, wanted)) and
+        ((sqlNotExists(related, wanted) == T) == not(memExists(related, wanted)))
+    )
+
+  // A `JOIN` emits one output row per matching related row, so a row with two
+  // matches appears twice — which inflates count() and repeats it across pages.
+  pure def joinEmitsOneRowPerMatch(related: Related, wanted: Set[int]): bool =
+    (memExists(related, wanted) and related.intersect(wanted).size() > 1) implies
+      (related.intersect(wanted).size() != 1)
+
+  // A row with no related row satisfies `NOT EXISTS`, so it cannot vanish from
+  // both branches the way a naive `NOT` over a NULL column does.
+  pure def noRelatedRowIsInTheNegatedBranch(wanted: Set[int]): bool =
+    sqlNotExists(Set(), wanted) == T
+
   // Small finite universes so the laws can be run as tests.
   pure val entityValues = List(0, 1, 2)
   pure val rows: List[Row] = List(Val(0), Val(1), Val(2), Null)
+
+  // Related-table memberships: none, one, and two matches for the wanted set.
+  pure val relatedRows: List[Related] = List(Set(), Set(1), Set(1, 2), Set(2))
 
   // The sample filters the identities are checked against: All is dropped,
   // NoMatch is an annihilator, and a clause filters a value.
@@ -268,6 +320,19 @@ module filtering {
   // Law 5: the set-valued `In` leaf (#136) — one value is `Eq`, many agree with
   // the Or of their `Eq`s, the NULL-safe negation agrees on every row (NULL
   // included), and an empty set matches nothing.
+  // Law 6: a custom node over a related table (#195). `EXISTS` agrees with the
+  // in-memory predicate on every membership — including the row with no related
+  // row — and `NOT EXISTS` is its exact complement; a `JOIN` provably duplicates
+  // a multi-match row.
+  run law6_customNodeAgreesWithMatches =
+    all {
+      assert(existsAgreesWithMatches(Set(1))),
+      assert(existsAgreesWithMatches(Set(1, 2))),
+      assert(existsAgreesWithMatches(Set(3))),
+      assert(noRelatedRowIsInTheNegatedBranch(Set(1))),
+      assert(joinEmitsOneRowPerMatch(Set(1, 2), Set(1, 2))),
+    }
+
   run law5_inFilterAgreesWithEqAndOr =
     all {
       assert(singleInAgreesWithEq(1)),

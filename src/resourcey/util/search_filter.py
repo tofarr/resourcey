@@ -21,7 +21,7 @@ different type), so the algebraic identities live in :func:`and_`, :func:`or_`,
 from __future__ import annotations
 
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import date, datetime, time
 from decimal import Decimal
 from types import UnionType
@@ -75,7 +75,14 @@ class SearchFilter(DiscriminatedUnionMixin, Generic[T]):
 
     @abstractmethod
     def matches(self, value: T) -> bool:
-        """Whether ``value`` satisfies this filter."""
+        """Whether ``value`` satisfies this filter.
+
+        This is the reference semantics every backend's pushdown must agree
+        with, so a node that cannot be evaluated in memory must raise here
+        rather than return a plausible-but-wrong answer. A silent ``True`` or
+        ``False`` makes the list backend (and the ``allow_filter_iteration``
+        fallback) disagree with the database without any error.
+        """
         raise NotImplementedError
 
     def create_standard_filter(self) -> SearchFilter[Any]:
@@ -84,6 +91,22 @@ class SearchFilter(DiscriminatedUnionMixin, Generic[T]):
         :class:`BaseObjectFilter` overrides this to lower its fields.
         """
         return self
+
+    def walk(self) -> Iterator[SearchFilter[Any]]:
+        """This node and every descendant, depth-first, pre-order.
+
+        A backend uses it to find the nodes it must resolve before converting
+        (see ``SqlFilterConverter.resolve``). Descendants live under ``filters``
+        (an iterable of filters) and / or ``filter`` (a single filter), which is
+        where every standard node keeps them — a custom node nesting a subtree
+        must use the same two names.
+        """
+        yield self
+        for child in getattr(self, "filters", ()):
+            yield from child.walk()
+        nested = getattr(self, "filter", None)
+        if isinstance(nested, SearchFilter):
+            yield from nested.walk()
 
 
 # ---------------------------------------------------------------------------
