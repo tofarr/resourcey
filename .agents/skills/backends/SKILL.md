@@ -209,6 +209,98 @@ The security gate is the same everywhere: the filter and sort surfaces derive
 from `read_response`, so a field projected away is neither filterable nor
 sortable.
 
+### Custom nodes: filters over a related table
+
+A `SearchFilter` names a column on the row being queried, so a predicate that
+needs another table — "messages sent to this user", where `user_id` lives on
+`message_recipients`, not on `messages` — has no standard expression. The
+escape hatch is `register_logical` / `register_operator`, public in both
+backends. Define the node, then register its SQL:
+
+```python
+from sqlalchemy import exists
+from resourcey.sql.filter_converter import SqlFilterConverter, register_logical
+from resourcey.util.search_filter import SearchFilter
+
+
+class SentTo(SearchFilter[Sequence[int]]):
+    """Pushdown-only: the in-memory predicate raises (see below)."""
+
+    user_id: int
+
+    def matches(self, value: Sequence[int]) -> bool:
+        return self.user_id in value
+
+
+def _sent_to(converter: SqlFilterConverter, node: SearchFilter[Any]):
+    recipients = MessageRecipient.__table__.c
+    return exists().where(
+        recipients.message_id == converter.ctx.columns["id"],
+        recipients.user_id == node.user_id,
+    )
+
+
+register_logical(SentTo, _sent_to, lambda converter, node: ~_sent_to(converter, node))
+```
+
+Use `EXISTS`, not a `JOIN`. A join duplicates the row once per match, which
+breaks keyset paging and inflates `count()` (computed as
+`select(func.count()).select_from(table)`), and `update(t)` / `delete(t)`
+expose no `.join()` at all — so a join-based criterion would work for reads and
+fail for conditional writes. `EXISTS` works in all three places.
+
+Three rules the registration contract enforces:
+
+* **Register the pair.** `(positive, negated)` is mandatory, and the negated
+  form must be the exact complement — negation is chosen at the leaf, before an
+  expression exists, because `NOT (col > 5)` drops NULL rows while the correct
+  complement is `col IS NULL OR col <= 5`. `NOT EXISTS` is the complement of
+  `EXISTS` for free.
+* **Raise, don't skip.** An unconvertible node raises `UnsupportedFilterError`;
+  it never returns "not applicable". Skipping a filter is fail-open, which is
+  exactly the leak the all-or-nothing policy prevents. The same applies to
+  `matches`: a node that cannot be evaluated in memory must raise from it, so
+  the list backend and the `allow_filter_iteration` fallback fail loudly
+  instead of silently disagreeing with the database.
+* **Registration is process-global.** `register_logical` mutates a module-level
+  registry, so two resources cannot disagree about what a node type means and
+  re-registering a class replaces its handlers. Register once, where the node is
+  defined. A custom node is per-backend: `$lookup` is not a plain query-dict
+  fragment, so a SQL handler has no automatic Mongo twin.
+
+A node that needs one query before it can build its criterion — "resolve this
+tenant's project ids, then match" — defines an async hook. `resolve(filter_)`
+walks the tree, awaits every node's hook and caches onto the context's mutable
+`meta`; `condition()` stays sync:
+
+```python
+class TenantProjects(SearchFilter[int]):
+    tenant_id: int
+
+    def matches(self, value: int) -> bool:
+        raise NotImplementedError("pushdown-only")
+
+    async def resolve(self, ctx: SqlFilterContext) -> None:
+        rows = await ctx.session.execute(
+            select(Project.c.id).where(Project.c.tenant_id == self.tenant_id)
+        )
+        ctx.meta[self] = tuple(rows.scalars().all())
+
+
+def _tenant_projects(converter, node):
+    ids = converter.ctx.meta[node]
+    return Message.__table__.c.project_id.in_(ids) if ids else false()
+```
+
+A custom node is **not** on the query-param surface: `operators_for_annotation`
+derives that from scalar annotations, so `?recipients.user_id__eq=` does not
+exist. Hand the node to the service as a policy, a scoping filter, or a
+`POST /batch-edit` condition. The declared filter type does not gate
+`batch-edit` either — the gate is `ctx.columns`, which holds only queryable
+fields, so a custom node cannot reach a projected-away column.
+
+Pinned by `tests/unit/test_custom_filter_nodes.py`.
+
 See `specs/filtering.qnt` and `specs/sorting.qnt`.
 
 ## Keyset paging

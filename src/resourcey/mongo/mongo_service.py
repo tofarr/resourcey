@@ -272,7 +272,7 @@ class MongoService(Service[T, K]):
         standard = search_filter.create_standard_filter()
         converter = self._resource.build_filter_converter()
         try:
-            await converter.resolve()
+            await converter.resolve(standard)
             return converter.apply(standard)
         except UnsupportedFilterError:
             if not self._resource.allow_filter_iteration:

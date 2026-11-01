@@ -48,7 +48,7 @@ first.
 | `dto_defaults.qnt` | the `DTO` conventions (uuid4 id, intent wins, timestamps) |
 | `exposure.qnt` | `get_exposed_resource`, view narrowing, batch-union narrowing |
 | `secret_serialization.qnt` | redact / expose / encrypt precedence |
-| `filtering.qnt` | normalisation, NULL-safe negation, pushdown soundness, `in` |
+| `filtering.qnt` | normalisation, NULL-safe negation, pushdown soundness, `in`, custom nodes over a related table |
 | `sorting.qnt` | total order, keyset agreement, descending mirror, cursor binding |
 | `cache_defaults.qnt` / `cache_freshness.qnt` | strategy selection and freshness |
 | `auth.qnt` / `api_key.qnt` / `principal_store.qnt` | authentication pipeline, key secrecy, stored-principal authority |

@@ -246,7 +246,7 @@ class SqlService(Service[T, K]):
         standard = search_filter.create_standard_filter()
         converter = self._resource.build_filter_converter(session)
         try:
-            await converter.resolve()
+            await converter.resolve(standard)
             return converter.apply(stmt, standard)
         except UnsupportedFilterError:
             if not self._resource.allow_filter_iteration:
@@ -282,7 +282,7 @@ class SqlService(Service[T, K]):
         """
         standard = condition.create_standard_filter()
         converter = self._resource.build_filter_converter(session)
-        await converter.resolve()
+        await converter.resolve(standard)
         return converter.apply(stmt, standard)
 
     async def batch_read(self, ids: list[K]) -> list[T | None]:

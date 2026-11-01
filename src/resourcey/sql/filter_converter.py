@@ -26,8 +26,8 @@ This module imports no code outside the framework.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, MutableMapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 
@@ -182,7 +182,32 @@ def register_logical(
     positive: LogicalHandler,
     negated: LogicalHandler,
 ) -> None:
-    """Register a logical node handler pair (positive + NULL-safe negated)."""
+    """Register a logical node handler pair (positive + NULL-safe negated).
+
+    This is the escape hatch for a node whose criterion needs more than one
+    column of the row being queried — a predicate over a related table, written
+    as ``EXISTS (SELECT 1 FROM related WHERE ...)`` (not a ``JOIN``: a join
+    duplicates rows, inflating both the page and ``count()``, and SQLAlchemy
+    Core's ``update()`` / ``delete()`` expose no ``.join()``, so a join-based
+    criterion would work for reads and fail for conditional writes).
+
+    The pair is mandatory and the negated form must be the *exact complement* of
+    the positive one, NULL-safe: negation has to be chosen at the leaf, before
+    an expression exists, because ``NOT (col > 5)`` drops NULL rows while the
+    correct complement is ``col IS NULL OR col <= 5``.
+
+    Registration is a **process-global mutation** of a module-level registry:
+    two resources cannot disagree about what a node type means, and
+    re-registering a class replaces its handlers. Register once, at import time
+    of the module that defines the node.
+
+    A handler runs during :meth:`SqlFilterConverter.condition`, which is sync.
+    A handler that needs one query before it can build its criterion declares
+    ``async def resolve(self, ctx)`` on the node; the converter awaits it and
+    caches the result on ``ctx.meta`` before conversion starts. See
+    :meth:`SearchFilter.matches` for the contract the node's in-memory
+    predicate must keep.
+    """
     _LOGICAL_REGISTRY[filter_type] = (positive, negated)
 
 
@@ -191,7 +216,12 @@ def register_operator(
     positive: OperatorHandler,
     negated: OperatorHandler,
 ) -> None:
-    """Register a value-leaf handler pair (positive + NULL-safe negated)."""
+    """Register a value-leaf handler pair (positive + NULL-safe negated).
+
+    A value leaf is reached only *with* a bound column, so its handlers receive
+    ``(ctx, column, value)``. The ``(positive, negated)`` and global-registry
+    rules in :func:`register_logical` apply here unchanged.
+    """
     _OPERATOR_REGISTRY[filter_type] = (positive, negated)
 
 
@@ -340,12 +370,15 @@ class SqlFilterContext:
     projected away from the read model cannot be filtered. ``session`` is
     available to handlers that need more than one statement. ``allow_iteration``
     permits the in-memory fallback — off by default, since a silent full-table
-    scan behind a public ``GET`` is a DoS.
+    scan behind a public ``GET`` is a DoS. ``meta`` is the mutable cache a node's
+    async ``resolve`` writes to and its sync handler reads back, keyed by the
+    node (frozen, hence hashable).
     """
 
     columns: Mapping[str, Column[Any]]
     session: AsyncSession | None = None
     allow_iteration: bool = False
+    meta: MutableMapping[Any, Any] = field(default_factory=dict)
 
     def column_for(self, attribute: str) -> Column[Any]:
         """The column for ``attribute``; raise :class:`UnsupportedFilterError` if absent."""
@@ -360,20 +393,27 @@ class SqlFilterContext:
 class SqlFilterConverter:
     """Convert a standard filter tree into SQLAlchemy conditions.
 
-    ``resolve()`` is the only phase that may do IO (no handler needs it today);
-    ``apply()`` is pure statement building over the resolved context.
+    ``resolve()`` is the only phase that may do IO; ``apply()`` and
+    ``condition()`` are pure statement building over the resolved context.
     """
 
     def __init__(self, ctx: SqlFilterContext) -> None:
         self.ctx = ctx
 
-    async def resolve(self) -> None:
-        """Run any IO-needing handlers and cache their results onto ``ctx``.
+    async def resolve(self, filter_: SearchFilter[Any]) -> None:
+        """Await every node's ``resolve`` hook, caching onto ``ctx.meta``.
 
-        Empty today: every standard handler is pure. It exists so a future
-        relationship-traversal handler can query without changing signatures.
+        A node type that needs one query before it can build its criterion
+        defines ``async def resolve(self, ctx: SqlFilterContext) -> None`` and
+        stores the result in ``ctx.meta[self]``; its sync handler reads it back.
+        Standard nodes define no hook, so this is a no-op for them. Equal nodes
+        share a cache entry, so a node appearing twice resolves once.
         """
-        return None
+        for node in filter_.walk():
+            hook = getattr(node, "resolve", None)
+            if hook is None or node in self.ctx.meta:
+                continue
+            await hook(self.ctx)
 
     def apply(self, stmt: S, filter_: SearchFilter[Any]) -> S:
         """Return ``stmt`` with ``filter_``'s WHERE clause applied (if any)."""

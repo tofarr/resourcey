@@ -66,6 +66,15 @@ Declaring a resource produces:
   storage-agnostic tree and are pushed into the SQL `WHERE` clause; an
   unconvertible filter fails loudly unless the resource opts into an in-memory
   fallback.
+* **Filters over a related table** — a predicate that needs another table
+  ("messages sent to this user") is a custom node registered with
+  `register_logical`, written as `EXISTS (SELECT 1 ...)` rather than a `JOIN`
+  (a join duplicates rows and cannot be used on the write path). Register the
+  `(positive, negated)` pair, keep the node's `matches` in agreement with its
+  SQL — or have it raise when it cannot be evaluated in memory — and note that
+  registration is process-global. A node that needs one query first declares
+  `async def resolve(self, ctx)`, which the converter awaits and caches on
+  `ctx.meta` before converting. Custom nodes are not on the query-param surface.
 * **Sorting and cursor paging** — `?sort=<field>&desc=true` over any sortable
   (i.e. readable) field, with opaque keyset cursors instead of `offset`.
 * **Caching** — an `ETag` / `Last-Modified` strategy chosen from the resource's

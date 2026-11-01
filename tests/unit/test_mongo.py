@@ -1158,9 +1158,30 @@ class TestFilterConverter:
         with pytest.raises(UnsupportedFilterError, match="without a bound field"):
             converter.negated_condition(EqFilter(value=1))
 
-    async def test_resolve_is_a_noop(self) -> None:
+    async def test_resolve_is_a_noop_for_standard_nodes(self) -> None:
         converter = self._converter()
-        assert await converter.resolve() is None
+        assert await converter.resolve(AllFilter()) is None
+        assert converter.ctx.meta == {}
+
+    async def test_resolve_awaits_a_custom_nodes_hook_once(self) -> None:
+        """The Mongo seam mirrors SQL: a node caches on ``ctx.meta`` via ``resolve``."""
+        calls: list[str] = []
+
+        class Cached(SearchFilter[Any]):
+            value: int = 1
+
+            def matches(self, value: Any) -> bool:
+                return True
+
+            async def resolve(self, ctx: Any) -> None:
+                calls.append("resolved")
+                ctx.meta[self] = "cached"
+
+        converter = self._converter()
+        node = Cached()
+        await converter.resolve(and_(node, node))
+        assert calls == ["resolved"]
+        assert converter.ctx.meta[node] == "cached"
 
     def test_apply_returns_the_condition(self) -> None:
         converter = self._converter()
