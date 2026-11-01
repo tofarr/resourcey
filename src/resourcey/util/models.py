@@ -223,6 +223,7 @@ class DiscriminatedUnionMixin(BaseModel):
                         data = data.copy()
                         data.pop("kind", None)
                 return handler(data)
+            data = dict(data)
             kind = data.pop("kind", None)
             # Sanity check: if we're validating a concrete class directly,
             # the kind (if provided) should match the class name. This should
@@ -230,6 +231,7 @@ class DiscriminatedUnionMixin(BaseModel):
             # already routed to the correct subclass.
             assert kind is None or kind == cls.__name__
             return handler(data)
+        data = dict(data)
         kind = data.pop("kind", None)
         if kind is None:
             subclasses = _get_checked_concrete_subclasses(cls)

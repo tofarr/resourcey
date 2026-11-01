@@ -303,3 +303,18 @@ class TestIsAbstractEdgeCases:
                 raise Exception("boom")
 
         assert _is_abstract(Weird) is False
+
+
+class TestValidateDoesNotMutateInput:
+    def test_concrete_class_validate_leaves_dict_intact(self):
+        data = {"kind": "Cat", "meow_volume": 3}
+        first = Cat.model_validate(data)
+        second = Cat.model_validate(data)
+        assert first == second
+        assert data == {"kind": "Cat", "meow_volume": 3}
+
+    def test_base_class_validate_leaves_dict_intact(self):
+        data = {"kind": "Dog", "bark_pitch": "high"}
+        Animal.model_validate(data)
+        Animal.model_validate(data)
+        assert data == {"kind": "Dog", "bark_pitch": "high"}
