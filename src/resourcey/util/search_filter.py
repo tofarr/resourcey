@@ -10,8 +10,12 @@ Two levels of lowering:
 1. **Standard filters** — the node types below. This is the tree a backend sees.
 2. **Object filters** — :class:`BaseObjectFilter` subclasses declare
    ``<attribute>__<op>`` fields and lower *themselves* to a standard tree via
-   :meth:`BaseObjectFilter.create_standard_filter`, so a custom object filter
-   needs no backend handler.
+   :meth:`BaseObjectFilter.to_standard`, so a custom object filter needs no
+   backend handler.
+
+Lowering is deliberately **not** part of the ``SearchFilter`` contract: it is
+the ergonomic surface of one node type, not a capability every filter has. A
+backend only ever has to handle the standard nodes.
 
 Normalisation cannot live in ``__init__`` (a frozen model cannot return a
 different type), so the algebraic identities live in :func:`and_`, :func:`or_`,
@@ -77,13 +81,6 @@ class SearchFilter(DiscriminatedUnionMixin, Generic[T]):
     def matches(self, value: T) -> bool:
         """Whether ``value`` satisfies this filter."""
         raise NotImplementedError
-
-    def create_standard_filter(self) -> SearchFilter[Any]:
-        """This filter as a standard tree (identity for a standard node).
-
-        :class:`BaseObjectFilter` overrides this to lower its fields.
-        """
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -407,14 +404,14 @@ class BaseObjectFilter(SearchFilter[T]):
         # ``object.__setattr__`` because the model is frozen.
         object.__setattr__(self, "_standard_filter", self._build_standard_filter())
 
-    def create_standard_filter(self) -> SearchFilter[Any]:
+    def to_standard(self) -> SearchFilter[Any]:
         """The cached standard tree this object filter lowers to."""
         if self._standard_filter is None:  # pragma: no cover - set in model_post_init
             object.__setattr__(self, "_standard_filter", self._build_standard_filter())
         return cast("SearchFilter[Any]", self._standard_filter)
 
     def matches(self, value: T) -> bool:
-        return self.create_standard_filter().matches(value)
+        return self.to_standard().matches(value)
 
     def _build_standard_filter(self) -> SearchFilter[Any]:
         clauses: list[SearchFilter[Any]] = []

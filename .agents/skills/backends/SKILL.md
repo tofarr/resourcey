@@ -182,7 +182,7 @@ Both are two-level. The storage-agnostic half is in `util`:
   total on a nullable attribute. The identifier tie-breaker that makes *paging*
   total is the backend's job, not the node's.
 * `BaseObjectFilter` — declares `<attribute>__<op>` fields and lowers to a
-  standard tree via `create_standard_filter()`, cached in a `PrivateAttr`.
+  standard tree via `to_standard()`, cached in a `PrivateAttr`.
 * `operators_for_annotation(annotation)` — the derived op set by field type:
   bool → `eq`/`in`; containers and Pydantic models → none; orderable types
   (int/float/Decimal/datetime/date/time) → `eq`/`in`/`gt`/`ge`/`lt`/`le`;
@@ -190,26 +190,47 @@ Both are two-level. The storage-agnostic half is in `util`:
 
 The SQL half (`sql/filter_converter.py`, `sql/sort_converter.py`) and the Mongo
 half (`mongo_filter_converter.py`, `mongo_sort_converter.py`) are the only
-framework files importing their driver for these concerns. Each dispatches
-through **three registries** — logical / attribute / operator — with an
-import-time completeness assert. Every operator registers a `(positive,
-negated)` pair; the negated form is NULL-safe (`IS DISTINCT FROM` for equality,
-`col IS NULL OR <complement>` otherwise) so it agrees with the in-memory
-`matches` complement on NULL rows, where naive SQL `NOT` would drop them. Mongo
-reproduces the same complement on absent / null fields and uses
-`{"$nor": [{}]}` as its match-nothing sentinel.
+framework files importing their driver for these concerns.
+
+Filtering dispatches through an **ordered rule list**, not a registry or a
+subclass scan. A `SqlFilterRule` / `MongoFilterRule` is a frozen dataclass with
+`handles(node)` (a pure type test) and an async `convert(node, converter, *,
+column=..., negated=...)`. `DEFAULT_RULES` is the explicit standard set;
+`SqlResource.get_filter_rules()` returns it and is the extension seam — prepend
+a rule for an app-defined node and it wins, since the first match wins. That is
+the supported answer to "filter on a related table": a rule builds a correlated
+`exists()` (never a `join`, which duplicates rows, inflates `count()`, and has no
+equivalent on `update` / `delete`).
+
+`convert` is a coroutine so a rule can run a query before it builds its
+criterion, and `ctx.meta` is a mutable dict shared across one conversion so a
+rule can cache a resolved value for a sibling. Children convert sequentially,
+because a rule may share the session. Only the resource's *queryable* fields are
+in `ctx.columns`, and a missing one raises — that is the security gate.
+
+Negation is resolved at the leaf, not by wrapping the result in `NOT`: the
+logical rules push `negated` down (De Morgan for `And` / `Or`, flip for `Not`)
+and every value operator supplies its own NULL-safe complement (`IS DISTINCT
+FROM` for equality, `col IS NULL OR <complement>` otherwise, Mongo `$nor` of the
+positive). A naive `NOT` would drop NULL rows from both branches. Empty nodes
+have a polarity-dependent identity: an empty `And` is TRUE (its complement
+matches nothing) and an empty `Or` is FALSE (its complement matches everything).
+A condition that reduces to `true()` is dropped rather than emitted as a bare
+`WHERE true`; Mongo's "no restriction" is `None`.
 
 Pushdown is **all-or-nothing**: an unconvertible node raises
 `UnsupportedFilterError` unless the resource sets `allow_filter_iteration =
 True`, which materialises matching ids in memory. An unbounded scan behind a
 public `GET` is otherwise a DoS, and silently skipping a filter could leak a
-permission scope.
+permission scope. There is no "not applicable" boolean for a rule for the same
+reason.
 
 The security gate is the same everywhere: the filter and sort surfaces derive
 from `read_response`, so a field projected away is neither filterable nor
 sortable.
 
-See `specs/filtering.qnt` and `specs/sorting.qnt`.
+See `specs/filtering.qnt` and `specs/sorting.qnt`; the extension pattern is
+pinned by `tests/unit/test_custom_filter_nodes.py`.
 
 ## Keyset paging
 

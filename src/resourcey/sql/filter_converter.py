@@ -1,44 +1,59 @@
-"""Translate a standard :class:`SearchFilter` tree into SQLAlchemy conditions (issue #79).
+"""Translate a :class:`SearchFilter` tree into SQLAlchemy conditions (issue #79).
 
-This is the only file that imports SQLAlchemy for filtering. It consumes only
-the *standard* filter tree; an object filter has already lowered itself.
+This is the only file that imports SQLAlchemy for filtering. Conversion is a
+**rule list**, not a fixed dispatch table:
 
-Dispatch is split across three registries by what each node needs:
+* A :class:`SqlFilterRule` is a frozen dataclass that answers ``handles(node)``
+  and converts the node asynchronously. The default list
+  (:data:`DEFAULT_RULES`) covers the standard tree; an app appends a rule for
+  its own node type — a predicate over a related table (``EXISTS``), a tenant
+  lookup, anything — without touching the framework.
+* The list is **explicit and ordered**. There is no subclass scan and no
+  process-global registry: ``SqlResource.get_filter_rules()`` is where a
+  resource extends it, so two resources may disagree about a node type.
+* An unconvertible node **raises** :class:`UnsupportedFilterError`. There is no
+  "not applicable" boolean, because skipping a filter is fail-open.
 
-* **Logical** — ``AllFilter`` / ``NoMatchFilter`` / ``AndFilter`` / ``OrFilter``
-  / ``NotFilter``: no column, they recurse.
-* **Attribute** — ``AttrFilter``: resolves an attribute name to a column and
-  binds it for the subtree below.
-* **Operator** — the value leaves, reachable only *with* a bound column.
+Negation is chosen at the leaf
+------------------------------
+``condition(node, negated=True)`` asks for the *complement* of ``node``. The
+logical rules push the flag down (De Morgan for ``And`` / ``Or``, flip for
+``Not``) and each value rule supplies its own NULL-safe complement — for
+``Gt`` that is ``col IS NULL OR col <= v``, not ``NOT (col > v)``, which would
+drop NULL rows from both branches. The in-memory :meth:`SearchFilter.matches`
+complement is the reference, pinned by ``specs/filtering.qnt`` laws 2 and 3.
 
-The module asserts at import time that every standard leaf has a handler.
-
-NULL-safe negation
-------------------
-SQL ``NOT (col = 'x')`` compiles to ``col != 'x'``, which is *unknown* for a
-NULL row, so a NULL row would match neither ``EqFilter('x')`` nor its negation
-and vanish from both branches. Every operator therefore registers a
-``(positive, negated)`` pair; the negated form is NULL-safe, so it agrees with
-the in-memory :meth:`SearchFilter.matches` complement on every row.
+Async, because a rule may need one query first
+----------------------------------------------
+``convert`` is a coroutine, so a rule that must resolve a set of ids before it
+can build its criterion runs that query inline. ``ctx.meta`` is a mutable dict
+shared by every rule of one conversion, so a rule may cache a result for a
+sibling (or for its own second invocation under the other polarity). Children
+are converted **sequentially** — a rule that touches ``ctx.session`` must not
+race another rule on the same connection.
 
 This module imports no code outside the framework.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, TypeVar, cast
 
 from sqlalchemy import Column, ColumnElement, and_, false, not_, or_, true
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import True_
+from sqlalchemy.sql.schema import Table
 
 from resourcey.core.errors import UnsupportedFilterError
 from resourcey.util.search_filter import (
     AllFilter,
     AndFilter,
     AttrFilter,
+    BaseObjectFilter,
     ContainsFilter,
     EqFilter,
     GeFilter,
@@ -54,13 +69,8 @@ from resourcey.util.search_filter import (
 
 S = TypeVar("S")
 
-# A converter handler for a logical node: ``(converter, node) -> condition | None``.
-LogicalHandler = Callable[["SqlFilterConverter", SearchFilter[Any]], "ColumnElement[bool] | None"]
-# A converter handler for a value leaf: ``(ctx, column, value) -> condition``.
-OperatorHandler = Callable[["SqlFilterContext", Column[Any], Any], ColumnElement[bool]]
-
-# ``condition | None``: ``None`` means "no restriction" (matches every row), so
-# ``AllFilter`` and an unset object filter are uniform.
+# A value-leaf handler: ``(column, value) -> condition``.
+ValueHandler = Callable[[Column[Any], Any], ColumnElement[bool]]
 
 
 def _naive(value: Any) -> Any:
@@ -75,18 +85,36 @@ def _naive(value: Any) -> Any:
     return value
 
 
+def _naive_values(value: Any) -> list[Any]:
+    """Normalise an ``InFilter``'s values for binding (aware datetimes -> UTC)."""
+    return [_naive(item) for item in value]
+
+
 # ---------------------------------------------------------------------------
-# Value-operator handlers
+# Value operators: a positive form and its NULL-safe complement
 # ---------------------------------------------------------------------------
 
 
-def _eq_positive(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+@dataclass(frozen=True)
+class ValueOperator:
+    """The two polarities of one value leaf.
+
+    ``negated`` must agree with the in-memory complement on **every** row,
+    including NULL. That is why it is a separate function rather than
+    ``not_(positive)``.
+    """
+
+    positive: ValueHandler
+    negated: ValueHandler
+
+
+def _eq_positive(column: Column[Any], value: Any) -> ColumnElement[bool]:
     if value is None:
         return column.is_(None)
     return cast("ColumnElement[bool]", column == _naive(value))
 
 
-def _eq_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _eq_negated(column: Column[Any], value: Any) -> ColumnElement[bool]:
     if value is None:
         return column.is_not(None)
     # IS DISTINCT FROM is NULL-safe: a NULL row lands in the negated branch
@@ -94,35 +122,35 @@ def _eq_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> Colum
     return column.is_distinct_from(_naive(value))
 
 
-def _gt_positive(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _gt_positive(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return cast("ColumnElement[bool]", column > _naive(value))
 
 
-def _gt_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _gt_negated(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return or_(column.is_(None), column <= _naive(value))
 
 
-def _ge_positive(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _ge_positive(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return cast("ColumnElement[bool]", column >= _naive(value))
 
 
-def _ge_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _ge_negated(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return or_(column.is_(None), column < _naive(value))
 
 
-def _lt_positive(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _lt_positive(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return cast("ColumnElement[bool]", column < _naive(value))
 
 
-def _lt_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _lt_negated(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return or_(column.is_(None), column >= _naive(value))
 
 
-def _le_positive(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _le_positive(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return cast("ColumnElement[bool]", column <= _naive(value))
 
 
-def _le_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _le_negated(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return or_(column.is_(None), column > _naive(value))
 
 
@@ -132,29 +160,25 @@ def _contains_pattern(value: Any) -> str:
     return f"%{safe}%"
 
 
-def _contains_positive(
-    ctx: SqlFilterContext, column: Column[Any], value: Any
-) -> ColumnElement[bool]:
+def _contains_positive(column: Column[Any], value: Any) -> ColumnElement[bool]:
     return cast("ColumnElement[bool]", column.ilike(_contains_pattern(value), escape="\\"))
 
 
-def _contains_negated(
-    ctx: SqlFilterContext, column: Column[Any], value: Any
-) -> ColumnElement[bool]:
+def _contains_negated(column: Column[Any], value: Any) -> ColumnElement[bool]:
     # A NULL column does not contain the needle, so it belongs in the negation.
     return or_(column.is_(None), not_(column.ilike(_contains_pattern(value), escape="\\")))
 
 
-def _in_positive(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _in_positive(column: Column[Any], value: Any) -> ColumnElement[bool]:
     # An empty set matches nothing (fail-closed): return an explicit false rather
-    # than compile ``col IN ()`` (which SQLAlchemy warns about).
+    # than compile ``col IN ()``.
     values = _naive_values(value)
     if not values:
         return false()
     return cast("ColumnElement[bool]", column.in_(values))
 
 
-def _in_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> ColumnElement[bool]:
+def _in_negated(column: Column[Any], value: Any) -> ColumnElement[bool]:
     # NULL-safe complement: a NULL column is not in the set, so it belongs in the
     # negated branch (naive ``NOT IN`` would drop it as Unknown). The complement of
     # an empty (matches-nothing) set is "matches everything".
@@ -164,167 +188,244 @@ def _in_negated(ctx: SqlFilterContext, column: Column[Any], value: Any) -> Colum
     return or_(column.is_(None), column.not_in(values))
 
 
-def _naive_values(value: Any) -> list[Any]:
-    """Normalise an ``InFilter``'s values for binding (aware datetimes -> UTC)."""
-    return [_naive(item) for item in value]
+STANDARD_VALUE_OPERATORS: Mapping[type[SearchFilter[Any]], ValueOperator] = {
+    EqFilter: ValueOperator(_eq_positive, _eq_negated),
+    GtFilter: ValueOperator(_gt_positive, _gt_negated),
+    GeFilter: ValueOperator(_ge_positive, _ge_negated),
+    LtFilter: ValueOperator(_lt_positive, _lt_negated),
+    LeFilter: ValueOperator(_le_positive, _le_negated),
+    ContainsFilter: ValueOperator(_contains_positive, _contains_negated),
+    InFilter: ValueOperator(_in_positive, _in_negated),
+}
 
 
 # ---------------------------------------------------------------------------
-# Registries
+# Rules
 # ---------------------------------------------------------------------------
 
-_LOGICAL_REGISTRY: dict[type[SearchFilter[Any]], tuple[LogicalHandler, LogicalHandler]] = {}
-_OPERATOR_REGISTRY: dict[type[SearchFilter[Any]], tuple[OperatorHandler, OperatorHandler]] = {}
+
+class SqlFilterRule(ABC):
+    """One conversion strategy for one (or more) filter node types.
+
+    A rule is a frozen dataclass, not a Pydantic model: it is a stateless
+    strategy that is never validated or serialized, so it has no fields unless
+    it is parameterized.
+
+    ``handles`` must be pure and cheap — a type test, or a type test plus a
+    field test for a parameterized rule. It must **not** consult the database;
+    anything needing IO belongs in :meth:`convert`.
+    """
+
+    @abstractmethod
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        """Whether this rule converts ``node``."""
+
+    @abstractmethod
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        """The condition for ``node`` — its complement when ``negated``.
+
+        ``column`` is set only when an enclosing :class:`AttrFilter` bound one.
+        """
 
 
-def register_logical(
-    filter_type: type[SearchFilter[Any]],
-    positive: LogicalHandler,
-    negated: LogicalHandler,
-) -> None:
-    """Register a logical node handler pair (positive + NULL-safe negated)."""
-    _LOGICAL_REGISTRY[filter_type] = (positive, negated)
+def _narrow(node: SearchFilter[Any], node_type: type[Any]) -> Any:
+    """``node`` typed as ``node_type``, after ``handles`` already proved the type."""
+    if not isinstance(node, node_type):  # pragma: no cover - handles() gate
+        raise UnsupportedFilterError(f"{type(node).__name__} is not a {node_type.__name__}")
+    return node
 
 
-def register_operator(
-    filter_type: type[SearchFilter[Any]],
-    positive: OperatorHandler,
-    negated: OperatorHandler,
-) -> None:
-    """Register a value-leaf handler pair (positive + NULL-safe negated)."""
-    _OPERATOR_REGISTRY[filter_type] = (positive, negated)
+@dataclass(frozen=True)
+class AllRule(SqlFilterRule):
+    """``AllFilter`` — no restriction."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, AllFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        return false() if negated else true()
 
 
-def is_operator(node: SearchFilter[Any]) -> bool:
-    """Whether ``node`` is a value leaf (needs a bound column)."""
-    return type(node) in _OPERATOR_REGISTRY
+@dataclass(frozen=True)
+class NoMatchRule(SqlFilterRule):
+    """``NoMatchFilter`` — matches nothing."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, NoMatchFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        return true() if negated else false()
 
 
-# -- logical handlers -------------------------------------------------------
+@dataclass(frozen=True)
+class NotRule(SqlFilterRule):
+    """``NotFilter`` — flips the polarity of its child."""
 
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, NotFilter)
 
-def _all_positive(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    return None  # no restriction: matches every row
-
-
-def _all_negated(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    return false()  # its complement matches nothing
-
-
-def _no_match_positive(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    return false()
-
-
-def _no_match_negated(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    return None  # the complement of "match nothing" matches everything
-
-
-def _and_positive(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    conditions = [c for c in converter._child_conditions(node) if c is not None]
-    if not conditions:
-        return None
-    return and_(*conditions) if len(conditions) > 1 else conditions[0]
-
-
-def _and_negated(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    # NOT (a AND b) == (NOT a) OR (NOT b)
-    conditions = [c for c in converter._child_negated(node) if c is not None]
-    if not conditions:
-        # An empty conjunction matches every row, so its complement matches none.
-        return false()
-    return or_(*conditions) if len(conditions) > 1 else conditions[0]
-
-
-def _or_positive(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    children = converter._child_conditions(node)
-    # Any child with no restriction makes the whole disjunction unrestricted.
-    if any(c is None for c in children):
-        return None
-    present = [c for c in children if c is not None]
-    if not present:
-        return false()
-    return or_(*present) if len(present) > 1 else present[0]
-
-
-def _or_negated(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    # NOT (a OR b) == (NOT a) AND (NOT b)
-    children = converter._child_negated(node)
-    if any(c is None for c in children):
-        return None
-    present = [c for c in children if c is not None]
-    if not present:
-        # An empty disjunction matches no row, so its complement matches every row.
-        return None
-    return and_(*present) if len(present) > 1 else present[0]
-
-
-def _not_positive(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    child = converter._resolve_not_child(node)
-    return converter.negated_condition(child)
-
-
-def _not_negated(
-    converter: SqlFilterConverter, node: SearchFilter[Any]
-) -> ColumnElement[bool] | None:
-    child = converter._resolve_not_child(node)
-    return converter.condition(child)
-
-
-register_logical(AllFilter, _all_positive, _all_negated)
-register_logical(NoMatchFilter, _no_match_positive, _no_match_negated)
-register_logical(AndFilter, _and_positive, _and_negated)
-register_logical(OrFilter, _or_positive, _or_negated)
-register_logical(NotFilter, _not_positive, _not_negated)
-register_operator(EqFilter, _eq_positive, _eq_negated)
-register_operator(GtFilter, _gt_positive, _gt_negated)
-register_operator(GeFilter, _ge_positive, _ge_negated)
-register_operator(LtFilter, _lt_positive, _lt_negated)
-register_operator(LeFilter, _le_positive, _le_negated)
-register_operator(ContainsFilter, _contains_positive, _contains_negated)
-register_operator(InFilter, _in_positive, _in_negated)
-
-
-def _assert_registries_are_complete() -> None:
-    """Fail at import time if a standard node has no handler."""
-    standard_logical = {AllFilter, NoMatchFilter, AndFilter, OrFilter, NotFilter}
-    standard_operators = {
-        EqFilter,
-        GtFilter,
-        GeFilter,
-        LtFilter,
-        LeFilter,
-        ContainsFilter,
-        InFilter,
-    }
-    missing_logical = standard_logical - set(_LOGICAL_REGISTRY)
-    missing_operators = standard_operators - set(_OPERATOR_REGISTRY)
-    if missing_logical or missing_operators:
-        raise RuntimeError(
-            "SqlFilterConverter registries are incomplete: "
-            f"logical={sorted(t.__name__ for t in missing_logical)}, "
-            f"operators={sorted(t.__name__ for t in missing_operators)}"
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        return await converter.condition(
+            _narrow(node, NotFilter).filter, column=column, negated=not negated
         )
 
 
-_assert_registries_are_complete()
+@dataclass(frozen=True)
+class AndRule(SqlFilterRule):
+    """``AndFilter`` — conjunction; under negation, De Morgan to a disjunction."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, AndFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        filters = _narrow(node, AndFilter).filters
+        children = await converter.conditions(filters, column=column, negated=negated)
+        if negated:
+            # An empty conjunction is TRUE, so its complement is FALSE.
+            return or_(*children) if children else false()
+        return and_(*children) if children else true()
+
+
+@dataclass(frozen=True)
+class OrRule(SqlFilterRule):
+    """``OrFilter`` — disjunction; under negation, De Morgan to a conjunction."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, OrFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        filters = _narrow(node, OrFilter).filters
+        children = await converter.conditions(filters, column=column, negated=negated)
+        if negated:
+            # An empty disjunction is FALSE, so its complement is TRUE.
+            return and_(*children) if children else true()
+        return or_(*children) if children else false()
+
+
+@dataclass(frozen=True)
+class ObjectFilterRule(SqlFilterRule):
+    """``BaseObjectFilter`` — lower its ``<attribute>__<op>`` fields, then convert."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, BaseObjectFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        standard = _narrow(node, BaseObjectFilter).to_standard()
+        return await converter.condition(standard, column=column, negated=negated)
+
+
+@dataclass(frozen=True)
+class AttrRule(SqlFilterRule):
+    """``AttrFilter`` — resolve the attribute to a *queryable* column, then convert."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, AttrFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        attribute_filter = _narrow(node, AttrFilter)
+        bound = converter.ctx.column_for(attribute_filter.attribute)
+        return await converter.condition(attribute_filter.filter, column=bound, negated=negated)
+
+
+@dataclass(frozen=True)
+class ValueRule(SqlFilterRule):
+    """The value leaves — ``Eq`` / ``Gt`` / ``Ge`` / ``Lt`` / ``Le`` / ``Contains`` / ``In``.
+
+    ``operators`` is the extension point for an app's own leaf type: pass
+    ``{**STANDARD_VALUE_OPERATORS, MyLeaf: ValueOperator(pos, neg)}``.
+    """
+
+    operators: Mapping[type[SearchFilter[Any]], ValueOperator] = field(
+        default_factory=lambda: dict(STANDARD_VALUE_OPERATORS)
+    )
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return type(node) in self.operators
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: SqlFilterConverter,
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        if column is None:
+            raise UnsupportedFilterError(
+                f"{type(node).__name__} reached the converter without a bound column; "
+                "a value filter must sit under an AttrFilter"
+            )
+        operator = self.operators[type(node)]
+        handler = operator.negated if negated else operator.positive
+        return handler(column, cast("Any", node).value)
+
+
+DEFAULT_RULES: tuple[SqlFilterRule, ...] = (
+    AllRule(),
+    NoMatchRule(),
+    NotRule(),
+    AndRule(),
+    OrRule(),
+    ObjectFilterRule(),
+    AttrRule(),
+    ValueRule(),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -332,20 +433,24 @@ _assert_registries_are_complete()
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass
 class SqlFilterContext:
-    """Everything a conversion handler needs, passed as one frozen object.
+    """Everything a rule needs, passed as one object.
 
     ``columns`` holds only the resource's *queryable* fields, so a field
-    projected away from the read model cannot be filtered. ``session`` is
-    available to handlers that need more than one statement. ``allow_iteration``
-    permits the in-memory fallback — off by default, since a silent full-table
-    scan behind a public ``GET`` is a DoS.
+    projected away from the read model cannot be filtered — that is the
+    security gate, and it works by raising. ``table`` / ``id_column`` are for
+    rules that build a correlated subquery (``EXISTS``) against this resource.
+    ``meta`` is a mutable cache shared by every rule of one conversion, so a
+    rule can hand a resolved value to a sibling (or to its own second
+    invocation under the other polarity).
     """
 
     columns: Mapping[str, Column[Any]]
     session: AsyncSession | None = None
-    allow_iteration: bool = False
+    table: Table | None = None
+    id_column: Column[Any] | None = None
+    meta: MutableMapping[Any, Any] = field(default_factory=dict)
 
     def column_for(self, attribute: str) -> Column[Any]:
         """The column for ``attribute``; raise :class:`UnsupportedFilterError` if absent."""
@@ -358,81 +463,41 @@ class SqlFilterContext:
 
 
 class SqlFilterConverter:
-    """Convert a standard filter tree into SQLAlchemy conditions.
+    """Convert a filter tree into SQLAlchemy conditions through an ordered rule list."""
 
-    ``resolve()`` is the only phase that may do IO (no handler needs it today);
-    ``apply()`` is pure statement building over the resolved context.
-    """
-
-    def __init__(self, ctx: SqlFilterContext) -> None:
+    def __init__(
+        self, ctx: SqlFilterContext, rules: Sequence[SqlFilterRule] = DEFAULT_RULES
+    ) -> None:
         self.ctx = ctx
+        self.rules = tuple(rules)
 
-    async def resolve(self) -> None:
-        """Run any IO-needing handlers and cache their results onto ``ctx``.
-
-        Empty today: every standard handler is pure. It exists so a future
-        relationship-traversal handler can query without changing signatures.
-        """
-        return None
-
-    def apply(self, stmt: S, filter_: SearchFilter[Any]) -> S:
+    async def apply(self, stmt: S, filter_: SearchFilter[Any]) -> S:
         """Return ``stmt`` with ``filter_``'s WHERE clause applied (if any)."""
-        condition = self.condition(filter_)
-        if condition is None:
+        condition = await self.condition(filter_)
+        if isinstance(condition, True_):
+            # ``AllFilter`` imposes no restriction; a bare ``WHERE true`` is noise.
             return stmt
         return cast("S", stmt.where(condition))  # type: ignore[attr-defined]
 
-    def condition(
-        self, node: SearchFilter[Any], column: Column[Any] | None = None
-    ) -> ColumnElement[bool] | None:
-        """The positive condition for ``node`` (``None`` = no restriction)."""
-        if isinstance(node, AttrFilter):
-            return self.condition(node.filter, self.ctx.column_for(node.attribute))
-        if is_operator(node):
-            if column is None:
-                raise UnsupportedFilterError(
-                    f"{type(node).__name__} reached the converter without a bound column; "
-                    "a value filter must sit under an AttrFilter"
-                )
-            handler, _ = _OPERATOR_REGISTRY[type(node)]
-            return handler(self.ctx, column, node.value)  # type: ignore[attr-defined]
-        try:
-            positive, _ = _LOGICAL_REGISTRY[type(node)]
-        except KeyError:
-            raise UnsupportedFilterError(
-                f"No SQL conversion is registered for {type(node).__name__}"
-            ) from None
-        return positive(self, node)
+    async def condition(
+        self,
+        node: SearchFilter[Any],
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> ColumnElement[bool]:
+        """The condition for ``node``, or its NULL-safe complement when ``negated``."""
+        for rule in self.rules:
+            if rule.handles(node):
+                return await rule.convert(node, self, column=column, negated=negated)
+        raise UnsupportedFilterError(f"No SQL conversion is registered for {type(node).__name__}")
 
-    def negated_condition(
-        self, node: SearchFilter[Any], column: Column[Any] | None = None
-    ) -> ColumnElement[bool] | None:
-        """The NULL-safe complement of :meth:`condition` (``None`` = matches all)."""
-        if isinstance(node, AttrFilter):
-            return self.negated_condition(node.filter, self.ctx.column_for(node.attribute))
-        if is_operator(node):
-            if column is None:
-                raise UnsupportedFilterError(
-                    f"{type(node).__name__} reached the converter without a bound column; "
-                    "a value filter must sit under an AttrFilter"
-                )
-            _, negated = _OPERATOR_REGISTRY[type(node)]
-            return negated(self.ctx, column, node.value)  # type: ignore[attr-defined]
-        try:
-            _, negated_logical = _LOGICAL_REGISTRY[type(node)]
-        except KeyError:
-            raise UnsupportedFilterError(
-                f"No SQL conversion is registered for {type(node).__name__}"
-            ) from None
-        return negated_logical(self, node)
-
-    # -- child helpers (used by the logical handlers) -------------------
-
-    def _child_conditions(self, node: SearchFilter[Any]) -> list[ColumnElement[bool] | None]:
-        return [self.condition(child) for child in node.filters]  # type: ignore[attr-defined]
-
-    def _child_negated(self, node: SearchFilter[Any]) -> list[ColumnElement[bool] | None]:
-        return [self.negated_condition(child) for child in node.filters]  # type: ignore[attr-defined]
-
-    def _resolve_not_child(self, node: SearchFilter[Any]) -> SearchFilter[Any]:
-        return node.filter  # type: ignore[attr-defined, no-any-return]
+    async def conditions(
+        self,
+        nodes: Sequence[SearchFilter[Any]],
+        *,
+        column: Column[Any] | None = None,
+        negated: bool = False,
+    ) -> list[ColumnElement[bool]]:
+        """Convert children **sequentially** — a rule may share ``ctx.session``."""
+        return [await self.condition(node, column=column, negated=negated) for node in nodes]

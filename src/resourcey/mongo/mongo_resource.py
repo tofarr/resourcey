@@ -45,7 +45,12 @@ from resourcey.mongo.mongo_client import (
     MongoClientManager,
     get_mongo_client_manager,
 )
-from resourcey.mongo.mongo_filter_converter import MongoFilterContext, MongoFilterConverter
+from resourcey.mongo.mongo_filter_converter import (
+    DEFAULT_RULES,
+    MongoFilterContext,
+    MongoFilterConverter,
+    MongoFilterRule,
+)
 from resourcey.mongo.mongo_service import MongoService
 from resourcey.mongo.mongo_sort_converter import MongoSortContext, MongoSortConverter
 from resourcey.util.naming import camel_to_kebab, camel_to_snake, pluralize
@@ -202,9 +207,17 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
         fields = {attr: self.mongo_field_for(attr) for attr in queryable}
         return MongoFilterContext(fields=fields, id_field=self.get_id_field())
 
+    def get_filter_rules(self) -> tuple[MongoFilterRule, ...]:
+        """The ordered conversion rules for this resource (default: the standard set).
+
+        Override to prepend a rule for an app-defined node type. Order matters:
+        the first rule whose ``handles`` returns true wins.
+        """
+        return DEFAULT_RULES
+
     def build_filter_converter(self) -> MongoFilterConverter:
-        """A converter over this resource's query surface."""
-        return MongoFilterConverter(self.build_filter_context())
+        """A converter over this resource's query surface and rule set."""
+        return MongoFilterConverter(self.build_filter_context(), self.get_filter_rules())
 
     # ------------------------------------------------------------------
     # Sort conversion seam

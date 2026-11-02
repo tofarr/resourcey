@@ -211,21 +211,21 @@ class BadFilter(BaseObjectFilter[Row]):
 class TestObjectFilterLowering:
     def test_lowers_declared_fields(self) -> None:
         flt = ObjFilter(score__ge=5, name__contains="bob")
-        standard = flt.create_standard_filter()
+        standard = flt.to_standard()
         assert isinstance(standard, AndFilter)
         assert standard.matches(Row(score=7, name="BOB"))
         assert not standard.matches(Row(score=3, name="BOB"))
 
     def test_empty_lowers_to_all(self) -> None:
-        assert isinstance(ObjFilter().create_standard_filter(), AllFilter)
+        assert isinstance(ObjFilter().to_standard(), AllFilter)
         assert ObjFilter().matches(Row(score=1))
 
     def test_lowering_is_cached(self) -> None:
         flt = ObjFilter(score__ge=5)
-        assert flt.create_standard_filter() is flt.create_standard_filter()
+        assert flt.to_standard() is flt.to_standard()
 
     def test_ignores_non_clause_fields(self) -> None:
-        assert isinstance(BadFilter(name__bogus="x", plain=1).create_standard_filter(), AllFilter)
+        assert isinstance(BadFilter(name__bogus="x", plain=1).to_standard(), AllFilter)
 
     def test_roundtrips_through_search_filter(self) -> None:
         flt = ObjFilter(score__ge=5)
@@ -281,9 +281,7 @@ async def _ids(resource: SqlResource[Any, Any], filter_: SearchFilter[Any]) -> l
 
     async with resource._session_factory() as session:
         converter = resource.build_filter_converter(session)
-        await converter.resolve()
-        standard = filter_.create_standard_filter()
-        stmt = converter.apply(select(Thing.__table__.c.id), standard)
+        stmt = await converter.apply(select(Thing.__table__.c.id), filter_)
         return list((await session.execute(stmt)).scalars().all())
 
 
@@ -370,9 +368,11 @@ class TestSqlConversion:
         assert await _ids(resource, attr("score", EqFilter(value=None))) == [3]
         assert await _ids(resource, not_(attr("score", EqFilter(value=None)))) == [1, 2]
 
-    async def test_ge_and_le_negation_is_null_safe(self, sql_env) -> None:
+    async def test_every_ordering_complement_is_null_safe(self, sql_env) -> None:
         _maker, resource = sql_env
+        assert await _ids(resource, not_(attr("score", GtFilter(value=5)))) == [1, 3]
         assert await _ids(resource, not_(attr("score", GeFilter(value=10)))) == [1, 3]
+        assert await _ids(resource, not_(attr("score", LtFilter(value=10)))) == [2, 3]
         assert await _ids(resource, not_(attr("score", LeFilter(value=5)))) == [2, 3]
 
     async def test_constants_negation(self, sql_env) -> None:
@@ -392,7 +392,7 @@ class TestSqlConversion:
         assert await _ids(resource, not_(AndFilter(filters=()))) == []
         assert await _ids(resource, not_(OrFilter(filters=()))) == [1, 2, 3]
 
-    def test_negated_unbound_value_filter_raises(self) -> None:
+    async def test_negated_unbound_value_filter_raises(self) -> None:
         class Unknown(SearchFilter[Any]):
             value: int = 1
 
@@ -401,16 +401,16 @@ class TestSqlConversion:
 
         converter = SqlFilterConverter(SqlFilterContext(columns={"id": Thing.__table__.c.id}))
         with pytest.raises(UnsupportedFilterError, match="No SQL conversion"):
-            converter.condition(Unknown())
+            await converter.condition(Unknown())
         with pytest.raises(UnsupportedFilterError, match="No SQL conversion"):
-            converter.negated_condition(Unknown())
+            await converter.condition(Unknown(), negated=True)
         with pytest.raises(UnsupportedFilterError, match="bound column"):
-            converter.negated_condition(EqFilter(value=1))
+            await converter.condition(EqFilter(value=1), negated=True)
 
     def test_context_defaults(self) -> None:
         ctx = SqlFilterContext(columns={"id": Thing.__table__.c.id})
         assert ctx.session is None
-        assert ctx.allow_iteration is False
+        assert ctx.meta == {}
 
     async def test_unknown_attribute_raises(self, sql_env) -> None:
         _maker, resource = sql_env
@@ -422,29 +422,38 @@ class TestSqlConversion:
         with pytest.raises(UnsupportedFilterError, match="bound column"):
             await _ids(resource, EqFilter(value=1))
 
-    async def test_registries_are_enumerable(self) -> None:
+    async def test_rules_cover_every_standard_node(self) -> None:
         from resourcey.sql import filter_converter as fc
 
-        for node_type in (
-            AllFilter,
-            NoMatchFilter,
-            AndFilter,
-            OrFilter,
-            NotFilter,
-        ):
-            assert node_type in fc._LOGICAL_REGISTRY
-        for node_type in (
-            EqFilter,
-            GtFilter,
-            GeFilter,
-            LtFilter,
-            LeFilter,
-            ContainsFilter,
-            InFilter,
-        ):
-            assert node_type in fc._OPERATOR_REGISTRY
-        assert fc.is_operator(EqFilter(value=1))
-        assert not fc.is_operator(AllFilter())
+        standard: list[SearchFilter[Any]] = [
+            AllFilter(),
+            NoMatchFilter(),
+            AndFilter(filters=()),
+            OrFilter(filters=()),
+            NotFilter(filter=EqFilter(value=1)),
+            AttrFilter(attribute="x", filter=EqFilter(value=1)),
+            ThingFilter(score__ge=1),
+            EqFilter(value=1),
+            GtFilter(value=1),
+            GeFilter(value=1),
+            LtFilter(value=1),
+            LeFilter(value=1),
+            ContainsFilter(value="a"),
+            InFilter(values=(1,)),
+        ]
+        for node in standard:
+            assert any(rule.handles(node) for rule in fc.DEFAULT_RULES), type(node).__name__
+
+    async def test_default_rules_are_ordered_and_explicit(self) -> None:
+        from resourcey.sql import filter_converter as fc
+
+        assert isinstance(fc.DEFAULT_RULES, tuple)
+        names = [type(rule).__name__ for rule in fc.DEFAULT_RULES]
+        # A custom rule must be prepended; the standard list is a fixed order.
+        assert names[-2:] == ["AttrRule", "ValueRule"]
+        # ``handles`` is a pure type test, so the first match is deterministic.
+        assert fc.DEFAULT_RULES[0].handles(AllFilter())
+        assert not fc.DEFAULT_RULES[0].handles(NoMatchFilter())
 
 
 # ---------------------------------------------------------------------------

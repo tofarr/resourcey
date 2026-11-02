@@ -209,6 +209,40 @@ module filtering {
     rows.foldl(true, (acc, row) => acc and not(memIn(row, Set())))
 
 
+  // ---- Law 6: the logical rules' complements (rule converters) -----------
+  // A rule converter pushes `negated` down the tree instead of wrapping the
+  // result in `NOT`: And negates to Or, Or negates to And, Not flips. That is
+  // only correct if it agrees with the in-memory complement at every node —
+  // including the EMPTY node, where the identity differs per polarity:
+  // an empty And is TRUE (its complement matches nothing) and an empty Or is
+  // FALSE (its complement matches everything). Getting that pair backwards is
+  // invisible on non-empty filters and wrong on an empty one.
+
+  // The converter's two polarities for a conjunction of the sample clauses.
+  pure def convertedAnd(clauses: List[{ attribute: str, clause: Clause }], negated: bool): bool =
+    if (negated) clauses.foldl(false, (acc, c) => acc or not(matchesClause(1, c.clause)))
+    else clauses.foldl(true, (acc, c) => acc and matchesClause(1, c.clause))
+
+  // The converter's two polarities for a disjunction.
+  pure def convertedOr(clauses: List[{ attribute: str, clause: Clause }], negated: bool): bool =
+    if (negated) clauses.foldl(true, (acc, c) => acc and not(matchesClause(1, c.clause)))
+    else clauses.foldl(false, (acc, c) => acc or matchesClause(1, c.clause))
+
+  // An empty conjunction is TRUE, so its complement matches nothing; an empty
+  // disjunction is FALSE, so its complement matches everything.
+  pure def emptyAndNegatedMatchesNothing: bool =
+    convertedAnd(noClauses, true) == false
+
+  pure def emptyOrNegatedMatchesEverything: bool =
+    convertedOr(noClauses, true) == true
+
+  // De Morgan: the negated form of And agrees with the complement of And.
+  pure def negationPushesThroughAnd: bool =
+    convertedAnd(sampleClauses, true) == not(convertedAnd(sampleClauses, false))
+
+  pure def negationPushesThroughOr: bool =
+    convertedOr(sampleClauses, true) == not(convertedOr(sampleClauses, false))
+
   // ---- Law 4: positive pushdown is sound (all-or-nothing) ---------------
   // "Convertible => the SQL condition agrees with matches()". If the positive
   // condition were unsound, `_apply_filters` would either drop matching rows or
@@ -247,6 +281,9 @@ module filtering {
   // The sample filters the identities are checked against: All is dropped,
   // NoMatch is an annihilator, and a clause filters a value.
   pure val sampleClause = { attribute: "v", clause: Eq(1) }
+  pure val sampleClauses: List[{ attribute: str, clause: Clause }] =
+    List(sampleClause, { attribute: "w", clause: Gt(0) })
+  pure val noClauses: List[{ attribute: str, clause: Clause }] = List()
   pure val sampleFilters: List[Filter] = List(All, NoMatch, And(List(sampleClause)))
 
   run law1_normalisationPreserves =
@@ -264,6 +301,16 @@ module filtering {
   // SQL agrees with matches()" property the all-or-nothing policy relies on.
   run law4_positivePushdownIsSound =
     positivePushdownIsSound(1) and positivePushdownIsSound(2)
+
+  // Law 6: the rule converters push negation down the tree (De Morgan), and the
+  // empty-node identities are correct per polarity.
+  run law6_logicalComplementsAgree =
+    all {
+      assert(negationPushesThroughAnd),
+      assert(negationPushesThroughOr),
+      assert(emptyAndNegatedMatchesNothing),
+      assert(emptyOrNegatedMatchesEverything),
+    }
 
   // Law 5: the set-valued `In` leaf (#136) — one value is `Eq`, many agree with
   // the Or of their `Eq`s, the NULL-safe negation agrees on every row (NULL

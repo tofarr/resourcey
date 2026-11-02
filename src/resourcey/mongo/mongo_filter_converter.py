@@ -1,21 +1,21 @@
-"""Translate a standard :class:`SearchFilter` tree into a Mongo query (issue #80).
+"""Translate a :class:`SearchFilter` tree into a Mongo query (issue #80).
 
-Mirrors :mod:`resourcey.sql.filter_converter`: it consumes only the *standard*
-filter tree, dispatches through three registries (logical / attribute /
-operator) with an import-time completeness assert, and registers a
-``(positive, negated)`` pair per operator.
+The Mongo twin of :mod:`resourcey.sql.filter_converter`: same rule-list shape,
+same explicit ordering, same "unconvertible raises" policy. Only the produced
+value differs — a query ``dict`` (``None`` = no restriction) instead of a
+SQLAlchemy condition.
 
-A Mongo query is a plain ``dict`` (``None`` = no restriction). An attribute
-resolves to a *field name* (the identifier maps to ``_id``), and each value leaf
-produces a self-contained ``{field: condition}`` fragment. Logical nodes compose
-fragments under ``$and`` / ``$or`` / ``$nor``.
+An attribute resolves to a *field name* (the identifier maps to ``_id``), and
+each value leaf produces a self-contained ``{field: condition}`` fragment.
+Logical nodes compose fragments under ``$and`` / ``$or``.
 
 Negation is the exact complement
 --------------------------------
 Mongo's ``$ne`` is *not* the in-memory ``matches`` complement for a non-None
 value: ``{f: {"$ne": v}}`` also matches documents where ``f`` is absent or null,
 but ``EqFilter.matches`` is already false for those, so the complement is true.
-The negated form is therefore the query-level ``$nor`` of the positive fragment.
+Each value rule therefore supplies its own complement, which is the query-level
+``$nor`` of the positive fragment.
 
 An unconvertible node raises :class:`~resourcey.core.errors.UnsupportedFilterError`
 unless the resource set ``allow_filter_iteration``.
@@ -26,10 +26,11 @@ This module imports no code outside the framework.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from resourcey.core.errors import UnsupportedFilterError
@@ -37,6 +38,7 @@ from resourcey.util.search_filter import (
     AllFilter,
     AndFilter,
     AttrFilter,
+    BaseObjectFilter,
     ContainsFilter,
     EqFilter,
     GeFilter,
@@ -53,8 +55,8 @@ from resourcey.util.search_filter import (
 # A query fragment: a Mongo query dict, or ``None`` for "no restriction".
 Query = dict[str, Any] | None
 
-LogicalHandler = Callable[["MongoFilterConverter", SearchFilter[Any]], Query]
-OperatorHandler = Callable[["MongoFilterContext", str, Any], Query]
+# A value-leaf handler: ``(field, value) -> query``.
+ValueHandler = Callable[[str, Any], Query]
 
 # A query that matches no document. ``{"$nor": [{}]}`` matches nothing
 # unconditionally, including a document whose ``_id`` is itself null — which
@@ -79,11 +81,11 @@ def _escaped(value: Any) -> str:
     return re.escape(str(value))
 
 
-def _negated_of(positive: OperatorHandler) -> OperatorHandler:
+def _negated_of(positive: ValueHandler) -> ValueHandler:
     """The exact complement of ``positive`` — its query-level ``$nor``."""
 
-    def negated(ctx: MongoFilterContext, field: str, value: Any) -> Query:
-        inner = positive(ctx, field, value)
+    def negated(field: str, value: Any) -> Query:
+        inner = positive(field, value)
         if inner is None:  # pragma: no cover - operators never return None
             return None
         return {"$nor": [inner]}
@@ -92,182 +94,290 @@ def _negated_of(positive: OperatorHandler) -> OperatorHandler:
 
 
 # ---------------------------------------------------------------------------
-# Value-operator handlers
+# Value operators
 # ---------------------------------------------------------------------------
 
 
-def _eq_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+def _eq_positive(field: str, value: Any) -> Query:
     return {field: _encode(value)}
 
 
-def _gt_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+def _gt_positive(field: str, value: Any) -> Query:
     return {field: {"$gt": _encode(value)}}
 
 
-def _ge_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+def _ge_positive(field: str, value: Any) -> Query:
     return {field: {"$gte": _encode(value)}}
 
 
-def _lt_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+def _lt_positive(field: str, value: Any) -> Query:
     return {field: {"$lt": _encode(value)}}
 
 
-def _le_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+def _le_positive(field: str, value: Any) -> Query:
     return {field: {"$lte": _encode(value)}}
 
 
-def _contains_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+def _contains_positive(field: str, value: Any) -> Query:
     return {field: {"$regex": _escaped(value), "$options": "i"}}
 
 
-def _in_positive(ctx: MongoFilterContext, field: str, value: Any) -> Query:
+def _in_positive(field: str, value: Any) -> Query:
     # An empty set matches nothing (fail-closed); ``$in: []`` already matches no
     # document, which is exactly the deny we want.
     return {field: {"$in": [_encode(item) for item in value]}}
 
 
+@dataclass(frozen=True)
+class ValueOperator:
+    """The two polarities of one value leaf."""
+
+    positive: ValueHandler
+    negated: ValueHandler
+
+
+STANDARD_VALUE_OPERATORS: Mapping[type[SearchFilter[Any]], ValueOperator] = {
+    EqFilter: ValueOperator(_eq_positive, _negated_of(_eq_positive)),
+    GtFilter: ValueOperator(_gt_positive, _negated_of(_gt_positive)),
+    GeFilter: ValueOperator(_ge_positive, _negated_of(_ge_positive)),
+    LtFilter: ValueOperator(_lt_positive, _negated_of(_lt_positive)),
+    LeFilter: ValueOperator(_le_positive, _negated_of(_le_positive)),
+    ContainsFilter: ValueOperator(_contains_positive, _negated_of(_contains_positive)),
+    InFilter: ValueOperator(_in_positive, _negated_of(_in_positive)),
+}
+
+
 # ---------------------------------------------------------------------------
-# Registries
+# Rules
 # ---------------------------------------------------------------------------
 
-_LOGICAL_REGISTRY: dict[type[SearchFilter[Any]], tuple[LogicalHandler, LogicalHandler]] = {}
-_OPERATOR_REGISTRY: dict[type[SearchFilter[Any]], tuple[OperatorHandler, OperatorHandler]] = {}
+
+class MongoFilterRule(ABC):
+    """One conversion strategy for one (or more) filter node types."""
+
+    @abstractmethod
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        """Whether this rule converts ``node``."""
+
+    @abstractmethod
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        """The query for ``node`` — its complement when ``negated``."""
 
 
-def register_logical(
-    filter_type: type[SearchFilter[Any]],
-    positive: LogicalHandler,
-    negated: LogicalHandler,
-) -> None:
-    """Register a logical node handler pair (positive + exact-complement negated)."""
-    _LOGICAL_REGISTRY[filter_type] = (positive, negated)
+def _narrow(node: SearchFilter[Any], node_type: type[Any]) -> Any:
+    """``node`` typed as ``node_type``, after ``handles`` already proved the type."""
+    if not isinstance(node, node_type):  # pragma: no cover - handles() gate
+        raise UnsupportedFilterError(f"{type(node).__name__} is not a {node_type.__name__}")
+    return node
 
 
-def register_operator(
-    filter_type: type[SearchFilter[Any]],
-    positive: OperatorHandler,
-    negated: OperatorHandler,
-) -> None:
-    """Register a value-leaf handler pair (positive + exact-complement negated)."""
-    _OPERATOR_REGISTRY[filter_type] = (positive, negated)
+@dataclass(frozen=True)
+class AllRule(MongoFilterRule):
+    """``AllFilter`` — no restriction."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, AllFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        return _MATCH_NONE if negated else None
 
 
-def is_operator(node: SearchFilter[Any]) -> bool:
-    """Whether ``node`` is a value leaf (needs a bound field)."""
-    return type(node) in _OPERATOR_REGISTRY
+@dataclass(frozen=True)
+class NoMatchRule(MongoFilterRule):
+    """``NoMatchFilter`` — matches nothing."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, NoMatchFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        return None if negated else _MATCH_NONE
 
 
-# -- logical handlers -------------------------------------------------------
+@dataclass(frozen=True)
+class NotRule(MongoFilterRule):
+    """``NotFilter`` — flips the polarity of its child."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, NotFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        inner = _narrow(node, NotFilter)
+        return await converter.condition(inner.filter, field_name=field_name, negated=not negated)
 
 
-def _all_positive(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    return None  # no restriction: matches every document
+@dataclass(frozen=True)
+class AndRule(MongoFilterRule):
+    """``AndFilter`` — conjunction; under negation, De Morgan to a disjunction."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, AndFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        filters = _narrow(node, AndFilter).filters
+        children = await converter.conditions(filters, field_name=field_name, negated=negated)
+        if negated:
+            # An empty conjunction is TRUE, so its complement matches nothing.
+            return _disjunction(children) if children else _MATCH_NONE
+        return _conjunction(children)
 
 
-def _all_negated(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    return _MATCH_NONE
+@dataclass(frozen=True)
+class OrRule(MongoFilterRule):
+    """``OrFilter`` — disjunction; under negation, De Morgan to a conjunction."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, OrFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        filters = _narrow(node, OrFilter).filters
+        children = await converter.conditions(filters, field_name=field_name, negated=negated)
+        if negated:
+            # An empty disjunction is FALSE, so its complement is no restriction.
+            return _conjunction(children) if children else None
+        return _disjunction(children)
 
 
-def _no_match_positive(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    return _MATCH_NONE
+@dataclass(frozen=True)
+class ObjectFilterRule(MongoFilterRule):
+    """``BaseObjectFilter`` — lower its ``<attribute>__<op>`` fields, then convert."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, BaseObjectFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        standard = _narrow(node, BaseObjectFilter).to_standard()
+        return await converter.condition(standard, field_name=field_name, negated=negated)
 
 
-def _no_match_negated(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    return None  # the complement of "match nothing" matches everything
+@dataclass(frozen=True)
+class AttrRule(MongoFilterRule):
+    """``AttrFilter`` — resolve the attribute to a *queryable* field, then convert."""
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return isinstance(node, AttrFilter)
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        attribute_filter = _narrow(node, AttrFilter)
+        bound = converter.ctx.field_for(attribute_filter.attribute)
+        return await converter.condition(attribute_filter.filter, field_name=bound, negated=negated)
 
 
-def _and_positive(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    children = [c for c in converter._child_conditions(node) if c is not None]
-    if not children:
-        return None
-    if len(children) == 1:
-        return children[0]
-    return {"$and": children}
+@dataclass(frozen=True)
+class ValueRule(MongoFilterRule):
+    """The value leaves; ``operators`` is the extension point for an app's own leaf."""
+
+    operators: Mapping[type[SearchFilter[Any]], ValueOperator] = field(
+        default_factory=lambda: dict(STANDARD_VALUE_OPERATORS)
+    )
+
+    def handles(self, node: SearchFilter[Any]) -> bool:
+        return type(node) in self.operators
+
+    async def convert(
+        self,
+        node: SearchFilter[Any],
+        converter: MongoFilterConverter,
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        if field_name is None:
+            raise UnsupportedFilterError(
+                f"{type(node).__name__} reached the converter without a bound field; "
+                "a value filter must sit under an AttrFilter"
+            )
+        operator = self.operators[type(node)]
+        handler = operator.negated if negated else operator.positive
+        return handler(field_name, cast("Any", node).value)
 
 
-def _and_negated(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    # NOT (a AND b) == (NOT a) OR (NOT b)
-    children = [c for c in converter._child_negated(node) if c is not None]
-    if not children:
-        # An empty conjunction matches every document, so its complement matches none.
-        return _MATCH_NONE
-    if len(children) == 1:
-        return children[0]
-    return {"$or": children}
-
-
-def _or_positive(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    children = converter._child_conditions(node)
-    # Any child with no restriction makes the whole disjunction unrestricted.
-    if any(c is None for c in children):
-        return None
-    present = [c for c in children if c is not None]
+def _conjunction(children: Sequence[Query]) -> Query:
+    """``$and`` of the children; ``None`` is TRUE, so it is dropped (identity)."""
+    present = [child for child in children if child is not None]
     if not present:
-        return _MATCH_NONE
-    if len(present) == 1:
-        return present[0]
-    return {"$or": present}
-
-
-def _or_negated(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    # NOT (a OR b) == (NOT a) AND (NOT b)
-    children = converter._child_negated(node)
-    if any(c is None for c in children):
-        return None
-    present = [c for c in children if c is not None]
-    if not present:
-        # An empty disjunction matches no document, so its complement matches every one.
         return None
     if len(present) == 1:
         return present[0]
     return {"$and": present}
 
 
-def _not_positive(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    return converter.negated_condition(node.filter)  # type: ignore[attr-defined]
+def _disjunction(children: Sequence[Query]) -> Query:
+    """``$or`` of the children; ``None`` is TRUE, so it absorbs the whole query."""
+    if any(child is None for child in children):
+        return None
+    if not children:
+        return _MATCH_NONE
+    if len(children) == 1:
+        return children[0]
+    return {"$or": list(children)}
 
 
-def _not_negated(converter: MongoFilterConverter, node: SearchFilter[Any]) -> Query:
-    return converter.condition(node.filter)  # type: ignore[attr-defined]
-
-
-register_logical(AllFilter, _all_positive, _all_negated)
-register_logical(NoMatchFilter, _no_match_positive, _no_match_negated)
-register_logical(AndFilter, _and_positive, _and_negated)
-register_logical(OrFilter, _or_positive, _or_negated)
-register_logical(NotFilter, _not_positive, _not_negated)
-register_operator(EqFilter, _eq_positive, _negated_of(_eq_positive))
-register_operator(GtFilter, _gt_positive, _negated_of(_gt_positive))
-register_operator(GeFilter, _ge_positive, _negated_of(_ge_positive))
-register_operator(LtFilter, _lt_positive, _negated_of(_lt_positive))
-register_operator(LeFilter, _le_positive, _negated_of(_le_positive))
-register_operator(ContainsFilter, _contains_positive, _negated_of(_contains_positive))
-register_operator(InFilter, _in_positive, _negated_of(_in_positive))
-
-
-def _assert_registries_are_complete() -> None:
-    """Fail at import time if a standard node has no handler."""
-    standard_logical = {AllFilter, NoMatchFilter, AndFilter, OrFilter, NotFilter}
-    standard_operators = {
-        EqFilter,
-        GtFilter,
-        GeFilter,
-        LtFilter,
-        LeFilter,
-        ContainsFilter,
-        InFilter,
-    }
-    missing_logical = standard_logical - set(_LOGICAL_REGISTRY)
-    missing_operators = standard_operators - set(_OPERATOR_REGISTRY)
-    if missing_logical or missing_operators:
-        raise RuntimeError(
-            "MongoFilterConverter registries are incomplete: "
-            f"logical={sorted(t.__name__ for t in missing_logical)}, "
-            f"operators={sorted(t.__name__ for t in missing_operators)}"
-        )
-
-
-_assert_registries_are_complete()
+DEFAULT_RULES: tuple[MongoFilterRule, ...] = (
+    AllRule(),
+    NoMatchRule(),
+    NotRule(),
+    AndRule(),
+    OrRule(),
+    ObjectFilterRule(),
+    AttrRule(),
+    ValueRule(),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -275,16 +385,18 @@ _assert_registries_are_complete()
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+@dataclass
 class MongoFilterContext:
-    """Everything a conversion handler needs, passed as one frozen object.
+    """Everything a rule needs, passed as one object.
 
     ``fields`` holds only the resource's *queryable* fields, so a field projected
-    away from the read model cannot be filtered.
+    away from the read model cannot be filtered. ``meta`` is a mutable cache
+    shared by every rule of one conversion.
     """
 
     fields: Mapping[str, str]
     id_field: str = "id"
+    meta: MutableMapping[Any, Any] = field(default_factory=dict)
 
     def field_for(self, attribute: str) -> str:
         """The Mongo field for ``attribute``; raise :class:`UnsupportedFilterError` if absent."""
@@ -297,67 +409,39 @@ class MongoFilterContext:
 
 
 class MongoFilterConverter:
-    """Convert a standard filter tree into a Mongo query."""
+    """Convert a filter tree into a Mongo query through an ordered rule list."""
 
-    def __init__(self, ctx: MongoFilterContext) -> None:
+    def __init__(
+        self, ctx: MongoFilterContext, rules: Sequence[MongoFilterRule] = DEFAULT_RULES
+    ) -> None:
         self.ctx = ctx
+        self.rules = tuple(rules)
 
-    async def resolve(self) -> None:
-        """Run any IO-needing handlers and cache their results onto ``ctx``.
-
-        Empty today: every standard handler is pure. It exists so a future
-        relationship-traversal handler can query without changing signatures.
-        """
-        return None
-
-    def apply(self, filter_: SearchFilter[Any]) -> Query:
+    async def apply(self, filter_: SearchFilter[Any]) -> Query:
         """The Mongo query for ``filter_`` (``None`` when it imposes no restriction)."""
-        return self.condition(filter_)
+        return await self.condition(filter_)
 
-    def condition(self, node: SearchFilter[Any], field: str | None = None) -> Query:
-        """The positive query for ``node`` (``None`` = no restriction)."""
-        if isinstance(node, AttrFilter):
-            return self.condition(node.filter, self.ctx.field_for(node.attribute))
-        if is_operator(node):
-            if field is None:
-                raise UnsupportedFilterError(
-                    f"{type(node).__name__} reached the converter without a bound field; "
-                    "a value filter must sit under an AttrFilter"
-                )
-            handler, _ = _OPERATOR_REGISTRY[type(node)]
-            return handler(self.ctx, field, node.value)  # type: ignore[attr-defined]
-        try:
-            positive, _ = _LOGICAL_REGISTRY[type(node)]
-        except KeyError:
-            raise UnsupportedFilterError(
-                f"No Mongo conversion is registered for {type(node).__name__}"
-            ) from None
-        return positive(self, node)
+    async def condition(
+        self,
+        node: SearchFilter[Any],
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> Query:
+        """The query for ``node``, or its exact complement when ``negated``."""
+        for rule in self.rules:
+            if rule.handles(node):
+                return await rule.convert(node, self, field_name=field_name, negated=negated)
+        raise UnsupportedFilterError(f"No Mongo conversion is registered for {type(node).__name__}")
 
-    def negated_condition(self, node: SearchFilter[Any], field: str | None = None) -> Query:
-        """The exact complement of :meth:`condition` (``None`` = matches all)."""
-        if isinstance(node, AttrFilter):
-            return self.negated_condition(node.filter, self.ctx.field_for(node.attribute))
-        if is_operator(node):
-            if field is None:
-                raise UnsupportedFilterError(
-                    f"{type(node).__name__} reached the converter without a bound field; "
-                    "a value filter must sit under an AttrFilter"
-                )
-            _, negated = _OPERATOR_REGISTRY[type(node)]
-            return negated(self.ctx, field, node.value)  # type: ignore[attr-defined]
-        try:
-            _, negated_logical = _LOGICAL_REGISTRY[type(node)]
-        except KeyError:
-            raise UnsupportedFilterError(
-                f"No Mongo conversion is registered for {type(node).__name__}"
-            ) from None
-        return negated_logical(self, node)
-
-    # -- child helpers (used by the logical handlers) -------------------
-
-    def _child_conditions(self, node: SearchFilter[Any]) -> list[Query]:
-        return [self.condition(child) for child in node.filters]  # type: ignore[attr-defined]
-
-    def _child_negated(self, node: SearchFilter[Any]) -> list[Query]:
-        return [self.negated_condition(child) for child in node.filters]  # type: ignore[attr-defined]
+    async def conditions(
+        self,
+        nodes: Sequence[SearchFilter[Any]],
+        *,
+        field_name: str | None = None,
+        negated: bool = False,
+    ) -> list[Query]:
+        """Convert children **sequentially** — a rule may share IO."""
+        return [
+            await self.condition(node, field_name=field_name, negated=negated) for node in nodes
+        ]
