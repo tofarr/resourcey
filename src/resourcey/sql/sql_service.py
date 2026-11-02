@@ -279,7 +279,16 @@ class SqlService(Service[T, K]):
         fails closed.
         """
         converter = self._resource.build_filter_converter(session)
-        return await converter.apply(stmt, condition)
+        try:
+            return await converter.apply(stmt, condition)
+        except UnsupportedFilterError as exc:
+            raise UnsupportedFilterError(
+                f"A write's condition must be convertible to SQL: the in-memory "
+                f"iteration fallback is read-only and is never used for a write. "
+                f"Add a rule for the node to "
+                f"{type(self._resource).__name__}.get_filter_rules() to push it "
+                f"down. ({exc})"
+            ) from exc
 
     async def batch_read(self, ids: list[K]) -> list[T | None]:
         """Return DTOs positionally aligned with ``ids`` (``None`` for absent)."""

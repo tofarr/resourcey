@@ -405,7 +405,18 @@ class BaseObjectFilter(SearchFilter[T]):
         object.__setattr__(self, "_standard_filter", self._build_standard_filter())
 
     def to_standard(self) -> SearchFilter[Any]:
-        """The cached standard tree this object filter lowers to."""
+        """The cached standard tree this object filter lowers to.
+
+        Lowering is the object filter's whole contribution: the tree it returns is
+        all a backend ever sees. A field whose operator is not a recognised
+        ``<attribute>__<op>`` is dropped here without complaint, so it silently
+        narrows nothing — check :meth:`matches` if a filter seems to ignore a
+        field.
+
+        Lowering does not make a node *convertible*. A node the backend has no
+        conversion for is usable for reads only when the resource opts into the
+        in-memory fallback, and never for a write's ``condition``.
+        """
         if self._standard_filter is None:  # pragma: no cover - set in model_post_init
             object.__setattr__(self, "_standard_filter", self._build_standard_filter())
         return cast("SearchFilter[Any]", self._standard_filter)

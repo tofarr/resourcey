@@ -218,12 +218,30 @@ matches nothing) and an empty `Or` is FALSE (its complement matches everything).
 A condition that reduces to `true()` is dropped rather than emitted as a bare
 `WHERE true`; Mongo's "no restriction" is `None`.
 
-Pushdown is **all-or-nothing**: an unconvertible node raises
+Pushdown is **all-or-nothing** for a read: an unconvertible node raises
 `UnsupportedFilterError` unless the resource sets `allow_filter_iteration =
-True`, which materialises matching ids in memory. An unbounded scan behind a
-public `GET` is otherwise a DoS, and silently skipping a filter could leak a
-permission scope. There is no "not applicable" boolean for a rule for the same
-reason.
+True`, which scans and evaluates `matches` in memory. An unindexed scan behind
+a public `GET` is a denial-of-service risk, and silently ignoring a filter
+would be worse — a filter that fails open is not a filter. There is no
+"unsupported" sentinel a rule can return for the same reason: a rule that
+handles a node must convert it, or raise.
+
+The fallback is **reads only**, and the asymmetry is the trap. `update` /
+`delete` refuse it even on an opted-in resource, so a node with no rule works
+on `search` and hard-fails on every write:
+
+| node has a rule | `search` / `count` | `update` / `delete` condition |
+|---|---|---|
+| yes | pushed down | pushed down |
+| no, `allow_filter_iteration = True` | in-memory scan | **raises** |
+| no, `allow_filter_iteration = False` | **raises** | **raises** |
+
+The refusal is correct, not a gap: a write's condition is folded into the write
+statement, which is what makes a denied row indistinguishable from an absent
+one. Whatever the condition needs — a related table, a resolved id set — must
+run as part of that statement. So the fix for a node that must gate writes is a
+rule (a correlated `EXISTS`, say), never id materialisation. The write-path
+error names `get_filter_rules` for exactly this reason.
 
 The security gate is the same everywhere: the filter and sort surfaces derive
 from `read_response`, so a field projected away is neither filterable nor
