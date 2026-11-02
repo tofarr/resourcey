@@ -1041,6 +1041,48 @@ class TestFiltering:
             assert await service.count(CustomFilter()) == 1
         assert [w.label for w in found.items] == ["alpha"]
 
+    async def test_the_fallback_is_read_only(self) -> None:
+        """The same node on the same opted-in resource: reads scan, writes raise.
+
+        A write's condition is ``$and``-merged into the write query, so unlike a
+        read it cannot be resolved by materialising ids first.
+        """
+
+        class CustomFilter(SearchFilter[Any]):
+            def matches(self, value: Any) -> bool:
+                return getattr(value, "label", None) == "alpha"
+
+        manager, resource = await _resource(WidgetDTO, IteratingResource)
+        async with manager, resource, await resource.get_service() as service:
+            created = await service.create(resource.get_dto_type()(label="alpha"))
+            assert (await service.search(search_filter=CustomFilter())).items
+            assert await service.count(CustomFilter()) == 1
+
+            with pytest.raises(UnsupportedFilterError, match="read-only"):
+                await service.update(
+                    resource.get_dto_type()(id=created.id, label="changed"),
+                    condition=CustomFilter(),
+                )
+            with pytest.raises(UnsupportedFilterError, match="read-only"):
+                await service.delete(created.id, condition=CustomFilter())
+            # The refusals left the document untouched.
+            assert (await service.read(created.id)).label == "alpha"
+
+    async def test_the_write_error_names_the_rule_seam(self) -> None:
+        class CustomFilter(SearchFilter[Any]):
+            def matches(self, value: Any) -> bool:  # pragma: no cover
+                return True
+
+        manager, resource = await _resource(WidgetDTO, IteratingResource)
+        async with manager, resource, await resource.get_service() as service:
+            created = await service.create(resource.get_dto_type()(label="x"))
+            with pytest.raises(UnsupportedFilterError) as caught:
+                await service.delete(created.id, condition=CustomFilter())
+        message = str(caught.value)
+        assert "get_filter_rules" in message
+        assert "read-only" in message
+        assert "CustomFilter" in message
+
 
 class TestFilterConverter:
     def _converter(self) -> MongoFilterConverter:

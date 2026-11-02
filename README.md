@@ -63,11 +63,13 @@ Declaring a resource produces:
   params (`?title__contains=ali&id__gt=5`). A field is filterable exactly when
   the read model exposes it, so a hidden field is rejected `400`; a resource can
   declare a richer filter via `get_search_filter_type`. Filters lower to a
-  storage-agnostic tree and are pushed into the SQL `WHERE` clause; an
-  unconvertible filter fails loudly unless the resource opts into an in-memory
-  fallback. The pushdown is an ordered list of rule converters, so a resource
-  can add a node type of its own — including one that filters on a related
-  table through `EXISTS` — by overriding `get_filter_rules`.
+  storage-agnostic tree and are pushed down per backend. An unconvertible
+  filter fails loudly rather than matching everything; a resource may opt into
+  an in-memory fallback for reads (`allow_filter_iteration`), but writes refuse
+  it because a write's condition must be evaluated by the write itself. The
+  pushdown is an ordered list of rule converters, so a resource can add a node
+  type of its own — including one that filters on a related table through
+  `EXISTS` — by overriding `get_filter_rules`, which covers writes too.
 * **Sorting and cursor paging** — `?sort=<field>&desc=true` over any sortable
   (i.e. readable) field, with opaque keyset cursors instead of `offset`.
 * **Caching** — an `ETag` / `Last-Modified` strategy chosen from the resource's

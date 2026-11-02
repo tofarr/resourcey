@@ -286,13 +286,33 @@ class MongoService(Service[T, K]):
         query: Query = {"_id": _encode_value(id_value)}
         if condition is None:
             return query
-        condition_query = await self._filter_query(condition)
-        if condition_query is _UNCONVERTIBLE:
-            raise UnsupportedFilterError(
-                "A conditional write cannot fall back to in-memory iteration; "
-                "the condition must be convertible to a Mongo query."
-            )
+        condition_query = await self._condition_query(condition)
         return _merge_query(query, cast("Query", condition_query))
+
+    async def _condition_query(self, condition: SearchFilter[Any] | None) -> Any:
+        """``condition`` as a query, or raise naming why the fallback is unusable.
+
+        A write's condition is folded into the write statement itself, so it must
+        be pushed down; the in-memory fallback would materialise ids and then
+        write, which is a TOCTOU window.
+        """
+        if condition is None:
+            return None
+        try:
+            converted = await self._filter_query(condition)
+        except UnsupportedFilterError as exc:
+            raise self._unconvertible_condition(condition) from exc
+        if converted is _UNCONVERTIBLE:
+            raise self._unconvertible_condition(condition)
+        return converted
+
+    def _unconvertible_condition(self, condition: SearchFilter[Any]) -> UnsupportedFilterError:
+        return UnsupportedFilterError(
+            f"A write's condition must be convertible to a Mongo query: the "
+            f"in-memory iteration fallback is read-only, so it is never used here. "
+            f"{type(condition).__name__} has no rule; add one to "
+            f"{type(self._resource).__name__}.get_filter_rules() to push it down."
+        )
 
     async def _iterated_documents(self, search_filter: SearchFilter[Any] | None) -> list[Any]:
         """The opt-in fallback: every document matching ``search_filter`` in memory."""

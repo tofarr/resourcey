@@ -189,8 +189,9 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
             return MONGO_ID_FIELD
         return attribute
 
-    # Opt-in escape hatch: an unconvertible filter falls back to an in-memory
-    # scan instead of raising.
+    # In-memory filter fallback, opt-in and reads-only: `search` may scan and
+    # evaluate `matches` when a node has no rule, but `update` / `delete` always
+    # raise, because a write's condition is folded into the write query itself.
     allow_filter_iteration: bool = False
 
     # ------------------------------------------------------------------

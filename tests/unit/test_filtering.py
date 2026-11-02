@@ -607,3 +607,34 @@ class TestFilterIterationFallback:
         async with await resource.get_service() as service:
             with pytest.raises(UnsupportedFilterError):
                 await service.search(search_filter=attr("nope", EqFilter(value=1)))
+
+    async def test_the_fallback_is_read_only(self, sql_env) -> None:
+        """The same node on the same opted-in resource: reads scan, writes raise.
+
+        This is the symmetry the setting's name hides. A write's ``condition`` is
+        folded into the write statement, so it cannot be resolved by scanning
+        ids first without opening a check-then-act window.
+        """
+        _maker, resource = sql_env
+        resource.allow_filter_iteration = True
+        node = attr("nope", EqFilter(value=1))
+        async with await resource.get_service() as service:
+            assert (await service.search(search_filter=node)).items == []
+            assert await service.count(search_filter=node) == 0
+
+            with pytest.raises(UnsupportedFilterError, match="read-only"):
+                await service.update(resource.get_dto_type()(id=1, name="x"), condition=node)
+            with pytest.raises(UnsupportedFilterError, match="read-only"):
+                await service.delete(1, condition=node)
+
+    async def test_the_write_error_names_the_rule_seam(self, sql_env) -> None:
+        """A reader who hits the asymmetry is told where to fix it."""
+        _maker, resource = sql_env
+        resource.allow_filter_iteration = True
+        async with await resource.get_service() as service:
+            with pytest.raises(UnsupportedFilterError) as caught:
+                await service.delete(1, condition=attr("nope", EqFilter(value=1)))
+        message = str(caught.value)
+        assert "get_filter_rules" in message
+        assert "read-only" in message
+        assert "nope" in message  # the offending attribute is still named

@@ -191,8 +191,11 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         """
         return cast("str", self._column_for_attr.get(attribute, attribute))
 
-    # Opt-in escape hatch: an unconvertible filter falls back to an in-memory
-    # scan instead of raising.
+    # In-memory filter fallback, opt-in and reads-only: `search` / `count` may
+    # scan and evaluate `matches` when a node has no rule, but `update` / `delete`
+    # always raise. A write's condition is folded into the write statement, so
+    # resolving ids in Python first would reopen a check-then-act window. Add a
+    # rule to `get_filter_rules` to push a node down in both directions.
     allow_filter_iteration: bool = False
 
     # ------------------------------------------------------------------
