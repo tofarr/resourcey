@@ -96,8 +96,7 @@ class ListService(Service[T, K]):
         self._require_entered()
         models = [self._to_dto(item) for item in self._items]
         if search_filter is not None:
-            standard = search_filter.create_standard_filter()
-            models = [model for model in models if standard.matches(model)]
+            models = [model for model in models if search_filter.matches(model)]
         models = self._order(models, sort_order)
         if cursor is not None:
             models = self._after_cursor(models, cursor, sort_order)
@@ -113,8 +112,7 @@ class ListService(Service[T, K]):
         self._require_entered()
         models = [self._to_dto(item) for item in self._items]
         if search_filter is not None:
-            standard = search_filter.create_standard_filter()
-            models = [model for model in models if standard.matches(model)]
+            models = [model for model in models if search_filter.matches(model)]
         return len(models)
 
     async def batch_read(self, ids: list[K]) -> list[T | None]:

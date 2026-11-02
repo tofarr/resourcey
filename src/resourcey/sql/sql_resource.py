@@ -30,7 +30,12 @@ from resourcey.core.errors import InvalidInputError
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action, Service, ServiceError, StorageKey, storage_key
 from resourcey.encryption.encryption_service import get_encryption_service
-from resourcey.sql.filter_converter import SqlFilterContext, SqlFilterConverter
+from resourcey.sql.filter_converter import (
+    DEFAULT_RULES,
+    SqlFilterContext,
+    SqlFilterConverter,
+    SqlFilterRule,
+)
 from resourcey.sql.session_manager import SqlSessionManager, get_sql_session_manager
 from resourcey.sql.sort_converter import SqlSortContext, SqlSortConverter
 from resourcey.sql.sql_service import SqlService, sql_storage_identity
@@ -194,14 +199,13 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     # Filter conversion seam
     # ------------------------------------------------------------------
 
-    def build_filter_context(
-        self, session: AsyncSession | None = None, *, allow_iteration: bool = False
-    ) -> SqlFilterContext:
+    def build_filter_context(self, session: AsyncSession | None = None) -> SqlFilterContext:
         """The conversion context: only *queryable* fields resolve to columns.
 
         That restriction is the security gate: a field projected away from the
         read model has no column here, so ``?secret__eq=`` raises rather than
-        disclosing the value.
+        disclosing the value. ``table`` / ``id_column`` are handed over so a
+        rule can build a correlated subquery (``EXISTS``) against this resource.
         """
         queryable = self.get_queryable_fields()
         columns = {
@@ -209,15 +213,25 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
             for attr, column_name in self._column_for_attr.items()
             if attr in queryable
         }
-        return SqlFilterContext(columns=columns, session=session, allow_iteration=allow_iteration)
-
-    def build_filter_converter(
-        self, session: AsyncSession | None = None, *, allow_iteration: bool = False
-    ) -> SqlFilterConverter:
-        """A converter over this resource's query surface."""
-        return SqlFilterConverter(
-            self.build_filter_context(session, allow_iteration=allow_iteration)
+        return SqlFilterContext(
+            columns=columns,
+            session=session,
+            table=self.table,
+            id_column=self.id_column,
         )
+
+    def get_filter_rules(self) -> tuple[SqlFilterRule, ...]:
+        """The ordered conversion rules for this resource (default: the standard set).
+
+        Override to prepend a rule for an app-defined node type. Order matters:
+        the first rule whose ``handles`` returns true wins, so a custom rule
+        must precede the standard rules that would otherwise match.
+        """
+        return DEFAULT_RULES
+
+    def build_filter_converter(self, session: AsyncSession | None = None) -> SqlFilterConverter:
+        """A converter over this resource's query surface and rule set."""
+        return SqlFilterConverter(self.build_filter_context(session), self.get_filter_rules())
 
     # ------------------------------------------------------------------
     # Sort conversion seam

@@ -10,7 +10,7 @@ client manager, indexes, the query-surface gate, and the config.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -57,6 +57,7 @@ from resourcey.util.search_filter import (
     AllFilter,
     AndFilter,
     AttrFilter,
+    BaseObjectFilter,
     ContainsFilter,
     EqFilter,
     GtFilter,
@@ -1049,123 +1050,130 @@ class TestFilterConverter:
             )
         )
 
-    def test_all_and_no_match(self) -> None:
+    async def test_all_and_no_match(self) -> None:
         converter = self._converter()
-        assert converter.condition(AllFilter()) is None
-        assert converter.condition(NoMatchFilter()) == {"$nor": [{}]}
+        assert await converter.condition(AllFilter()) is None
+        assert await converter.condition(NoMatchFilter()) == {"$nor": [{}]}
 
-    def test_eq_is_a_bare_value(self) -> None:
+    async def test_eq_is_a_bare_value(self) -> None:
         converter = self._converter()
-        assert converter.condition(attr("label", EqFilter(value="x"))) == {"label": "x"}
+        assert await converter.condition(attr("label", EqFilter(value="x"))) == {"label": "x"}
 
-    def test_contains_is_a_case_insensitive_regex(self) -> None:
+    async def test_contains_is_a_case_insensitive_regex(self) -> None:
         converter = self._converter()
-        query = converter.condition(attr("label", ContainsFilter(value="a.b")))
+        query = await converter.condition(attr("label", ContainsFilter(value="a.b")))
         assert query == {"label": {"$regex": "a\\.b", "$options": "i"}}
 
-    def test_id_attribute_maps_to_the_id_field(self) -> None:
+    async def test_id_attribute_maps_to_the_id_field(self) -> None:
         converter = self._converter()
         value = uuid4()
-        assert converter.condition(attr("id", EqFilter(value=value))) == {"_id": str(value)}
+        assert await converter.condition(attr("id", EqFilter(value=value))) == {"_id": str(value)}
 
-    def test_negated_eq_is_the_query_level_nor(self) -> None:
+    async def test_negated_eq_is_the_query_level_negation(self) -> None:
         converter = self._converter()
-        assert converter.negated_condition(attr("label", EqFilter(value="x"))) == {
+        assert await converter.condition(attr("label", EqFilter(value="x")), negated=True) == {
             "$nor": [{"label": "x"}]
         }
 
-    def test_and_or_composition(self) -> None:
+    async def test_and_or_compose(self) -> None:
         converter = self._converter()
-        both = converter.condition(
+        both = await converter.condition(
             and_(attr("label", EqFilter(value="x")), attr("id", EqFilter(value="y")))
         )
         assert both == {"$and": [{"label": "x"}, {"_id": "y"}]}
-        either = converter.condition(
+        either = await converter.condition(
             or_(attr("label", EqFilter(value="x")), attr("label", EqFilter(value="y")))
         )
         assert either == {"$or": [{"label": "x"}, {"label": "y"}]}
 
-    def test_unknown_field_raises(self) -> None:
+    async def test_unknown_field_raises(self) -> None:
         converter = self._converter()
         with pytest.raises(UnsupportedFilterError):
-            converter.condition(AttrFilter(attribute="bogus", filter=EqFilter(value=1)))
+            await converter.condition(AttrFilter(attribute="bogus", filter=EqFilter(value=1)))
 
-    def test_unregistered_node_raises(self) -> None:
+    async def test_unregistered_node_raises(self) -> None:
         class CustomFilter(SearchFilter[Any]):
             def matches(self, value: Any) -> bool:  # pragma: no cover
                 return True
 
         converter = self._converter()
         with pytest.raises(UnsupportedFilterError, match="No Mongo conversion"):
-            converter.condition(CustomFilter())
+            await converter.condition(CustomFilter())
 
-    def test_all_ordering_operators(self) -> None:
+    async def test_all_ordering_operators(self) -> None:
         from resourcey.util.search_filter import GeFilter, LeFilter, LtFilter
 
         converter = self._converter()
-        assert converter.condition(attr("label", GeFilter(value=1))) == {"label": {"$gte": 1}}
-        assert converter.condition(attr("label", LtFilter(value=2))) == {"label": {"$lt": 2}}
-        assert converter.condition(attr("label", LeFilter(value=3))) == {"label": {"$lte": 3}}
+        assert await converter.condition(attr("label", GeFilter(value=1))) == {"label": {"$gte": 1}}
+        assert await converter.condition(attr("label", LtFilter(value=2))) == {"label": {"$lt": 2}}
+        assert await converter.condition(attr("label", LeFilter(value=2))) == {"label": {"$lte": 2}}
 
-    def test_negated_ordering_is_the_query_level_nor(self) -> None:
+    async def test_negation_is_the_query_level_nor(self) -> None:
         converter = self._converter()
-        assert converter.negated_condition(attr("size", GtFilter(value=4))) == {
-            "$nor": [{"size": {"$gt": 4}}]
-        }
+        negated = await converter.condition(attr("size", GtFilter(value=4)), negated=True)
+        assert negated == {"$nor": [{"size": {"$gt": 4}}]}
 
-    def test_not_negation_unwraps_to_the_positive(self) -> None:
+    async def test_not_negation_unwraps_to_the_positive(self) -> None:
         converter = self._converter()
         node = not_(attr("label", EqFilter(value="x")))
-        assert converter.negated_condition(node) == {"label": "x"}
+        assert await converter.condition(node) == {"$nor": [{"label": "x"}]}
+        assert await converter.condition(node, negated=True) == {"label": "x"}
 
-    def test_empty_and_or_nodes(self) -> None:
+    async def test_empty_and_or_nodes(self) -> None:
         converter = self._converter()
-        assert converter.condition(AndFilter(filters=())) is None
-        assert converter.negated_condition(AndFilter(filters=())) == {"$nor": [{}]}
-        assert converter.condition(OrFilter(filters=())) == {"$nor": [{}]}
-        assert converter.negated_condition(OrFilter(filters=())) is None
+        assert await converter.condition(AndFilter(filters=())) is None
+        assert await converter.condition(AndFilter(filters=()), negated=True) == {"$nor": [{}]}
+        assert await converter.condition(OrFilter(filters=())) == {"$nor": [{}]}
+        assert await converter.condition(OrFilter(filters=()), negated=True) is None
 
-    def test_or_with_an_all_child_is_unrestricted(self) -> None:
+    async def test_or_with_an_all_child_is_unrestricted(self) -> None:
         converter = self._converter()
         node = OrFilter(filters=(attr("label", EqFilter(value="x")), AllFilter()))
-        assert converter.condition(node) is None
+        assert await converter.condition(node) is None
 
-    def test_or_negation_with_a_no_match_child_matches_all(self) -> None:
-        converter = self._converter()
-        node = OrFilter(filters=(NoMatchFilter(), attr("label", EqFilter(value="x"))))
-        assert converter.negated_condition(node) is None
-
-    def test_and_negation_combines_into_an_or(self) -> None:
+    async def test_and_negation_combines_into_an_or(self) -> None:
         converter = self._converter()
         node = and_(attr("label", EqFilter(value="x")), attr("id", EqFilter(value="y")))
-        assert converter.negated_condition(node) == {
+        assert await converter.condition(node, negated=True) == {
             "$or": [{"$nor": [{"label": "x"}]}, {"$nor": [{"_id": "y"}]}]
         }
 
-    def test_single_child_and_or_unwrap(self) -> None:
+    async def test_single_child_and_or_unwrap(self) -> None:
         converter = self._converter()
-        assert converter.condition(AndFilter(filters=(attr("label", EqFilter(value="x")),))) == {
-            "label": "x"
-        }
-        assert converter.condition(OrFilter(filters=(attr("label", EqFilter(value="x")),))) == {
-            "label": "x"
-        }
+        assert await converter.condition(
+            AndFilter(filters=(attr("label", EqFilter(value="x")),))
+        ) == {"label": "x"}
+        assert await converter.condition(
+            OrFilter(filters=(attr("label", EqFilter(value="x")),))
+        ) == {"label": "x"}
 
-    def test_value_leaf_without_a_bound_field_raises(self) -> None:
+    async def test_value_leaf_without_a_bound_field_raises(self) -> None:
         converter = self._converter()
         with pytest.raises(UnsupportedFilterError, match="without a bound field"):
-            converter.condition(EqFilter(value=1))
+            await converter.condition(EqFilter(value=1))
         with pytest.raises(UnsupportedFilterError, match="without a bound field"):
-            converter.negated_condition(EqFilter(value=1))
+            await converter.condition(EqFilter(value=1), negated=True)
 
-    async def test_resolve_is_a_noop(self) -> None:
-        converter = self._converter()
-        assert await converter.resolve() is None
+    async def test_object_filter_lowers_before_conversion(self) -> None:
+        class WidgetFilter(BaseObjectFilter[Any]):
+            label__contains: str | None = None
 
-    def test_apply_returns_the_condition(self) -> None:
         converter = self._converter()
-        assert converter.apply(AllFilter()) is None
-        assert converter.apply(attr("label", EqFilter(value="x"))) == {"label": "x"}
+        assert await converter.condition(WidgetFilter(label__contains="wid")) == {
+            "label": {"$regex": "wid", "$options": "i"}
+        }
+
+    async def test_aware_datetime_is_normalised_to_utc(self) -> None:
+        converter = self._converter()
+        aware = datetime(2020, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=2)))
+        assert await converter.condition(attr("size", GtFilter(value=aware))) == {
+            "size": {"$gt": datetime(2020, 1, 1, 10, 0, tzinfo=UTC)}
+        }
+
+    async def test_apply_returns_the_condition(self) -> None:
+        converter = self._converter()
+        assert await converter.apply(AllFilter()) is None
+        assert await converter.apply(attr("label", EqFilter(value="x"))) == {"label": "x"}
 
 
 # ---------------------------------------------------------------------------

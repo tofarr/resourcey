@@ -269,11 +269,9 @@ class MongoService(Service[T, K]):
         """
         if search_filter is None:
             return None
-        standard = search_filter.create_standard_filter()
         converter = self._resource.build_filter_converter()
         try:
-            await converter.resolve()
-            return converter.apply(standard)
+            return await converter.apply(search_filter)
         except UnsupportedFilterError:
             if not self._resource.allow_filter_iteration:
                 raise
@@ -298,16 +296,15 @@ class MongoService(Service[T, K]):
 
     async def _iterated_documents(self, search_filter: SearchFilter[Any] | None) -> list[Any]:
         """The opt-in fallback: every document matching ``search_filter`` in memory."""
-        standard = search_filter.create_standard_filter() if search_filter is not None else None
         dto_type = self._resource.get_dto_type()
         result = self._collection.find(None)
         documents: list[dict[str, Any]] = await result.to_list(length=None)
-        if standard is None:
+        if search_filter is None:
             return documents
         return [
             doc
             for doc in documents
-            if standard.matches(dto_type.model_validate(self._raw_dto(doc)))
+            if search_filter.matches(dto_type.model_validate(self._raw_dto(doc)))
         ]
 
     async def _search_by_iteration(

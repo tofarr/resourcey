@@ -243,17 +243,15 @@ class SqlService(Service[T, K]):
         """
         if search_filter is None:
             return stmt
-        standard = search_filter.create_standard_filter()
         converter = self._resource.build_filter_converter(session)
         try:
-            await converter.resolve()
-            return converter.apply(stmt, standard)
+            return await converter.apply(stmt, search_filter)
         except UnsupportedFilterError:
             if not self._resource.allow_filter_iteration:
                 raise
-            return await self._apply_filters_by_iteration(stmt, standard)
+            return await self._apply_filters_by_iteration(stmt, search_filter)
 
-    async def _apply_filters_by_iteration(self, stmt: Any, standard: Any) -> Any:
+    async def _apply_filters_by_iteration(self, stmt: Any, search_filter: SearchFilter[Any]) -> Any:
         """The opt-in fallback: materialise matching ids and constrain to them.
 
         Only used when a resource explicitly sets
@@ -266,7 +264,7 @@ class SqlService(Service[T, K]):
         surviving = [
             row[self._resource.id_column.name]
             for row in rows
-            if standard.matches(dto_type.model_validate(_row_values(self._resource, row)))
+            if search_filter.matches(dto_type.model_validate(_row_values(self._resource, row)))
         ]
         return stmt.where(self._resource.id_column.in_(surviving))
 
@@ -280,10 +278,8 @@ class SqlService(Service[T, K]):
         open a TOCTOU window. An unconvertible condition raises, so the caller
         fails closed.
         """
-        standard = condition.create_standard_filter()
         converter = self._resource.build_filter_converter(session)
-        await converter.resolve()
-        return converter.apply(stmt, standard)
+        return await converter.apply(stmt, condition)
 
     async def batch_read(self, ids: list[K]) -> list[T | None]:
         """Return DTOs positionally aligned with ``ids`` (``None`` for absent)."""

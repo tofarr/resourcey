@@ -65,7 +65,9 @@ Declaring a resource produces:
   declare a richer filter via `get_search_filter_type`. Filters lower to a
   storage-agnostic tree and are pushed into the SQL `WHERE` clause; an
   unconvertible filter fails loudly unless the resource opts into an in-memory
-  fallback.
+  fallback. The pushdown is an ordered list of rule converters, so a resource
+  can add a node type of its own — including one that filters on a related
+  table through `EXISTS` — by overriding `get_filter_rules`.
 * **Sorting and cursor paging** — `?sort=<field>&desc=true` over any sortable
   (i.e. readable) field, with opaque keyset cursors instead of `offset`.
 * **Caching** — an `ETag` / `Last-Modified` strategy chosen from the resource's
