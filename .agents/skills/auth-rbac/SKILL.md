@@ -256,8 +256,13 @@ Three modules, all model-first:
   policy collapse. The session source is an `async_sessionmaker` or a zero-arg
   callable returning one (sync or async), so a store can be built before the app
   lifecycle. `ACL_MAX_IDS = 100` caps the enumeration path; beyond it the join /
-  subquery flavour is the answer. `policy_from_rows` skips a corrupt row rather
-  than crashing or over-denying.
+  subquery flavour is the answer. `policy_from_rows(rows, resource=...)` skips a
+  row it cannot deserialize rather than crashing or over-denying, but never
+  silently: an unknown `kind` (an app forgot to import the module defining its
+  policy class) is logged once per kind per process, naming the kind and the
+  resource, and a malformed row is logged once per failure signature. Only
+  `pydantic.ValidationError` is treated as data — an error from a policy's own
+  code propagates, so a programming bug is not mistaken for corruption.
 * `auth_rbac_resolver.py` — `RbacPolicyResolver(store, cache_ttl=None)`.
   Per request it takes the principal, asks the store for its groups and the
   resource-scoped policies, binds membership onto any `GroupMember` policy, and

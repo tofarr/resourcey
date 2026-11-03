@@ -29,18 +29,29 @@ This module is part of ``resourcey.auth``; it imports only lower framework layer
 from __future__ import annotations
 
 import inspect
+import logging
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.auth.auth_policy import Policy
 from resourcey.auth.auth_rbac import GroupRole, GroupUser, ResourceAcl, RolePermission
 from resourcey.core.errors import ResourceyConfigError
+from resourcey.util.models import get_known_concrete_subclasses
+
+logger = logging.getLogger(__name__)
+
+#: Failure signatures already logged, so a per-request resolution warns once per
+#: distinct problem rather than once per request.
+_warned: set[tuple[str, ...]] = set()
+_warned_lock = threading.Lock()
 
 #: The most object ids an enumerated ACL may carry. Beyond this the
 #: materialized-ACL join / subquery is the answer, not a literal ``IN`` list.
@@ -125,7 +136,7 @@ class SqlRbacStore(RbacStore):
         )
         async with self._session() as session:
             rows = (await session.execute(stmt)).scalars().all()
-        return policy_from_rows(rows)
+        return policy_from_rows(rows, resource=resource)
 
     async def groups_for(self, user_id: UUID) -> frozenset[UUID]:
         """The ids of the groups ``user_id`` belongs to."""
@@ -163,18 +174,74 @@ class SqlRbacStore(RbacStore):
         )
 
 
-def policy_from_rows(rows: Sequence[Any]) -> list[Policy]:
+def policy_from_rows(rows: Sequence[Any], *, resource: str | None = None) -> list[Policy]:
     """Deserialize stored permission rows into policy objects (best-effort).
 
-    A corrupt row is **skipped** rather than crashing the request or denying
-    everything: one bad row must not take down the whole access decision.
+    A row that cannot be deserialized is **skipped** rather than crashing the
+    request or denying everything: one bad row must not take down the whole
+    access decision. The skip fails **closed** — a dropped row never becomes a
+    grant.
+
+    Skipping is not silent, because the two causes need different fixes and one
+    of them points nowhere near the symptom. A row whose ``kind`` names no loaded
+    policy class means the app forgot to import the module defining it; that is
+    logged once per kind per process, naming the kind and the resource, so a busy
+    endpoint cannot flood the log. A recognizably malformed row is logged once
+    per failure signature. Anything that is not a row problem — an error raised
+    by a policy's own code, say — propagates instead of being swallowed here.
+
+    Args:
+        rows: Stored ``role_permissions.permission`` values.
+        resource: The resource the rows were scoped to, for the warnings.
     """
+    known_kinds = {loaded.__name__ for loaded in get_known_concrete_subclasses(Policy)}
     policies: list[Policy] = []
     for raw in rows:
         if not isinstance(raw, dict):
+            _warn_once(
+                ("row", type(raw).__name__),
+                "Skipping stored policy on resource %r: expected a mapping, got %s",
+                resource,
+                type(raw).__name__,
+            )
+            continue
+        kind = raw.get("kind")
+        if isinstance(kind, str) and kind not in known_kinds:
+            _warn_once(
+                ("kind", kind),
+                "Skipping stored policies of unknown kind %r on resource %r: no policy "
+                "class with that name is loaded, so the grants it describes are being "
+                "dropped. Import the module that defines it.",
+                kind,
+                resource,
+            )
             continue
         try:
             policies.append(Policy.model_validate(raw))
-        except Exception:
-            continue
+        except ValidationError as error:
+            _warn_once(
+                ("malformed", str(kind), *_error_signature(error)),
+                "Skipping malformed stored policy of kind %r on resource %r: %s",
+                kind,
+                resource,
+                error,
+            )
     return policies
+
+
+def _error_signature(error: ValidationError) -> tuple[str, ...]:
+    """A stable identity for a validation failure, so repeats collapse in the log."""
+    return tuple(f"{detail.get('loc')}:{detail.get('type')}" for detail in error.errors())
+
+
+def _warn_once(key: tuple[str, ...], message: str, *args: Any) -> None:
+    """Log a warning the first time ``key`` is seen in this process.
+
+    Keyed (never resource-scoped) so the seen-set stays bounded by the number of
+    distinct failure signatures rather than growing with traffic.
+    """
+    with _warned_lock:
+        if key in _warned:
+            return
+        _warned.add(key)
+    logger.warning(message, *args)

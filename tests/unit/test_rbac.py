@@ -19,7 +19,8 @@ Covered:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -27,11 +28,12 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from pydantic import SecretStr
+from pydantic import SecretStr, model_validator
 from sqlalchemy import String, Uuid, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from resourcey.auth import auth_rbac_store
 from resourcey.auth.auth_api_key import API_KEY_HEADER_NAME, ApiKeyAuthenticator
 from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
@@ -42,6 +44,7 @@ from resourcey.auth.auth_policy import (
     DenyAll,
     GroupMember,
     Owner,
+    Policy,
     ReadOnly,
 )
 from resourcey.auth.auth_principal import Principal
@@ -57,7 +60,7 @@ from resourcey.auth.auth_rbac import (
     policy_to_json,
 )
 from resourcey.auth.auth_rbac_resolver import RbacPolicyResolver
-from resourcey.auth.auth_rbac_store import ACL_MAX_IDS, SqlRbacStore
+from resourcey.auth.auth_rbac_store import ACL_MAX_IDS, SqlRbacStore, policy_from_rows
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.manifest import Manifest
 from resourcey.core.resource import Resource
@@ -84,6 +87,17 @@ class Note(NoteBase):
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     owner_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True, index=True)
     text: Mapped[str] = mapped_column(String, nullable=False)
+
+
+class ExplodingPolicy(Policy):
+    """A loaded policy whose own validation code raises a non-``ValidationError``."""
+
+    async def to_search_filter(self, user_id: UUID | None, action: Action) -> Any:
+        raise NotImplementedError
+
+    @model_validator(mode="after")
+    def _explode(self) -> ExplodingPolicy:
+        raise TypeError("policy bug, not a bad row")
 
 
 @pytest_asyncio.fixture
@@ -169,6 +183,16 @@ def _app(
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def reset_warning_log() -> Iterator[None]:
+    """Isolate the process-wide once-per-signature log guard per test."""
+    saved = set(auth_rbac_store._warned)
+    auth_rbac_store._warned.clear()
+    yield
+    auth_rbac_store._warned.clear()
+    auth_rbac_store._warned.update(saved)
+
+
 async def test_store_resolves_policies_through_real_tables(maker: Any) -> None:
     """user -> group -> role -> permission resolves the stored policy for the resource."""
     await _add_user(maker, ALICE, READERS)
@@ -218,6 +242,42 @@ async def test_store_groups_for(maker: Any) -> None:
     await _add_user(maker, ALICE, READERS)
     assert await SqlRbacStore(maker).groups_for(ALICE) == frozenset({READERS})
     assert await SqlRbacStore(maker).groups_for(BOB) == frozenset()
+
+
+async def test_store_warns_on_unknown_kind_and_keeps_the_known_grant(
+    maker: Any, caplog: pytest.LogCaptureFixture, reset_warning_log: None
+) -> None:
+    """A row whose kind no class claims warns (naming the resource) and is skipped."""
+    await _add_user(maker, ALICE, READERS)
+    role_id = uuid4()
+    async with maker() as session:
+        session.add(Role(id=role_id, name="mixed"))
+        session.add(GroupRole(id=uuid4(), group_id=READERS, role_id=role_id))
+        session.add(
+            RolePermission(
+                id=uuid4(),
+                role_id=role_id,
+                resource="rbac-notes",
+                permission={"kind": "NotImportedPolicy", "x": 1},
+            )
+        )
+        session.add(
+            RolePermission(
+                id=uuid4(),
+                role_id=role_id,
+                resource="rbac-notes",
+                permission=policy_to_json(AllowAll()),
+            )
+        )
+        await session.commit()
+
+    with caplog.at_level(logging.WARNING, logger="resourcey.auth.auth_rbac_store"):
+        policies = await SqlRbacStore(maker).policies_for(ALICE, "rbac-notes")
+
+    # Fail closed on the unknown row, keep the known grant, and say why.
+    assert [type(policy) for policy in policies] == [AllowAll]
+    assert "NotImportedPolicy" in caplog.text
+    assert "'rbac-notes'" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -599,12 +659,65 @@ def test_rbac_resource_paths_match_served_resources() -> None:
     assert rbac_resource_paths() == served
 
 
-def test_policy_from_rows_skips_corrupt_rows() -> None:
-    """A corrupt / unknown policy row is skipped, never crashing or over-denying."""
-    from resourcey.auth.auth_rbac_store import policy_from_rows
+def test_policy_from_rows_skips_corrupt_rows(
+    caplog: pytest.LogCaptureFixture, reset_warning_log: None
+) -> None:
+    """A corrupt / unknown policy row is skipped and reported, never over-denying."""
+    with caplog.at_level(logging.WARNING, logger="resourcey.auth.auth_rbac_store"):
+        assert (
+            policy_from_rows(
+                [{"kind": "Nope"}, "not-a-dict"],  # type: ignore[list-item]
+                resource="messages",
+            )
+            == []
+        )
+    # Fail closed, but loudly: the unknown kind and the bad shape are both named.
+    assert "Nope" in caplog.text
+    assert "messages" in caplog.text
+    assert "got str" in caplog.text
+    assert len(policy_from_rows([{"kind": "AllowAll"}], resource="messages")) == 1
 
-    assert policy_from_rows([{"kind": "Nope"}, "not-a-dict"]) == []  # type: ignore[list-item]
-    assert len(policy_from_rows([{"kind": "AllowAll"}])) == 1
+
+def test_policy_from_rows_warns_once_per_unknown_kind(
+    caplog: pytest.LogCaptureFixture, reset_warning_log: None
+) -> None:
+    """A per-request resolution warns once per kind, not once per request."""
+    with caplog.at_level(logging.WARNING, logger="resourcey.auth.auth_rbac_store"):
+        for _ in range(5):
+            policy_from_rows([{"kind": "NeverImported", "x": 1}], resource="messages")
+    assert len(caplog.records) == 1
+    assert "NeverImported" in caplog.text
+    assert "messages" in caplog.text
+
+
+def test_policy_from_rows_logs_each_unknown_kind_separately(
+    caplog: pytest.LogCaptureFixture, reset_warning_log: None
+) -> None:
+    """The guard is per kind, so a second missing module is not hidden by the first."""
+    with caplog.at_level(logging.WARNING, logger="resourcey.auth.auth_rbac_store"):
+        policy_from_rows([{"kind": "MissingA"}, {"kind": "MissingB"}])
+    assert len(caplog.records) == 2
+    assert "MissingA" in caplog.text and "MissingB" in caplog.text
+
+
+def test_policy_from_rows_skips_malformed_rows(
+    caplog: pytest.LogCaptureFixture, reset_warning_log: None
+) -> None:
+    """A loaded kind with a corrupt field is skipped, warned about, and fails closed."""
+    with caplog.at_level(logging.WARNING, logger="resourcey.auth.auth_rbac_store"):
+        policies = policy_from_rows(
+            [{"kind": "AllowAll", "group_ids": "not-a-list"}, {"kind": "AllowAll"}],
+            resource="messages",
+        )
+    assert len(policies) == 1
+    assert "malformed" in caplog.text
+    assert "group_ids" in caplog.text
+
+
+def test_policy_from_rows_does_not_swallow_programming_errors() -> None:
+    """An error raised by a policy's own code is not mistaken for corrupt data."""
+    with pytest.raises(TypeError, match="policy bug"):
+        policy_from_rows([{"kind": "ExplodingPolicy"}])
 
 
 def test_permission_column_is_jsonb_on_postgres() -> None:
