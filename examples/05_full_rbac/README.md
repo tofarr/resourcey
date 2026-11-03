@@ -7,7 +7,8 @@ Part 3 of the authentication roadmap (#133): real `users` / `groups` /
 
 It builds on [example 04](../04_simple_roles): where 04 carried roles on the
 credential, 05 keeps only the principal's `user_id` on the credential and reads
-everything else from the store.
+everything else from the store — including the API key itself, which lives in an
+`api_keys` row (digest only) seeded alongside the user it names.
 
 ## The idea
 
@@ -15,6 +16,17 @@ The credential (an API key) names a **user**. That user's **groups** carry
 **roles**, and each role has **permissions** — a `resource` name plus a
 [`Policy`](../../src/resourcey/auth/auth_policy.py). The resolver walks that
 chain for the target resource and OR-combines the matching policies.
+
+The key is **stored**, not configured. `api_keys` holds the SHA-256 digest of
+each key bound to its `user_id`, and the seed writes both in one transaction, so
+a key and the principal it resolves to cannot drift. The plaintexts
+(`admin-key` / `viewer-key` / `author-key`) exist only in
+[`full_rbac/seed.py`](full_rbac/seed.py) — the one place a committed dev
+credential is acceptable — and never in the database or `.env`.
+
+An **unseeded** store therefore rejects every key with a `401`. That is the
+point: a key bound to a user that does not exist is not a valid credential that
+silently resolves to no permissions, it is simply not a credential.
 
 Seeded roles:
 
@@ -77,12 +89,16 @@ matrix as #127.
 ```bash
 uv sync --extra test
 uv run --env-file .env alembic upgrade head
-uv run --env-file .env python -m full_rbac.seed          # seed users/groups/roles
+uv run --env-file .env python -m full_rbac.seed          # seed users/groups/roles/keys
 uv run --env-file .env uvicorn full_rbac.app:app --port 8085
 ```
 
 the framework does no `.env` loading of its own, so the `--env-file` flag (uvicorn's, or
 `uv run --env-file`) populates the process environment.
+
+Skipping the seed is not fatal but it is unhelpful: the migration creates empty
+tables, so `GET /users` with `admin-key` answers `401` rather than an empty page.
+The seed is idempotent, so running it again is always safe.
 
 ## Try it
 
@@ -99,7 +115,7 @@ curl -H 'X-API-Key: author-key' localhost:8085/messages
 
 # who am I? — the caller's own stored row, OIDC UserInfo shaped
 curl -H 'X-API-Key: viewer-key' localhost:8085/me
-# {"sub":"00000000-...-0000000000b0","kind":"service","roles":[],"scopes":[],
+# {"sub":"00000000-...-0000000000b0","kind":"user","roles":[],"scopes":[],
 #  "email":"viewer@example.com","preferred_username":"viewer"}
 ```
 
@@ -112,7 +128,8 @@ object: `sub` is the caller's internal principal id, plus `kind` / `roles` /
 `scopes` and — via the caller's own `users` row — `email` / `preferred_username`.
 The row is read through the resource's own service, **not** the `users` policy,
 so it resolves even though the served `users` table is admin-gated. An absent or
-invalid credential is a `401`.
+invalid credential is a `401`. `kind` is `user` for a stored key, because the
+authenticator resolves the key's `user_id` rather than a service principal.
 
 ## Tests
 

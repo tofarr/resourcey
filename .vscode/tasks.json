@@ -73,6 +73,14 @@
             "problemMatcher": []
         },
         {
+            "label": "examples: seed 05_full_rbac",
+            "type": "shell",
+            "command": "uv run --env-file .env python -m full_rbac.seed",
+            "options": { "cwd": "${workspaceFolder}/examples/05_full_rbac" },
+            "dependsOn": "examples: migrate 05_full_rbac",
+            "problemMatcher": []
+        },
+        {
             "label": "examples: sync 06_filestore",
             "type": "shell",
             "command": "uv sync",

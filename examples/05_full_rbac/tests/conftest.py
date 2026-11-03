@@ -6,10 +6,10 @@ prefix:
 * SQL connections — ``APP_SQL_CONNECTIONS_0_NAME`` / ``_URL``;
 * cursor encryption — ``APP_ENCRYPTION_KEY_ID`` / ``_VALUE``.
 
-The accepted API keys are an env edge too (``APP_API_KEYS_<n>_*``); the tests
-pass a key list explicitly instead.
+API keys are not an env edge in this example: they are ``api_keys`` rows, seeded
+by :func:`full_rbac.seed.seed` into the same store as the users they name.
 
-the framework does no ``.env`` loading, so the suite sets these directly. The autouse
+The framework does no ``.env`` loading, so the suite sets these directly. The autouse
 fixture also clears the per-class config caches and the process-wide session
 manager / encryption service, so every test rebuilds against its own env.
 """

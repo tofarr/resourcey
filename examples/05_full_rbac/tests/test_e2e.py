@@ -7,8 +7,9 @@ verified, then the RBAC tables are seeded through the real store models.
 
 The app is assembled through the real config path and httpx's ASGI transport, so
 requests drive the full request → auth → **resolve** → service → SQLAlchemy
-stack. The accepted keys carry only a ``principal_id``; the roles, groups and
-permissions all live in the store and are resolved **per request**.
+stack. The API keys are **stored** rows bound to their user, and only their
+digest is kept; the roles, groups and permissions live in the store too and are
+resolved **per request**.
 
 Roles under test (seeded by ``full_rbac.seed``):
 
@@ -29,7 +30,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from httpx import ASGITransport, AsyncClient
-from pydantic import SecretStr
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from full_rbac.app import build_app
@@ -42,7 +43,7 @@ from full_rbac.seed import (
     seed,
 )
 from resourcey.auth.auth_api_key import API_KEY_HEADER_NAME
-from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
+from resourcey.auth.auth_api_key_resource import ApiKey, hash_api_key
 from resourcey.auth.auth_policy import DenyAll
 from resourcey.auth.auth_rbac import (
     GroupRole,
@@ -60,18 +61,6 @@ VIEWER_KEY = "viewer-key"
 AUTHOR_KEY = "author-key"
 UNGRANTED = UUID("00000000-0000-0000-0000-0000000000d0")
 UNGRANTED_KEY = "ungranted-key"
-
-
-def _keys() -> ApiKeysConfig:
-    """The accepted keys, each bound to a stored user id (no credential-carried roles)."""
-    return ApiKeysConfig(
-        api_keys=[
-            ApiKeyConfig(id="admin", key=SecretStr(ADMIN_KEY), principal_id=str(ADMIN_USER)),
-            ApiKeyConfig(id="viewer", key=SecretStr(VIEWER_KEY), principal_id=str(VIEWER_USER)),
-            ApiKeyConfig(id="author", key=SecretStr(AUTHOR_KEY), principal_id=str(AUTHOR_USER)),
-            ApiKeyConfig(id="ungranted", key=SecretStr(UNGRANTED_KEY), principal_id=str(UNGRANTED)),
-        ]
-    )
 
 
 def _migrations_dir() -> Path:
@@ -110,7 +99,7 @@ async def env(tmp_path: Path, monkeypatch) -> AsyncIterator[Env]:
     _apply_migration(async_url)
 
     manager = SqlSessionManager(SqlConfig.get_instance())
-    manifest, app = build_app(session_manager=manager, keys=_keys())
+    manifest, app = build_app(session_manager=manager)
     await manifest.__aenter__()
     try:
         maker = await manager.get_session_maker()
@@ -118,6 +107,14 @@ async def env(tmp_path: Path, monkeypatch) -> AsyncIterator[Env]:
         # A user with no groups at all: authenticates, resolves to no permission.
         async with maker() as session:
             session.add(User(id=UNGRANTED, email="none@example.com", username="none"))
+            session.add(
+                ApiKey(
+                    id=uuid4(),
+                    name="ungranted",
+                    key=hash_api_key(UNGRANTED_KEY),
+                    user_id=UNGRANTED,
+                )
+            )
             await session.commit()
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -365,3 +362,59 @@ class TestKeyResource:
         for item in resp.json()["items"]:
             assert "key" not in item
             assert "principal_id" not in item
+
+    async def test_only_the_admin_may_administer_keys(self, env: Env) -> None:
+        """The key table is a privilege-assignment surface: non-admins get nothing.
+
+        A denied collection read is emptied rather than 403 (union semantics), so
+        the meaningful assertion is that a non-admin cannot *write* a key.
+        """
+        for key in (VIEWER_KEY, AUTHOR_KEY):
+            assert (await env.client.get("/api-keys", headers=_h(key))).json()["items"] == []
+            assert (await env.client.post("/api-keys", json={}, headers=_h(key))).status_code == 403
+
+    async def test_the_plaintext_key_is_never_stored(self, env: Env) -> None:
+        """The table holds the SHA-256 digest, never the seed file's plaintext."""
+        async with env.maker() as session:
+            stored = set((await session.execute(select(ApiKey.key))).scalars().all())
+        assert hash_api_key(ADMIN_KEY) in stored
+        assert ADMIN_KEY not in stored
+
+
+# ---------------------------------------------------------------------------
+# An unseeded store is a 401, not a valid key that silently sees nothing
+# ---------------------------------------------------------------------------
+
+
+class TestUnseededStore:
+    async def test_keys_are_absent_until_the_store_is_seeded(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A migrated-but-unseeded database rejects every key with a 401.
+
+        This is the regression: with the keys in the environment they
+        authenticated happily against an empty store and every collection read
+        came back as an empty page, which looks like "no data" rather than
+        "not seeded".
+        """
+        async_url = f"sqlite+aiosqlite:///{tmp_path / 'unseeded.db'}"
+        monkeypatch.setenv("APP_SQL_CONNECTIONS_0_NAME", "main")
+        monkeypatch.setenv("APP_SQL_CONNECTIONS_0_URL", async_url)
+        SqlConfig.clear_instance_cache()
+        _apply_migration(async_url)
+
+        manager = SqlSessionManager(SqlConfig.get_instance())
+        manifest, app = build_app(session_manager=manager)
+        async with manifest:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                assert (await client.get("/users", headers=_h(ADMIN_KEY))).status_code == 401
+
+    async def test_re_running_the_seed_is_a_no_op(self, env: Env) -> None:
+        """Re-seeding is idempotent, so the natural "reset" attempt cannot fail."""
+        await seed(env.maker)
+        await seed(env.maker)
+        assert (await env.client.get("/threads", headers=_h(ADMIN_KEY))).status_code == 200
+        # The three seeded keys, plus the fixture's ungranted one.
+        async with env.maker() as session:
+            assert len((await session.execute(select(ApiKey.id))).scalars().all()) == 4

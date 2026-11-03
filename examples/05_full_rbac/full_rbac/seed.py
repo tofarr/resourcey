@@ -1,23 +1,39 @@
-"""Seed the full-RBAC store with users, groups, roles and permissions.
+"""Seed the full-RBAC store with users, groups, roles, permissions and API keys.
 
 The store is the whole point of this example, so the seed is data, not code: the
-same UUIDs the ``.env`` binds API keys to, the groups that carry the roles, and
-the :data:`~full_rbac.app.ROLE_PERMISSIONS` rules serialized into
-``role_permissions``. Run it once after the migration::
+users' UUIDs, the groups that carry the roles, the
+:data:`~full_rbac.app.ROLE_PERMISSIONS` rules serialized into
+``role_permissions``, and the API keys bound to those users. Run it once after
+the migration::
 
     uv run --env-file .env python -m full_rbac.seed
 
 The tests call :func:`seed` directly against their isolated database.
+
+**Keys.** The plaintext keys live in :data:`RAW_KEYS` — this file is the only
+place they exist, which is why a committed dev key is acceptable here. The store
+receives their SHA-256 **digest**
+(:func:`~resourcey.auth.auth_api_key_resource.hash_api_key`), which is what a
+presented key is hashed to and looked up by, so the table never holds a usable
+credential.
+
+**Idempotent.** Every row is inserted only when it is absent, so re-running the
+seed is a no-op. "Re-seed" is the natural response to a confusing empty result,
+and a seed that failed there would compound the confusion.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
+from typing import Any
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from full_rbac.app import ADMIN, AUTHOR, DENIED, ROLE_PERMISSIONS, VIEWER
+from resourcey.auth.auth_api_key_resource import ApiKey, hash_api_key
 from resourcey.auth.auth_policy import DenyAll
 from resourcey.auth.auth_rbac import (
     Group,
@@ -29,7 +45,7 @@ from resourcey.auth.auth_rbac import (
     policy_to_json,
 )
 
-# The users the example's .env keys are bound to (``APP_API_KEYS_<n>_PRINCIPAL_ID``).
+# The users the example's keys are bound to (the ``api_keys.user_id`` column).
 ADMIN_USER = UUID("00000000-0000-0000-0000-0000000000a0")
 VIEWER_USER = UUID("00000000-0000-0000-0000-0000000000b0")
 AUTHOR_USER = UUID("00000000-0000-0000-0000-0000000000c0")
@@ -37,6 +53,10 @@ AUTHOR_USER = UUID("00000000-0000-0000-0000-0000000000c0")
 ADMINS = UUID("00000000-0000-0000-0000-000000000001")
 VIEWERS = UUID("00000000-0000-0000-0000-000000000002")
 AUTHORS = UUID("00000000-0000-0000-0000-000000000003")
+
+# The role names. Stored role ids are derived from these, so a re-seed lands on
+# the same rows; an id already present under the name is reused as-is.
+ROLE_NAMES: tuple[str, ...] = (ADMIN, VIEWER, AUTHOR, DENIED)
 
 #: ``user id -> group id`` — one group per user keeps the demo readable; the
 #: resolver joins through it the same way for any membership graph.
@@ -46,57 +66,135 @@ MEMBERSHIPS: dict[UUID, UUID] = {
     AUTHOR_USER: AUTHORS,
 }
 
+#: ``group id -> role name`` — a group may carry several roles.
+GROUP_ROLES: dict[UUID, str] = {ADMINS: ADMIN, VIEWERS: VIEWER, AUTHORS: AUTHOR}
+
+#: ``user id -> plaintext API key``. Only the digest of these is stored; the
+#: plaintexts are what the README's ``curl`` examples send.
+RAW_KEYS: dict[UUID, str] = {
+    ADMIN_USER: "admin-key",
+    VIEWER_USER: "viewer-key",
+    AUTHOR_USER: "author-key",
+}
+
+def _users() -> tuple[User, ...]:
+    """Fresh ``User`` instances — never module-level, or a second seed would
+    hand SQLAlchemy objects it already considers persistent and skip the INSERT."""
+    return (
+        User(id=ADMIN_USER, email="admin@example.com", username="admin"),
+        User(id=VIEWER_USER, email="viewer@example.com", username="viewer"),
+        User(id=AUTHOR_USER, email="author@example.com", username="author"),
+    )
+
+
+def _groups() -> tuple[Group, ...]:
+    """Fresh ``Group`` instances, for the same reason as :func:`_users`."""
+    return (
+        Group(id=ADMINS, name=ADMINS.hex),
+        Group(id=VIEWERS, name=VIEWERS.hex),
+        Group(id=AUTHORS, name=AUTHORS.hex),
+    )
+
 
 async def seed(maker: async_sessionmaker[AsyncSession]) -> None:
-    """Populate the RBAC tables with the example's users, groups, roles, permissions."""
+    """Populate the store with the example's users, groups, roles, permissions and keys."""
     async with maker() as session:
-        session.add_all(
-            [
-                User(id=ADMIN_USER, email="admin@example.com", username="admin"),
-                User(id=VIEWER_USER, email="viewer@example.com", username="viewer"),
-                User(id=AUTHOR_USER, email="author@example.com", username="author"),
-                Group(id=ADMINS, name=ADMINS.hex),
-                Group(id=VIEWERS, name=VIEWERS.hex),
-                Group(id=AUTHORS, name=AUTHORS.hex),
-            ]
-        )
-        for user_id, group_id in MEMBERSHIPS.items():
+        await _add_missing(session, User, _users())
+        await _add_missing(session, Group, _groups())
+        await _seed_memberships(session)
+        role_ids = await _seed_roles(session)
+        await _seed_permissions(session, role_ids)
+        await _seed_keys(session)
+        await session.commit()
+
+
+async def _seed_memberships(session: AsyncSession) -> None:
+    """Bind each user to its group, skipping memberships that already exist."""
+    existing = await _existing_pairs(session, GroupUser, GroupUser.group_id, GroupUser.user_id)
+    for user_id, group_id in MEMBERSHIPS.items():
+        if (group_id, user_id) not in existing:
             session.add(GroupUser(id=uuid4(), group_id=group_id, user_id=user_id))
 
-        # One group -> one role (named for the demo); a group may carry several.
-        group_roles = {ADMINS: ADMIN, VIEWERS: VIEWER, AUTHORS: AUTHOR}
-        role_ids: dict[str, UUID] = {}
-        for group_id, role_name in group_roles.items():
-            role_id = uuid4()
-            role_ids[role_name] = role_id
-            session.add(Role(id=role_id, name=role_name))
-            session.add(GroupRole(id=uuid4(), group_id=group_id, role_id=role_id))
-        # The ``denied`` role is not assigned to any group; it exists so a test
-        # can prove a DenyAll permission never overrides a grant.
-        denied_id = uuid4()
-        role_ids[DENIED] = denied_id
-        session.add(Role(id=denied_id, name=DENIED))
 
-        for (role_name, resource), policy in ROLE_PERMISSIONS.items():
-            session.add(
-                RolePermission(
-                    id=uuid4(),
-                    role_id=role_ids[role_name],
-                    resource=resource,
-                    permission=policy_to_json(policy),
-                )
-            )
-        # A DenyAll on ``messages`` for the ``denied`` role, to pair with the
-        # AllowAll above and demonstrate the union model (deny does not win).
+async def _seed_roles(session: AsyncSession) -> dict[str, UUID]:
+    """Insert the roles and their group bindings; return ``role name -> role id``."""
+    rows = (await session.execute(select(Role.name, Role.id))).all()
+    role_ids = {name: role_id for name, role_id in rows}
+    for name in ROLE_NAMES:
+        if name not in role_ids:
+            role_id = _derived_role_id(name)
+            role_ids[name] = role_id
+            session.add(Role(id=role_id, name=name))
+
+    existing = await _existing_pairs(session, GroupRole, GroupRole.group_id, GroupRole.role_id)
+    for group_id, role_name in GROUP_ROLES.items():
+        if (group_id, role_ids[role_name]) not in existing:
+            session.add(GroupRole(id=uuid4(), group_id=group_id, role_id=role_ids[role_name]))
+    return role_ids
+
+
+async def _seed_permissions(session: AsyncSession, role_ids: dict[str, UUID]) -> None:
+    """Serialize :data:`ROLE_PERMISSIONS` into ``role_permissions`` rows."""
+    existing = await _existing_pairs(
+        session, RolePermission, RolePermission.role_id, RolePermission.resource
+    )
+    grants: list[tuple[str, str, Any]] = [
+        (role_name, resource, policy) for (role_name, resource), policy in ROLE_PERMISSIONS.items()
+    ]
+    # A ``DenyAll`` on ``messages`` for the ``denied`` role, to pair with the
+    # grants above and demonstrate the union model (deny does not win).
+    grants.append((DENIED, "messages", DenyAll()))
+
+    for role_name, resource, policy in grants:
+        role_id = role_ids[role_name]
+        if (role_id, resource) in existing:
+            continue
         session.add(
             RolePermission(
                 id=uuid4(),
-                role_id=denied_id,
-                resource="messages",
-                permission=policy_to_json(DenyAll()),
+                role_id=role_id,
+                resource=resource,
+                permission=policy_to_json(policy),
             )
         )
-        await session.commit()
+
+
+async def _seed_keys(session: AsyncSession) -> None:
+    """Insert one API key per user, storing only the digest of :data:`RAW_KEYS`."""
+    existing = await _existing_pairs(session, ApiKey, ApiKey.user_id)
+    for user_id, raw in RAW_KEYS.items():
+        if (user_id,) in existing:
+            continue
+        session.add(
+            ApiKey(
+                id=uuid4(),
+                name=user_id.hex,
+                key=hash_api_key(raw),
+                user_id=user_id,
+                roles=[],
+            )
+        )
+
+
+async def _add_missing(session: AsyncSession, model: type[Any], rows: Sequence[Any]) -> None:
+    """Add the ``rows`` whose primary key is not already stored."""
+    existing = set((await session.execute(select(model.id))).scalars().all())
+    for row in rows:
+        if row.id not in existing:
+            session.add(row)
+
+
+async def _existing_pairs(
+    session: AsyncSession, model: type[Any], *columns: Any
+) -> set[tuple[Any, ...]]:
+    """The distinct column tuples already stored for ``model``."""
+    rows = (await session.execute(select(*columns).select_from(model))).all()
+    return {tuple(row) for row in rows}
+
+
+def _derived_role_id(name: str) -> UUID:
+    """A stable role id derived from the role name, so a re-seed maps to the same row."""
+    return UUID(int=ROLE_NAMES.index(name) + 1)
 
 
 def _main() -> None:

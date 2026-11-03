@@ -74,7 +74,7 @@
             "python": "${workspaceFolder}/examples/05_full_rbac/.venv/bin/python",
             "console": "integratedTerminal",
             "justMyCode": false,
-            "preLaunchTask": "examples: migrate 05_full_rbac"
+            "preLaunchTask": "examples: seed 05_full_rbac"
         },
         {
             "name": "Debug 06 — File Store (local medium, SQLite)",

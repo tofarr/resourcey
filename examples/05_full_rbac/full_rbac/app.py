@@ -11,6 +11,11 @@ groups and permissions all live in the store, so a membership change takes effec
 without re-issuing the credential (bounded by the resolver's optional
 ``cache_ttl`` / the credential's validation threshold).
 
+The keys are store-backed too (``api_keys``, digest only), seeded alongside the
+users they name, and the authenticator is given a ``user_resource`` so a key
+pointing at a user that does not exist is a ``401`` rather than a credential that
+validly resolves to no permission at all.
+
 The board has the same asymmetry as example 04:
 
 * ``threads`` — a shared board: ``viewer`` reads it, ``admin`` reads/writes.
@@ -40,9 +45,11 @@ from fastapi import FastAPI
 from full_rbac.message import MessageResource
 from full_rbac.models import Message, Thread
 from resourcey.auth.auth_api_key import ApiKeyAuthenticator
-from resourcey.auth.auth_api_key_resource import config_api_key_resource, config_api_key_view
+from resourcey.auth.auth_api_key_resource import (
+    stored_api_key_resource,
+    stored_api_key_view,
+)
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
-from resourcey.auth.auth_config import ApiKeysConfig
 from resourcey.auth.auth_me_routes import register_me_routes
 from resourcey.auth.auth_policy import AllowAll, Owner, ReadOnly
 from resourcey.auth.auth_rbac import User, rbac_resource_paths, rbac_resources
@@ -67,6 +74,12 @@ DENIED = "denied"
 # ``rbac_resources`` builder so a grant can never drift from the served surface.
 RBAC_RESOURCE_PATHS: tuple[str, ...] = rbac_resource_paths()
 
+# The API-key resource's path. It is not part of ``rbac_resources`` (the key
+# table is its own model set), so the admin grant names it explicitly. Pinned
+# against ``stored_api_key_resource``'s default by a smoke test rather than
+# derived here, because building a resource resolves the encryption service.
+API_KEY_PATH = "api-keys"
+
 # The permission rules, as (role, resource) -> policy. Seeding writes these into
 # ``role_permissions``; the resolver reads them back per request.
 #
@@ -78,6 +91,9 @@ ROLE_PERMISSIONS: dict[tuple[str, str], Any] = {
     # The admin also administers the RBAC tables themselves. ``rbac_resources``
     # serves each table under its own path, so an admin grant names each one.
     **{(ADMIN, path): AllowAll() for path in RBAC_RESOURCE_PATHS},
+    # The key table is a **privilege-assignment surface** (a writable ``roles``
+    # field grants access), so only the admin may touch it.
+    (ADMIN, API_KEY_PATH): AllowAll(),
     (VIEWER, "threads"): ReadOnly(),
     (VIEWER, "messages"): ReadOnly(),
     (AUTHOR, "threads"): ReadOnly(),
@@ -86,38 +102,38 @@ ROLE_PERMISSIONS: dict[tuple[str, str], Any] = {
 
 
 def build_auth(
-    session_source: Any,
-    keys: ApiKeysConfig | None = None,
+    session_manager: SqlSessionManager,
     *,
     cache_ttl_seconds: float | None = None,
 ) -> tuple[AuthorizedDependencyBuilder, Resource[Any, Any]]:
     """The store-backed RBAC builder plus the exposed key view to register.
 
-    The builder authenticates with an API key (whose ``principal_id`` is the
-    stored user id) and resolves policies through
-    :class:`~resourcey.auth.auth_rbac_resolver.RbacPolicyResolver`, backed by
-    the same database the board uses. ``session_source`` is either an
-    ``async_sessionmaker`` or a zero-arg callable returning one (sync or async) —
-    the lazy form lets a caller pass a
-    :class:`~resourcey.sql.session_manager.SqlSessionManager` that only hands
-    out makers once entered.
+    The builder authenticates with a **stored** API key (bound to its ``user_id``)
+    and resolves policies through
+    :class:`~resourcey.auth.auth_rbac_resolver.RbacPolicyResolver`, backed by the
+    same database the board uses.
+
+    The authenticator is given a ``user_resource``, so a key whose user row is
+    missing or disabled is a ``401``. Without it a key bound to a nonexistent
+    user would authenticate and then resolve to no policies at all — a valid
+    credential that silently sees nothing.
 
     ``cache_ttl_seconds`` is the explicit freshness knob: ``None`` (the default)
     resolves the store on **every** request, so a membership change is immediate;
     a positive value bounds staleness (a change is honoured within that window).
     """
-    api_keys = keys if keys is not None else ApiKeysConfig.get_instance()
-    key_inner: Resource[Any, Any] = config_api_key_resource(api_keys)
-    store = SqlRbacStore(session_source)
+    key_inner: Resource[Any, Any] = stored_api_key_resource(session_manager=session_manager)
+    user_resource = SqlResource(User, session_manager=session_manager)
+    store = SqlRbacStore(manager_session_source(session_manager))
     resolver_kwargs: dict[str, Any] = {"store": store}
     if cache_ttl_seconds is not None:
         resolver_kwargs["cache_ttl"] = timedelta(seconds=cache_ttl_seconds)
     resolver = RbacPolicyResolver(**resolver_kwargs)
     builder = AuthorizedDependencyBuilder(
-        authenticator=ApiKeyAuthenticator(key_resource=key_inner),
+        authenticator=ApiKeyAuthenticator(key_resource=key_inner, user_resource=user_resource),
         policy_resolver=resolver,
     )
-    return builder, config_api_key_view(key_inner)
+    return builder, stored_api_key_view(key_inner)
 
 
 def manager_session_source(manager: SqlSessionManager) -> Any:
@@ -138,20 +154,17 @@ def manager_session_source(manager: SqlSessionManager) -> Any:
 def build_app(
     *,
     session_manager: SqlSessionManager | None = None,
-    keys: ApiKeysConfig | None = None,
     cache_ttl_seconds: float | None = None,
 ) -> tuple[Manifest, FastAPI]:
     """Build the manifest + FastAPI app.
 
     A factory so tests can inject their own ``session_manager`` (isolated
-    database), ``keys``, or ``cache_ttl_seconds``. The store-backed RBAC builder
-    is always wired here, so every app this factory returns is authenticated and
-    resolved against the RBAC tables.
+    database) or ``cache_ttl_seconds``. The store-backed RBAC builder is always
+    wired here, so every app this factory returns is authenticated and resolved
+    against the store — including its API keys.
     """
     manager = session_manager or SqlSessionManager(SqlConfig.get_instance())
-    builder, key_view = build_auth(
-        manager_session_source(manager), keys, cache_ttl_seconds=cache_ttl_seconds
-    )
+    builder, key_view = build_auth(manager, cache_ttl_seconds=cache_ttl_seconds)
 
     resources: list[Resource[Any, Any]] = [
         SqlResource(Thread, session_manager=manager),
