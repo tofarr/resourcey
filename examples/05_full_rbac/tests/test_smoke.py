@@ -1,8 +1,8 @@
 """Smoke tests for the full-RBAC app factory.
 
-These pin the wiring (the store-backed resolver, the API-key authenticator, the
-full RBAC resource set) against an in-memory SQLite schema built with
-``create_all`` and the RBAC tables seeded. End-to-end behaviour lives in
+These pin the wiring (the store-backed resolver, the stored-API-key
+authenticator, the full RBAC resource set) against an in-memory SQLite schema
+built with ``create_all`` and the store seeded. End-to-end behaviour lives in
 ``test_e2e.py``.
 """
 
@@ -12,29 +12,17 @@ from collections.abc import AsyncIterator
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from full_rbac.app import build_app, build_auth, manager_session_source
+from full_rbac.app import API_KEY_PATH, build_app, build_auth
 from full_rbac.models import Base
-from full_rbac.seed import ADMIN_USER, VIEWER_USER, seed
+from full_rbac.seed import VIEWER_USER, seed
 from resourcey.auth.auth_api_key import ApiKeyAuthenticator
 from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilder
-from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
 from resourcey.auth.auth_rbac import RBAC_MODELS
 from resourcey.auth.auth_rbac_resolver import RbacPolicyResolver
 from resourcey.sql.session_manager import SqlSessionManager
 from resourcey.sql.sql_config import SqlConfig
-
-
-def _keys() -> ApiKeysConfig:
-    """The accepted keys, each bound to a stored user id (no credential-carried roles)."""
-    return ApiKeysConfig(
-        api_keys=[
-            ApiKeyConfig(id="admin", key=SecretStr("admin-key"), principal_id=str(ADMIN_USER)),
-            ApiKeyConfig(id="viewer", key=SecretStr("viewer-key"), principal_id=str(VIEWER_USER)),
-        ]
-    )
 
 
 async def _create_schema(maker: async_sessionmaker[AsyncSession]) -> None:
@@ -48,7 +36,7 @@ async def _create_schema(maker: async_sessionmaker[AsyncSession]) -> None:
 async def client() -> AsyncIterator[AsyncClient]:
     """A full-RBAC app over an in-memory SQLite schema with the RBAC tables seeded."""
     manager = SqlSessionManager(SqlConfig.get_instance())
-    manifest, app = build_app(session_manager=manager, keys=_keys())
+    manifest, app = build_app(session_manager=manager)
     await manifest.__aenter__()
     try:
         maker = await manager.get_session_maker()
@@ -64,7 +52,7 @@ async def client() -> AsyncIterator[AsyncClient]:
 def test_build_app_registers_the_rbac_resource_set() -> None:
     """The factory exposes the board *and* the full RBAC resource set."""
     manager = SqlSessionManager(SqlConfig.get_instance())
-    manifest, _app = build_app(session_manager=manager, keys=_keys())
+    manifest, _app = build_app(session_manager=manager)
     paths = {r.get_resource_path() for r in manifest.resources}
     assert {
         "threads",
@@ -80,10 +68,21 @@ def test_build_app_registers_the_rbac_resource_set() -> None:
     assert len(RBAC_MODELS) == 7
 
 
+def test_the_admin_grant_names_the_served_key_path() -> None:
+    """``API_KEY_PATH`` matches the path the key resource is actually served at.
+
+    A grant on a path nothing serves would leave the key table ungoverned, so
+    this pins the constant against the resource builder's own default.
+    """
+    manager = SqlSessionManager(SqlConfig.get_instance())
+    manifest, _app = build_app(session_manager=manager)
+    assert API_KEY_PATH in {r.get_resource_path() for r in manifest.resources}
+
+
 def test_build_auth_resolver_is_the_rbac_resolver() -> None:
     """The store-backed RBAC resolver is what the builder carries."""
     manager = SqlSessionManager(SqlConfig.get_instance())
-    builder, _view = build_auth(manager_session_source(manager), _keys())
+    builder, _view = build_auth(manager)
     assert isinstance(builder, AuthorizedDependencyBuilder)
     assert isinstance(builder.authenticator, ApiKeyAuthenticator)
     assert isinstance(builder.policy_resolver, RbacPolicyResolver)

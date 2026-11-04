@@ -2,12 +2,17 @@
 
 The framework's SQL workflow is **model-first**, so the ORM models are the schema of
 record and the framework infers the DTO (and REST models) from them. This
-example combines two model sets in one migration:
+example combines three model sets in one migration:
 
 * the board — ``Thread`` and ``Message`` — exactly as in example 04;
 * the framework's stored RBAC tables (``users`` / ``groups`` / ``group_users`` /
   ``roles`` / ``group_roles`` / ``role_permissions`` / ``resource_acls``),
-  re-exported from :mod:`resourcey.auth.auth_rbac`.
+  re-exported from :mod:`resourcey.auth.auth_rbac`;
+* the framework's ``api_keys`` table, re-exported from
+  :mod:`resourcey.auth.auth_api_key_resource`.
+
+The credentials live in the store alongside the users they name, so a key and the
+principal it resolves to are seeded together and cannot drift.
 
 ``Message.author_id`` is the owner column the ``Owner`` (creator) policy scopes
 on; it is server-stamped, never client-supplied, so it carries a
@@ -32,6 +37,7 @@ from resourcey.auth.auth_rbac import (  # noqa: F401  (re-exported for seeding /
     RolePermission,
     User,
 )
+from resourcey.auth.auth_api_key_resource import ApiKey, ApiKeyBase
 from resourcey.core.dto import DtoField
 
 OWNER_FIELD = DtoField(in_create_request=False, in_update_request=False)
@@ -79,9 +85,10 @@ class Message(Base):
     )
 
 
-# The RBAC tables live in the framework's own ``RbacBase`` metadata; fold them
-# into this example's metadata so one Alembic diff (and one ``create_all``)
-# covers the whole schema.
-for _table in RbacBase.metadata.tables.values():
-    if _table.key not in Base.metadata.tables:
-        _table.to_metadata(Base.metadata)
+# The RBAC and API-key tables live in the framework's own ``RbacBase`` /
+# ``ApiKeyBase`` metadata; fold them into this example's metadata so one Alembic
+# diff (and one ``create_all``) covers the whole schema.
+for _base in (RbacBase, ApiKeyBase):
+    for _table in _base.metadata.tables.values():
+        if _table.key not in Base.metadata.tables:
+            _table.to_metadata(Base.metadata)
