@@ -159,6 +159,30 @@ class Resource(ABC, Generic[T, K]):
     def get_supported_actions(self) -> frozenset[Action]:
         """The actions this resource serves — the single action declaration."""
 
+    def get_custom_actions(self) -> frozenset[str]:
+        """The non-standard capabilities this resource declares, by name.
+
+        A custom action is a capability that is none of the standard seven:
+        "may this principal **use** this thing" is not read (you can see the
+        config without being allowed to act through it), not update, and not
+        create. Declaring one here makes it grantable through the same stored
+        policy mechanism as the standard actions, with no new storage concept
+        and no generated route — a hand-written route calls
+        :meth:`~resourcey.auth.auth_authorized_service.AuthorizedService.authorize`.
+
+        A name, not a member of :class:`Action`: the vocabulary belongs to the
+        resource, so ``use`` on a sandbox config and ``use`` on a secret
+        provider are unrelated grants that happen to share a spelling. An app
+        that wants typo-safety and autocomplete declares its own ``StrEnum``
+        and returns ``frozenset(MyActions)`` — a ``StrEnum`` member *is* its
+        string, so it satisfies this contract exactly.
+
+        Names must be lowercase identifiers and must not shadow a standard
+        action; the manifest validates both at registration. Defaults to
+        ``frozenset()``, so every existing resource is unaffected.
+        """
+        return frozenset()
+
     @abstractmethod
     def get_exposed_resource(self) -> Resource[T, K] | None:
         """The resource the outside world sees, or ``None`` for internal-only."""

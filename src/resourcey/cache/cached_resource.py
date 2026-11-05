@@ -125,6 +125,10 @@ class CachedResource(Resource[T, K], Generic[T, K]):
     def get_supported_actions(self) -> frozenset[Action]:
         return self._inner.get_supported_actions()
 
+    def get_custom_actions(self) -> frozenset[str]:
+        """The inner resource's custom actions: a wrapper adds none of its own."""
+        return self._inner.get_custom_actions()
+
     def get_exposed_resource(self) -> Resource[T, K]:
         """The wrapper is what the outside world sees (so its service caches)."""
         return self

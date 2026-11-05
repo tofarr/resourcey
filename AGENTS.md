@@ -85,6 +85,19 @@ dependency.
 * **Resource-oriented.** A resource is the central unit. One declaration
   drives Pydantic schemas, SQLAlchemy models, the REST service, migrations,
   and permission checks.
+* **The `Action` enum is closed; capabilities beyond it are per-resource.**
+  A resource that has a genuine non-CRUD capability ("may this principal
+  **use** this thing") declares it by name via
+  `get_custom_actions() -> frozenset[str]` and enforces it from a hand-written
+  route with `AuthorizedService.authorize(action, id)`. Never add a member to
+  `Action`: every resource defaulting to `frozenset(Action)` would then appear
+  to support it, and the meaning of `use` is resource-specific. Custom names
+  are lowercase `[a-z][a-z0-9_]*`, must not shadow a standard action, and are
+  validated at manifest construction. Policies see a custom action as a plain
+  string: `ReadOnly` denies it (fail-closed), while `AllowAll`, `Owner`,
+  `Acl`, and `GroupMember` scope it to the same rows they allow `read` on. A
+  custom action is never implied by a standard one, and never gets a generated
+  route or a batch kind.
 * **Progressive enhancement.** Each layer is opt-in and composable. The
   generated service can be replaced by a hand-written route that calls the
   repository, or by raw SQLAlchemy — nothing breaks when you drop a rung.

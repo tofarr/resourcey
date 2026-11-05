@@ -121,6 +121,7 @@ class FakeService(Service[Row, int]):
         self.search_calls = 0
         self.count_calls = 0
         self.batch_read_calls = 0
+        self.authorize_calls = 0
         self._private = False
 
     def response_is_private(self) -> bool:
@@ -154,6 +155,13 @@ class FakeService(Service[Row, int]):
         self._require_entered()
         self.batch_read_calls += 1
         return [self._rows.get(i) for i in ids]
+
+    async def authorize(self, action: str, id: int) -> Row:  # noqa: A002
+        self._require_entered()
+        self.authorize_calls += 1
+        if id not in self._rows:
+            raise NotFoundError(id)
+        return self._rows[id]
 
     async def create(self, payload: Row) -> Row:
         self._require_entered()
@@ -365,6 +373,21 @@ async def test_different_reads_do_not_share_a_cache_key():
 # ---------------------------------------------------------------------------
 # Caller-scoped responses are never shared
 # ---------------------------------------------------------------------------
+
+
+async def test_a_custom_action_check_always_reads_through():
+    # A permitted-use check must never be served from cache: a revoked grant
+    # would keep working until the entry aged out.
+    inner = FakeResource(strategy=_optimistic())
+    cached = await _enter(CachedResource(inner))
+    service = await cached.get_service()
+    async with service:
+        first = await service.authorize("use", 1)
+        second = await service.authorize("use", 1)
+    assert first == second == Row(id=1, label="a")
+    assert inner.service is not None
+    assert inner.service.authorize_calls == 2
+    await cached.__aexit__()
 
 
 async def test_private_wrapper_never_caches():

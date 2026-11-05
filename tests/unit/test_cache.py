@@ -280,6 +280,21 @@ def test_read_only_wins_over_updated_at():
     assert isinstance(strategy, OptimisticCacheStrategy)
 
 
+def test_a_custom_action_does_not_make_a_resource_writable():
+    # A custom action is not an edit, so it must not change the cache default:
+    # a read-only resource that declares ``use`` still gets the read-only
+    # strategy, because the cache keyed here holds a read response.
+    class ReadOnlyWithUse(ReadOnly):
+        def get_custom_actions(self) -> frozenset[str]:
+            return frozenset({"use"})
+
+    resource = ReadOnlyWithUse(HasUpdated, session_factory=_factory())
+    assert resource.get_custom_actions() == frozenset({"use"})
+    strategy = default_cache_strategy(resource.get_rest_models(), resource.get_supported_actions())
+    assert isinstance(strategy, OptimisticCacheStrategy)
+    assert strategy.expire_in == DEFAULT_READ_ONLY_EXPIRE_IN
+
+
 def test_mixin_keeps_the_abstract_contract():
     # The mixin must not drop the two hooks from ``Resource``'s abstract set by
     # defining concrete overrides: a backend that forgets one fails at
