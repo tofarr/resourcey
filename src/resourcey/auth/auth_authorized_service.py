@@ -19,6 +19,10 @@ Per-action enforcement:
   / a count of 0 rather than an error.
 * **batch_read** / **apply_edits** — out-of-scope positions write nothing and are
   ``None``, positionally aligned with the input.
+* **custom actions** — :meth:`AuthorizedService.authorize` checks one specific
+  row for a capability the resource declares outside the standard seven, and
+  raises ``404`` for an out-of-scope or absent row. No route is generated for
+  it: a hand-written route calls ``authorize`` and proceeds.
 
 The wrapper enters its inner service and delegates
 :meth:`serialization_context` to it, so a one-time secret reveal survives
@@ -34,6 +38,7 @@ from collections.abc import Sequence
 from typing import Any, Generic, TypeVar
 
 from resourcey.auth.auth_policy import Policy
+from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.service import (
     DEFAULT_LIMIT,
     Action,
@@ -70,6 +75,7 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         resource_name: str,
         user_id: uuid.UUID | None = None,
         response_private: bool = False,
+        custom_actions: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__()
         self._inner = inner
@@ -80,6 +86,9 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         self._id_field = id_field
         self._resource_name = resource_name
         self._user_id = user_id
+        # The custom actions the resource declares. Empty by default, so
+        # ``authorize`` refuses every name on a resource that declares none.
+        self._custom_actions = frozenset(str(a) for a in custom_actions)
         self._owns_inner = False
         self.set_response_private(response_private)
 
@@ -130,7 +139,7 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
     # Permission filter resolution
     # ------------------------------------------------------------------
 
-    async def _permission_filter(self, action: Action) -> SearchFilter[Any]:
+    async def _permission_filter(self, action: Action | str) -> SearchFilter[Any]:
         """The OR-combination of every policy's filter for ``action``.
 
         An empty list yields a ``NoMatchFilter`` (fail-closed). A ``NoMatchFilter``
@@ -203,6 +212,48 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         filt = await self._permission_filter(Action.BATCH_READ)
         return [item if item is not None and filt.matches(item) else None for item in results]
 
+    # ------------------------------------------------------------------
+    # Custom actions
+    # ------------------------------------------------------------------
+
+    async def authorize(self, action: str, id: K) -> T:  # noqa: A002
+        """Return the row if the principal may perform ``action`` on it.
+
+        The enforcement seam for a capability that is not one of the standard
+        seven — a streaming proxy, a secret reveal, a websocket upgrade. Such a
+        route is hand-written (a generated ``POST /{resource}/{id}/{action}``
+        returning a row would be the wrong shape for all three), so it calls
+        this and proceeds; the framework supplies no route for it.
+
+        Raises :class:`NotFoundError` when the row is absent **or** out of
+        scope, so a non-permitted id does not leak its existence — the same
+        posture as :meth:`read`. Raises :class:`ResourceyConfigError` when the
+        resource does not declare ``action``, which is a programming error
+        rather than a request error.
+
+        Note that this is a check, not a grant of the standard actions: holding
+        ``read`` does not imply any custom action, and vice versa.
+
+        The returned row is **unprojected**: it is the inner resource's DTO, so
+        it still carries every field the resource stores — including fields a
+        :class:`~resourcey.view.resource_view.ResourceView` hides from its read
+        response. Projection is a transport concern that only the generated
+        routes apply. A hand-written route that serialises this row must project
+        it through ``resource.get_rest_models().read_response`` itself, or it
+        will serve hidden fields.
+        """
+        declared = {str(a) for a in self._custom_actions}
+        if str(action) not in declared:
+            raise ResourceyConfigError(
+                f"{self._resource_name} does not declare the custom action {str(action)!r}; "
+                f"declared: {sorted(declared)}. Add it to get_custom_actions()."
+            )
+        result = await self._inner.read(id)
+        filt = await self._permission_filter(action)
+        if result is None or not filt.matches(result):
+            raise NotFoundError(id)
+        return result
+
     async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply only in-scope edits; other positions are ``None``.
 
@@ -214,7 +265,7 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         delete is folded into that node's own condition, so the backend enforces
         scope atomically with the write.
         """
-        filters: dict[Action, SearchFilter[Any]] = {}
+        filters: dict[Action | str, SearchFilter[Any]] = {}
         flags: list[bool] = []
         permitted: list[Create[T] | Update[T] | Delete[K]] = []
         for edit in edits:
@@ -244,7 +295,7 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
         return [next(edited) if allowed else None for allowed in flags]
 
     async def _action_filter(
-        self, cache: dict[Action, SearchFilter[Any]], action: Action
+        self, cache: dict[Action | str, SearchFilter[Any]], action: Action | str
     ) -> SearchFilter[Any]:
         """The permission filter for ``action``, resolved at most once per call.
 

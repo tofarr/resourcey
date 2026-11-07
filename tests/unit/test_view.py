@@ -125,6 +125,34 @@ class TestConstruction:
         # A subset is fine.
         ResourceView(readonly, exposed_actions=frozenset({Action.READ}))
 
+    def test_custom_actions_default_to_the_inners(self) -> None:
+        class Usable(SqlResource[Any, Any]):
+            def get_custom_actions(self) -> frozenset[str]:
+                return frozenset({"use"})
+
+        view = ResourceView(Usable(Secret, session_factory=_maker()))
+        assert view.get_custom_actions() == frozenset({"use"})
+
+    def test_narrowing_custom_actions_is_allowed(self) -> None:
+        class Usable(SqlResource[Any, Any]):
+            def get_custom_actions(self) -> frozenset[str]:
+                return frozenset({"use", "stream"})
+
+        inner = Usable(Secret, session_factory=_maker())
+        view = ResourceView(inner, exposed_custom_actions=frozenset({"use"}))
+        assert view.get_custom_actions() == frozenset({"use"})
+        # The inner is untouched.
+        assert inner.get_custom_actions() == frozenset({"use", "stream"})
+
+    def test_widening_custom_actions_is_rejected(self) -> None:
+        class Usable(SqlResource[Any, Any]):
+            def get_custom_actions(self) -> frozenset[str]:
+                return frozenset({"use"})
+
+        inner = Usable(Secret, session_factory=_maker())
+        with pytest.raises(ResourceyConfigError, match="does not declare"):
+            ResourceView(inner, exposed_custom_actions=frozenset({"use", "stream"}))
+
     def test_hiding_fields_against_a_declared_filter_is_rejected(self) -> None:
         class SecretFilter(BaseObjectFilter[Any]):
             value__eq: str | None = None
@@ -432,6 +460,29 @@ class TestServiceSeam:
                         )
                     ]
                 )
+        await engine.dispose()
+
+    async def test_view_service_refuses_a_custom_action_it_does_not_expose(self) -> None:
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        maker = async_sessionmaker(engine, expire_on_commit=False)
+        base = await _inner(engine, maker)
+
+        class Usable(SqlResource[Any, Any]):
+            def get_custom_actions(self) -> frozenset[str]:
+                return frozenset({"use", "stream"})
+
+        inner = Usable(Secret, session_factory=maker)
+        view = ResourceView(inner, exposed_custom_actions=frozenset({"use"}))
+        async with await view.get_service() as service:
+            assert isinstance(service, ViewService)
+            # ``stream`` exists on the inner but the view hides it.
+            with pytest.raises(InvalidInputError, match="not exposed by this view"):
+                await service.authorize("stream", uuid4())
+            # ``use`` passes the view's check and reaches the inner service,
+            # which has no policy and so refuses the check itself.
+            with pytest.raises(NotImplementedError):
+                await service.authorize("use", uuid4())
+        assert base.get_custom_actions() == frozenset()
         await engine.dispose()
 
     async def test_lifecycle_delegates_to_the_inner(self) -> None:

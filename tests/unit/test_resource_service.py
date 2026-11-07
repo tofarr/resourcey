@@ -9,6 +9,7 @@ lives in ``test_app.py``.
 from __future__ import annotations
 
 import asyncio
+import enum
 from collections.abc import AsyncIterator, MutableMapping
 from functools import cache
 from typing import Any
@@ -45,6 +46,7 @@ from resourcey.core.service import (
     StorageKey,
     Update,
     assert_real_actions,
+    assert_valid_custom_actions,
     storage_key,
 )
 from resourcey.http.dependency_builder import OpenDependencyBuilder
@@ -674,6 +676,43 @@ def test_assert_real_actions_rejects_non_action_members():
         assert_real_actions("X", frozenset({"creat"}))
 
 
+def test_assert_real_actions_accepts_a_declared_custom_action():
+    assert_real_actions("X", frozenset({Action.READ, "use"}), frozenset({"use"}))
+
+
+def test_assert_real_actions_still_rejects_a_typo_beside_a_custom_action():
+    # Declaring one custom action must not open the door to any string.
+    with pytest.raises(ServiceError, match=r"\['use', 'uss'\]|'uss'"):
+        assert_real_actions("X", frozenset({Action.READ, "use", "uss"}), frozenset({"use"}))
+
+
+def test_assert_real_actions_names_the_declared_custom_actions():
+    with pytest.raises(ServiceError, match="declared custom actions \\['use'\\]"):
+        assert_real_actions("X", frozenset({"consume"}), frozenset({"use"}))
+
+
+def test_assert_real_actions_accepts_a_str_enum_custom_action():
+    class Extra(enum.StrEnum):
+        USE = "use"
+
+    assert_real_actions("X", frozenset({Action.READ, Extra.USE}), frozenset(Extra))
+
+
+def test_assert_valid_custom_actions_accepts_well_formed_names():
+    assert_valid_custom_actions("X", frozenset({"use", "stream_v2"}))
+
+
+def test_assert_valid_custom_actions_rejects_a_standard_action_name():
+    with pytest.raises(ResourceyConfigError, match="already a standard action"):
+        assert_valid_custom_actions("X", frozenset({"read"}))
+
+
+@pytest.mark.parametrize("name", ["Use", "use-it", "2use", "", "use it"])
+def test_assert_valid_custom_actions_rejects_a_malformed_name(name):
+    with pytest.raises(ResourceyConfigError, match="not a valid custom action name"):
+        assert_valid_custom_actions("X", frozenset({name}))
+
+
 def test_manifest_rejects_a_typo_in_supported_actions():
     class Bad(SqlResource[Any, Any]):
         def get_supported_actions(self) -> frozenset[Any]:
@@ -690,6 +729,38 @@ def test_manifest_accepts_a_narrowed_real_action_set():
 
     manifest = Manifest(resources=[Narrow(Thread, session_factory=_dummy_factory())])
     assert manifest.resource_names() == ("threads",)
+
+
+def test_manifest_accepts_a_declared_custom_action():
+    class WithUse(SqlResource[Any, Any]):
+        def get_custom_actions(self) -> frozenset[str]:
+            return frozenset({"use"})
+
+    manifest = Manifest(resources=[WithUse(Thread, session_factory=_dummy_factory())])
+    assert manifest.resource_names() == ("threads",)
+
+
+def test_manifest_rejects_a_custom_action_that_shadows_a_standard_one():
+    class Shadows(SqlResource[Any, Any]):
+        def get_custom_actions(self) -> frozenset[str]:
+            return frozenset({"read"})
+
+    with pytest.raises(ResourceyConfigError, match="already a standard action"):
+        Manifest(resources=[Shadows(Thread, session_factory=_dummy_factory())])
+
+
+def test_manifest_rejects_a_malformed_custom_action():
+    class Malformed(SqlResource[Any, Any]):
+        def get_custom_actions(self) -> frozenset[str]:
+            return frozenset({"Use-It"})
+
+    with pytest.raises(ResourceyConfigError, match="not a valid custom action name"):
+        Manifest(resources=[Malformed(Thread, session_factory=_dummy_factory())])
+
+
+def test_a_resource_declares_no_custom_actions_by_default(resources):
+    _maker, threads, _messages = resources
+    assert threads.get_custom_actions() == frozenset()
 
 
 async def test_manifest_rejects_a_fk_reference_without_a_served_target():

@@ -7,7 +7,8 @@ deliberately stays a plain container.
 
 Construction validates the action declarations of every resource up front, so a
 typo in a dynamically built set fails loudly at startup instead of silently
-dropping a route. It then calls
+dropping a route — and so does a malformed custom action name, or one that
+shadows a standard :class:`~resourcey.core.service.Action`. It then calls
 :meth:`~resourcey.core.resource.Resource.on_register` on each resource, handing
 it the manifest so it can resolve sibling resources *lazily, later* — never from
 within the hook itself, since registration ordering is not a contract.
@@ -25,7 +26,7 @@ from typing import Any
 
 from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.resource import Resource
-from resourcey.core.service import ServiceError, assert_real_actions
+from resourcey.core.service import ServiceError, assert_real_actions, assert_valid_custom_actions
 from resourcey.util.naming import singularise
 
 
@@ -78,7 +79,10 @@ class Manifest:
         self.managers: tuple[AbstractAsyncContextManager[Any], ...] = tuple(managers)
         self._entered = False
         for resource in self.resources:
-            assert_real_actions(type(resource).__name__, resource.get_supported_actions())
+            name = type(resource).__name__
+            custom = resource.get_custom_actions()
+            assert_valid_custom_actions(name, custom)
+            assert_real_actions(name, resource.get_supported_actions(), custom)
         for resource in self.resources:
             resource.on_register(self)
 

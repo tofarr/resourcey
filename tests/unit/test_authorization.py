@@ -18,13 +18,16 @@ authentication. No mocks. Covered:
 
 from __future__ import annotations
 
+import enum
 from collections.abc import AsyncIterator, MutableMapping
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, PrivateAttr, SecretStr
 from sqlalchemy import String
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -38,12 +41,17 @@ from resourcey.auth.auth_authorized_dependency import AuthorizedDependencyBuilde
 from resourcey.auth.auth_authorized_service import AuthorizedService
 from resourcey.auth.auth_config import ApiKeyConfig, ApiKeysConfig
 from resourcey.auth.auth_policy import (
+    Acl,
     AllowAll,
     DenyAll,
+    GroupMember,
+    Owner,
     Policy,
     PolicyResolver,
     ReadOnly,
+    bind_member_groups,
 )
+from resourcey.core.errors import ResourceyConfigError
 from resourcey.core.manifest import Manifest
 from resourcey.core.service import (
     Action,
@@ -116,6 +124,57 @@ async def test_read_only_grants_read_like_and_denies_the_rest():
         assert isinstance(await policy.to_search_filter(None, action), AllFilter), action
     for action in (Action.CREATE, Action.UPDATE, Action.DELETE):
         assert isinstance(await policy.to_search_filter(None, action), NoMatchFilter), action
+
+
+# ---------------------------------------------------------------------------
+# Custom actions — the policy stance (issue #187)
+# ---------------------------------------------------------------------------
+
+
+async def test_allow_all_grants_a_custom_action():
+    assert isinstance(await AllowAll().to_search_filter(None, "use"), AllFilter)
+
+
+async def test_deny_all_denies_a_custom_action():
+    assert isinstance(await DenyAll().to_search_filter(None, "use"), NoMatchFilter)
+
+
+async def test_read_only_denies_a_custom_action():
+    # A custom action is not read-like; granting it would make ``ReadOnly``
+    # grant more than its name promises.
+    assert isinstance(await ReadOnly().to_search_filter(None, "use"), NoMatchFilter)
+
+
+async def test_a_custom_action_is_not_normalized_away():
+    # ``normalize_action`` maps only the derived standard members, so a custom
+    # action reaches the policy as itself and can be granted independently.
+    assert normalize_action("use") == "use"
+
+
+class _UseAction(enum.StrEnum):
+    """An app-declared action vocabulary — a StrEnum is its own strings."""
+
+    USE = "use"
+
+
+class Recording(Policy):
+    """Records the action it is asked about — a policy that inspects its input."""
+
+    _seen: list[Any] = PrivateAttr(default_factory=list)
+
+    async def to_search_filter(self, user_id: Any, action: Any) -> SearchFilter[Any]:
+        self._seen.append(action)
+        return AllFilter()
+
+
+async def test_a_policy_receives_the_custom_action_name_it_was_given():
+    recording = Recording()
+    # A plain string and an app-declared StrEnum member both arrive intact, and
+    # both are the string ``"use"`` so a policy's ``==`` comparison works.
+    assert isinstance(await recording.to_search_filter(None, "use"), AllFilter)
+    assert isinstance(await recording.to_search_filter(None, _UseAction.USE), AllFilter)
+    assert recording._seen == ["use", "use"]
+    assert _UseAction.USE == "use"
 
 
 def test_normalize_action_reduces_the_derived_members():
@@ -257,6 +316,133 @@ async def test_search_combines_request_and_denied_permission_as_nomatch(sql_reso
         # and_(NoMatch, request) is NoMatch regardless of the request filter.
         assert and_(NoMatchFilter(), attr("label", EqFilter(value="a"))) == NoMatchFilter()
         assert (await service.search(attr("label", EqFilter(value="a")), limit=10)).items == []
+
+
+# ---------------------------------------------------------------------------
+# Custom actions — enforcement (issue #187)
+# ---------------------------------------------------------------------------
+
+
+def _authorized_custom(
+    inner: Any, policy: Policy, resource: SqlResource[Any, Any], *custom: str
+) -> AuthorizedService[Any, Any]:
+    return AuthorizedService(
+        inner,
+        policies=[policy],
+        id_field=resource.get_id_field(),
+        resource_name="items",
+        custom_actions=frozenset(custom),
+    )
+
+
+async def test_authorize_permits_a_declared_custom_action_on_an_in_scope_row(sql_resource):
+    _maker, resource = sql_resource
+    (seeded,) = await _seed(resource, "a")
+    async with _authorized_custom(
+        await resource.get_service({}), AllowAll(), resource, "use"
+    ) as service:
+        assert (await service.authorize("use", seeded.id)).label == "a"
+
+
+async def test_authorize_hides_an_out_of_scope_row_as_not_found(sql_resource):
+    _maker, resource = sql_resource
+    (seeded,) = await _seed(resource, "a")
+    async with _authorized_custom(
+        await resource.get_service({}), DenyAll(), resource, "use"
+    ) as service:
+        # 404, not 403: a non-permitted id must not leak its existence.
+        with pytest.raises(NotFoundError):
+            await service.authorize("use", seeded.id)
+
+
+async def test_authorize_hides_an_absent_row_as_not_found(sql_resource):
+    _maker, resource = sql_resource
+    async with _authorized_custom(
+        await resource.get_service({}), AllowAll(), resource, "use"
+    ) as service:
+        with pytest.raises(NotFoundError):
+            await service.authorize("use", 999)
+
+
+async def test_authorize_rejects_an_undeclared_custom_action(sql_resource):
+    _maker, resource = sql_resource
+    (seeded,) = await _seed(resource, "a")
+    async with _authorized_custom(
+        await resource.get_service({}), AllowAll(), resource, "use"
+    ) as service:
+        with pytest.raises(ResourceyConfigError, match="does not declare"):
+            await service.authorize("consume", seeded.id)
+
+
+async def test_authorize_refuses_every_name_when_none_are_declared(sql_resource):
+    _maker, resource = sql_resource
+    (seeded,) = await _seed(resource, "a")
+    async with _authorized(await resource.get_service({}), AllowAll(), resource) as service:
+        with pytest.raises(ResourceyConfigError, match="does not declare"):
+            await service.authorize("use", seeded.id)
+
+
+async def test_a_custom_action_is_independent_of_the_standard_ones(sql_resource):
+    _maker, resource = sql_resource
+    (seeded,) = await _seed(resource, "a")
+    # ``ReadOnly`` grants read and denies the custom action, so the same row is
+    # readable yet not usable — the distinction the issue is about.
+    async with _authorized_custom(
+        await resource.get_service({}), ReadOnly(), resource, "use"
+    ) as service:
+        assert (await service.read(seeded.id)).label == "a"
+        with pytest.raises(NotFoundError):
+            await service.authorize("use", seeded.id)
+
+
+async def test_holding_read_does_not_imply_a_custom_action(sql_resource):
+    _maker, resource = sql_resource
+    (seeded,) = await _seed(resource, "a")
+    # ``Owner`` with no user id owns nothing: read is denied too, which proves
+    # ``authorize`` goes through the policy rather than assuming read access.
+    async with _authorized_custom(
+        await resource.get_service({}), DenyAll(), resource, "use"
+    ) as service:
+        with pytest.raises(NotFoundError):
+            await service.read(seeded.id)
+        with pytest.raises(NotFoundError):
+            await service.authorize("use", seeded.id)
+
+
+async def test_owner_policy_scopes_a_custom_action_to_owned_rows():
+    user_id = uuid4()
+    custom = await Owner().to_search_filter(user_id, "use")
+    # A custom action is not create, so it scopes like every other row action:
+    # the caller may use exactly the rows they own.
+    assert custom == await Owner().to_search_filter(user_id, Action.UPDATE)
+    assert custom == attr("user_id", EqFilter(value=user_id))
+
+
+async def test_acl_policy_uses_the_same_id_set_for_a_custom_action():
+    listed, unlisted = uuid4(), uuid4()
+    acl = Acl(ids=frozenset({listed}))
+    assert await acl.to_search_filter(None, "use") == await acl.to_search_filter(None, Action.READ)
+    assert (await acl.to_search_filter(None, "use")).matches(SimpleNamespace(id=listed))
+    assert not (await acl.to_search_filter(None, "use")).matches(SimpleNamespace(id=unlisted))
+
+
+async def test_group_member_policy_scopes_a_custom_action_by_membership():
+    group = uuid4()
+    policy = GroupMember(group_ids=frozenset({group}), on_match=AllowAll(), on_mismatch=DenyAll())
+    # Membership is pre-bound by the resolver; the reduction is then the
+    # matching sub-policy, exactly as for a standard action.
+    assert isinstance(await policy.to_search_filter(uuid4(), "use"), NoMatchFilter)
+    bound = bind_member_groups(policy, frozenset({group}))
+    assert isinstance(await bound.to_search_filter(uuid4(), "use"), AllFilter)
+
+
+async def test_read_only_denies_a_custom_action_while_granting_read():
+    user_id = uuid4()
+    assert isinstance(await ReadOnly().to_search_filter(user_id, "use"), NoMatchFilter)
+    assert isinstance(await ReadOnly().to_search_filter(user_id, Action.READ), AllFilter)
+    # A read-like *derived* action is still granted, so the denial is specific
+    # to the custom name rather than to "anything not READ".
+    assert isinstance(await ReadOnly().to_search_filter(user_id, Action.BATCH_READ), AllFilter)
 
 
 async def test_wrapper_enters_its_inner_and_closes_what_it_opened(sql_resource):
@@ -503,6 +689,50 @@ async def test_absent_key_is_unauthorized_under_any_policy(authz_app):
     app, manifest = authz_app(AllowAll())
     async with manifest, await _client(app) as client:
         assert (await client.get("/items")).status_code == 401
+
+
+async def test_the_builder_threads_declared_custom_actions_into_the_service():
+    """A hand-written route can check a custom action through the builder.
+
+    This is the documented use case: the framework generates no route for a
+    custom action, so the app adds one, resolves the service through the same
+    builder (which is what applies the policy), and calls ``authorize``. The
+    declared custom actions must survive that wrapping — otherwise every call
+    would fail as undeclared.
+    """
+    from fastapi import Depends
+
+    class Usable(SqlResource[Any, Any]):
+        def get_custom_actions(self) -> frozenset[str]:
+            return frozenset({"use"})
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        await conn.run_sync(AuthzBase.metadata.create_all)
+    items = Usable(Item, session_factory=maker, path="items")
+    builder, key_view = _config_builder(AllowAll())
+    manifest = Manifest(resources=[key_view, items])
+    app = create_app(manifest, dependency_builder=builder)
+
+    async def use_item(
+        item_id: int,
+        service: Any = Depends(builder.get_service_dependency(items)),  # noqa: B008
+    ):
+        return {"label": (await service.authorize("use", item_id)).label}
+
+    app.post("/items/{item_id}/use")(use_item)
+
+    async with manifest, await _client(app) as client:
+        headers = {API_KEY_HEADER_NAME: "secret-one"}
+        created = await client.post("/items", json={"label": "a"}, headers=headers)
+        item_id = created.json()["id"]
+        assert (await client.post(f"/items/{item_id}/use", headers=headers)).json() == {
+            "label": "a"
+        }
+        # The custom action hides an absent row exactly like ``read`` does.
+        assert (await client.post("/items/999/use", headers=headers)).status_code == 404
+    await engine.dispose()
 
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,17 @@
 // (advertised as an OpenAPI enum) plus a `desc` direction flag; resources with
 // no sortable fields expose no sort parameters at all (#30).
 //
+// Custom actions (issue #187): a resource may declare capabilities outside the
+// standard seven -- e.g. "may this principal *use* this thing", which is not a
+// read, an update, or a create. A custom action is a plain lowercase name
+// (`[a-z][a-z0-9_]*`) declared via get_custom_actions(), validated when the
+// manifest is built, and it is *additive*: it appears in the resource's
+// capability set but never in its standard action set, so no generated route,
+// batch kind, or read-only narrowing changes because of it. A name that
+// shadows a standard action is rejected, and so is a malformed name -- a
+// declaration is a closed, checkable thing, not an escape hatch to any string.
+// A wrapper may narrow a resource's custom actions, never widen them.
+//
 // Invariants:
 //   - keysAreBelowCounter: nextId is always greater than every stored key.
 //   - readRequiresExisting: read fails for absent ids.
@@ -38,6 +49,7 @@
 
 module resource_actions {
   type Action = Create | Read | Update | Delete | Search | Count | BatchRead
+             | CustomAction(str)
 
   // A stored entity is keyed by an id and carries a value.
   type Entity = int
@@ -480,6 +492,48 @@ module resource_actions {
   pure val allActions: Set[Action] =
     Set(Create, Read, Update, Delete, Search, Count, BatchRead)
 
+  // A custom action name as an app declares it, and the standard actions it
+  // must not shadow.
+  pure val useAction: str = "use"
+
+  // A custom action name is well formed when it is lowercase, starts with a
+  // letter, and otherwise uses only letters, digits, and underscores. Quint
+  // cannot inspect characters, so this models the three shapes the pattern
+  // rejects: an empty name, a name with a disallowed character, and a name
+  // that starts with a digit. `badNames` is the representative reject set.
+  pure val badNames: Set[str] = Set("", "Use", "use-it", "2use", "use it")
+
+  pure def isValidCustomActionName(name: str): bool =
+    not(badNames.contains(name))
+
+  // The standard action names, as strings, for the shadowing check.
+  pure val standardActionNames: Set[str] =
+    Set("create", "read", "update", "delete", "search", "count", "batch_read")
+
+  // A declared custom action must be well formed and must not shadow a
+  // standard action -- otherwise `authorize("read", id)` would be ambiguous.
+  pure def declaresValidCustomActions(custom: Set[str]): bool =
+    custom.forall(n => isValidCustomActionName(n) and not(standardActionNames.contains(n)))
+
+  // The capability set a resource exposes: its standard actions plus its
+  // custom ones. Custom actions are additive -- they never enter the standard
+  // set, so route generation and read-only narrowing are unaffected.
+  pure def capabilitySet(supported: Set[Action], custom: Set[str]): Set[Action] =
+    supported.union(custom.map(n => CustomAction(n)))
+
+  // Whether a resource with these declarations may be registered: every custom
+  // name must be valid, and a custom action never displaces a standard one.
+  pure def declarationIsValid(supported: Set[Action], custom: Set[str]): bool =
+    all {
+      declaresValidCustomActions(custom),
+      capabilitySet(supported, custom).exclude(custom.map(n => CustomAction(n))) == supported,
+    }
+
+  // A wrapper may narrow a resource's custom actions, never widen them: an
+  // exposed set must be a subset of what the inner resource declares.
+  pure def narrowerCustomIsAllowedWiderIsNot(custom: Set[str], exposed: Set[str]): bool =
+    exposed.subseteq(custom)
+
   // The read-only subset a list-backed resource advertises: no write actions.
   pure val readOnlyActions: Set[Action] =
     Set(Read, Search, Count, BatchRead)
@@ -490,6 +544,45 @@ module resource_actions {
   // than reaching an unimplemented service method.
   pure def availableActions(readOnly: bool): Set[Action] =
     if (readOnly) readOnlyActions else allActions
+
+  // A custom action is additive: it joins the capability set without changing
+  // the standard action set, so a resource declaring `use` still serves exactly
+  // the same generated routes.
+  run customActionsAreAdditive = {
+    all {
+      assert(capabilitySet(allActions, Set(useAction)) ==
+        allActions.union(Set(CustomAction(useAction)))),
+      // The standard set is untouched -- no route is generated for a custom
+      // action, and no batch kind is admitted because of one.
+      assert(capabilitySet(allActions, Set(useAction)).exclude(Set(CustomAction(useAction))) ==
+        allActions),
+      // A read-only resource may still declare one.
+      assert(capabilitySet(readOnlyActions, Set(useAction)) ==
+        readOnlyActions.union(Set(CustomAction(useAction)))),
+    }
+  }
+
+  run aDeclaredCustomActionMustBeWellFormedAndNotShadowAStandardOne = {
+    all {
+      assert(declarationIsValid(allActions, Set(useAction))),
+      assert(declarationIsValid(allActions, Set())),
+      // Malformed names are rejected.
+      badNames.forall(n => not(isValidCustomActionName(n))),
+      // A name that shadows a standard action is rejected: `read` is a
+      // standard action, so it cannot also be declared custom.
+      assert(not(declarationIsValid(allActions, Set("read")))),
+      assert(not(declarationIsValid(allActions, Set("batch_read")))),
+    }
+  }
+
+  run aWrapperMayNarrowCustomActionsButNotWidenThem = {
+    val declared = Set(useAction, "stream")
+    all {
+      assert(narrowerCustomIsAllowedWiderIsNot(declared, Set(useAction))),
+      assert(narrowerCustomIsAllowedWiderIsNot(declared, declared)),
+      assert(not(narrowerCustomIsAllowedWiderIsNot(declared, Set(useAction, "delete_all")))),
+    }
+  }
 
   // A read-only resource advertises exactly the read subset; every write
   // action is absent from its surface.

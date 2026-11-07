@@ -37,10 +37,13 @@ class ViewService(Service[T, K], Generic[T, K]):
     transport projects onto the view's REST models.
     """
 
-    def __init__(self, inner: Service[T, K], actions: frozenset[Action]) -> None:
+    def __init__(
+        self, inner: Service[T, K], actions: frozenset[Action], custom_actions: frozenset[str]
+    ) -> None:
         super().__init__()
         self._inner = inner
         self._actions = actions
+        self._custom_actions = frozenset(str(a) for a in custom_actions)
 
     # ------------------------------------------------------------------
     # Lifecycle (delegated to the inner service)
@@ -117,6 +120,19 @@ class ViewService(Service[T, K], Generic[T, K]):
     async def batch_read(self, ids: list[K]) -> list[T | None]:
         self._require_entered()
         return await self._inner.batch_read(ids)
+
+    async def authorize(self, action: str, id: K) -> T:  # noqa: A002
+        """Forward the capability check, after enforcing the view's action set.
+
+        A view that does not expose a custom action must not let a direct
+        service caller reach it, even though the inner resource declares it.
+        """
+        self._require_entered()
+        if str(action) not in {str(a) for a in self._custom_actions}:
+            raise InvalidInputError(
+                f"the custom action {str(action)!r} is not exposed by this view"
+            )
+        return await self._inner.authorize(action, id)
 
     async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Forward the edits after enforcing the view's action set.

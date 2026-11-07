@@ -42,7 +42,14 @@ _WRITE_ACTIONS: frozenset[Action] = frozenset({Action.CREATE, Action.UPDATE, Act
 
 
 def is_read_only(supported_actions: frozenset[Action]) -> bool:
-    """Whether a resource is read-only (it advertises no write action)."""
+    """Whether a resource is read-only (it advertises no write action).
+
+    Custom actions are deliberately not consulted: they are not edits, and the
+    cache keyed here holds a *read* response, so a resource whose standard
+    actions are read-only keeps the optimistic private strategy even if it
+    declares a ``use`` capability. That is the conservative choice — a custom
+    action never invalidates a cached read.
+    """
     return supported_actions.isdisjoint(_WRITE_ACTIONS)
 
 

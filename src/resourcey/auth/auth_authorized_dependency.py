@@ -136,6 +136,7 @@ class AuthorizedDependencyBuilder(DependencyBuilder):
             resource_name=type(resource).__name__,
             user_id=user_id,
             response_private=_response_is_caller_scoped(policies),
+            custom_actions=resource.get_custom_actions(),
         )
 
 

@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import Field, PrivateAttr
 
-from resourcey.core.service import Action
+from resourcey.core.service import Action, as_action
 from resourcey.util.models import DiscriminatedUnionMixin
 from resourcey.util.search_filter import (
     AllFilter,
@@ -77,9 +77,16 @@ class Policy(DiscriminatedUnionMixin, ABC):
 
     @abstractmethod
     async def to_search_filter(
-        self, user_id: uuid.UUID | None, action: Action
+        self, user_id: uuid.UUID | None, action: Action | str
     ) -> SearchFilter[Any]:
         """The rows this policy admits for ``(user_id, action)``.
+
+        ``action`` is a standard :class:`Action` **or** a custom action name a
+        resource declares (see
+        :meth:`~resourcey.core.resource.Resource.get_custom_actions`), so every
+        built-in has a defined stance on one. Compare with ``==`` rather than
+        ``is``: a custom action arrives as a plain string, and an app may pass
+        its own ``StrEnum`` member.
 
         Async so a future policy may consult storage; the built-ins are pure.
         """
@@ -92,7 +99,7 @@ class AllowAll(Policy):
     scopes_to_caller: ClassVar[bool] = False
 
     async def to_search_filter(
-        self, user_id: uuid.UUID | None, action: Action
+        self, user_id: uuid.UUID | None, action: Action | str
     ) -> SearchFilter[Any]:
         return AllFilter()
 
@@ -108,18 +115,24 @@ class DenyAll(Policy):
     scopes_to_caller: ClassVar[bool] = False
 
     async def to_search_filter(
-        self, user_id: uuid.UUID | None, action: Action
+        self, user_id: uuid.UUID | None, action: Action | str
     ) -> SearchFilter[Any]:
         return NoMatchFilter()
 
 
 class ReadOnly(Policy):
-    """Grants the read-like actions and denies the write actions."""
+    """Grants the read-like actions and denies everything else.
+
+    A custom action is **not** read-like, so it is denied: silently granting one
+    would make ``ReadOnly`` grant more than its name promises. A resource that
+    wants a read-only principal to hold a custom capability grants it
+    explicitly, through another policy.
+    """
 
     scopes_to_caller: ClassVar[bool] = False
 
     async def to_search_filter(
-        self, user_id: uuid.UUID | None, action: Action
+        self, user_id: uuid.UUID | None, action: Action | str
     ) -> SearchFilter[Any]:
         if action in _READ_LIKE_ACTIONS:
             return AllFilter()
@@ -135,6 +148,10 @@ class Owner(Policy):
     granted whenever the caller is authenticated. An anonymous caller owns
     nothing and is denied.
 
+    A **custom action** is neither ``create`` nor read-like, so it reduces to
+    the same owner-scoped filter: the caller may exercise the capability on
+    exactly the rows they own, and no others.
+
     ``owner_field`` defaults to ``user_id``; set it to the resource's actual
     owner column via the role resolver's per-resource policy value.
     """
@@ -142,11 +159,11 @@ class Owner(Policy):
     owner_field: str = "user_id"
 
     async def to_search_filter(
-        self, user_id: uuid.UUID | None, action: Action
+        self, user_id: uuid.UUID | None, action: Action | str
     ) -> SearchFilter[Any]:
         if user_id is None:
             return NoMatchFilter()
-        if action is Action.CREATE:
+        if as_action(action) == Action.CREATE:
             # A new row has no owner yet; the resource stamps it.
             return AllFilter()
         return AttrFilter(attribute=self.owner_field, filter=EqFilter(value=user_id))
@@ -181,9 +198,9 @@ class GroupMember(Policy):
         return self._member_groups
 
     async def to_search_filter(
-        self, user_id: uuid.UUID | None, action: Action
+        self, user_id: uuid.UUID | None, action: Action | str
     ) -> SearchFilter[Any]:
-        if action is Action.CREATE:
+        if as_action(action) == Action.CREATE:
             return await self.on_create.to_search_filter(user_id, action)
         # An unbound copy (empty membership) reduces to ``on_mismatch``.
         if not self._member_groups.isdisjoint(self.group_ids):
@@ -213,7 +230,8 @@ class Acl(Policy):
     per-object ACL must be pushed down as a store join / subquery instead.
 
     ``create`` is unscoped (a new row has no id yet); use ``on_create`` to deny
-    it if desired.
+    it if desired. A **custom action** reduces to the same ``IN`` predicate, so
+    a listed id is usable and an unlisted one is not.
     """
 
     ids: frozenset[Any] = frozenset()
@@ -221,9 +239,9 @@ class Acl(Policy):
     on_create: Policy = Field(default_factory=AllowAll)
 
     async def to_search_filter(
-        self, user_id: uuid.UUID | None, action: Action
+        self, user_id: uuid.UUID | None, action: Action | str
     ) -> SearchFilter[Any]:
-        if action is Action.CREATE:
+        if as_action(action) == Action.CREATE:
             return await self.on_create.to_search_filter(user_id, action)
         if not self.ids:
             return NoMatchFilter()

@@ -184,6 +184,16 @@ class CachedService(Service[T, K], Generic[T, K]):
             await self._read_through(key, lambda: self._inner.batch_read(ids)),
         )
 
+    async def authorize(self, action: str, id: K) -> T:  # noqa: A002
+        """Forward the capability check; a custom action is never cached.
+
+        Caching is keyed on a read response, and the check returns a row the
+        caller is *permitted* to act through — serving a stale copy would let a
+        revoked grant keep working, so this always reads through.
+        """
+        self._require_entered()
+        return await self._inner.authorize(action, id)
+
     async def search(
         self,
         search_filter: SearchFilter[T] | None = None,

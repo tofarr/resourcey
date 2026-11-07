@@ -111,6 +111,9 @@ class ResourceView(Resource[T, K], Generic[T, K]):
             replacing the field's wire type in the *request* models only.
         exposed_actions: The actions the view exposes. Defaults to the inner's
             (normalized); must be a subset of the inner's.
+        exposed_custom_actions: The custom actions the view exposes. Defaults to
+            the inner's; must be a subset of the inner's, so a view can hide a
+            capability (drop ``use``) but never invent one.
         path: An explicit REST path segment (defaults to the inner's).
         cache_strategy: An explicit cache policy - the escape hatch.
     """
@@ -122,6 +125,7 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         exposed_field_overrides: Mapping[str, Mapping[str, Any]] | None = None,
         exposed_request_type_overrides: Mapping[str, Any] | None = None,
         exposed_actions: frozenset[Action] | None = None,
+        exposed_custom_actions: frozenset[str] | None = None,
         path: str | None = None,
         cache_strategy: CacheStrategy | None = None,
     ) -> None:
@@ -154,6 +158,18 @@ class ResourceView(Resource[T, K], Generic[T, K]):
                 raise ResourceyConfigError(
                     f"{type(self).__name__} cannot expose actions the inner resource does not "
                     f"support: {sorted(a.value for a in widened)}"
+                )
+
+        inner_custom = frozenset(str(a) for a in resource.get_custom_actions())
+        if exposed_custom_actions is None:
+            self._custom_actions = inner_custom
+        else:
+            self._custom_actions = frozenset(str(a) for a in exposed_custom_actions)
+            widened_custom = self._custom_actions - inner_custom
+            if widened_custom:
+                raise ResourceyConfigError(
+                    f"{type(self).__name__} cannot expose custom actions the inner resource "
+                    f"does not declare: {sorted(widened_custom)}"
                 )
 
     # ------------------------------------------------------------------
@@ -291,6 +307,10 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         """The view's normalized action set."""
         return self._actions
 
+    def get_custom_actions(self) -> frozenset[str]:
+        """The view's custom action set — narrowed from the inner's, never widened."""
+        return self._custom_actions
+
     def get_exposed_resource(self) -> Resource[T, K]:
         """The view is what the outside world sees (never delegates to the inner)."""
         return self
@@ -315,7 +335,10 @@ class ResourceView(Resource[T, K], Generic[T, K]):
     def _narrows(self) -> bool:
         """Whether the view changes fields or actions relative to the inner."""
         actions_differ = self._actions != normalize_actions(self._inner.get_supported_actions())
-        return bool(self._field_overrides) or actions_differ
+        custom_differ = self._custom_actions != frozenset(
+            str(a) for a in self._inner.get_custom_actions()
+        )
+        return bool(self._field_overrides) or actions_differ or custom_differ
 
     # ------------------------------------------------------------------
     # Service seam
@@ -328,7 +351,7 @@ class ResourceView(Resource[T, K], Generic[T, K]):
         wrapper re-checks ``apply_edits`` against the view's actions.
         """
         inner = await self._inner.get_service(ctx)
-        return ViewService(inner, self._actions)
+        return ViewService(inner, self._actions, self._custom_actions)
 
     async def get_storage_key(self) -> StorageKey:
         """The inner resource's storage key: a wrapper adds no storage of its own."""

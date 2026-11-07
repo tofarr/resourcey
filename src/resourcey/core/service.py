@@ -16,6 +16,7 @@ imports only ``util`` and its sibling ``core.errors``.
 from __future__ import annotations
 
 import enum
+import re
 from abc import ABC
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,7 +24,7 @@ from typing import Annotated, Any, Generic, TypeVar
 
 from pydantic import SkipValidation, field_validator
 
-from resourcey.core.errors import ResourceyError
+from resourcey.core.errors import ResourceyConfigError, ResourceyError
 from resourcey.util.models import DiscriminatedUnionMixin
 from resourcey.util.search_filter import SearchFilter
 from resourcey.util.sort_order import SortOrder
@@ -45,6 +46,13 @@ class Action(enum.StrEnum):
     directly. Being a ``StrEnum``, ``Action("create") in supported`` works for a
     correctly spelled string, which is why a startup assertion — not mypy —
     is what catches a typo in a dynamically built action set.
+
+    Deliberately **closed**: a resource's capabilities that are not one of these
+    are declared by name via
+    :meth:`~resourcey.core.resource.Resource.get_custom_actions`, never by
+    growing this enum. A new member would be advertised by every resource that
+    defaults to ``frozenset(Action)``, and the meaning of a capability like
+    ``use`` is resource-specific — the vocabulary belongs to the resource.
     """
 
     CREATE = "create"
@@ -54,6 +62,14 @@ class Action(enum.StrEnum):
     SEARCH = "search"
     COUNT = "count"
     BATCH_READ = "batch_read"
+
+
+# The shape of a custom action name: lowercase, so it compares equal to a wire
+# value and sorts predictably in an error message.
+CUSTOM_ACTION_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
+
+# The standard members, for the "is this declared?" checks below.
+_ACTION_MEMBERS: frozenset[Action] = frozenset(Action)
 
 
 @dataclass(frozen=True)
@@ -398,6 +414,17 @@ class Service(Generic[T, K]):
         self._require_entered()
         raise NotImplementedError
 
+    async def authorize(self, action: str, id: K) -> T:  # noqa: A002
+        """Check one row for a custom action; return it, or raise.
+
+        The seam a hand-written route uses for a capability outside the standard
+        seven. A plain service cannot answer it — there is no policy here — so
+        the default raises; an authorizing wrapper overrides it with the real
+        check.
+        """
+        self._require_entered()
+        raise NotImplementedError
+
     async def apply_edits(self, edits: list[Create[T] | Update[T] | Delete[K]]) -> list[T | None]:
         """Apply a list of :class:`Edit` nodes; results align positionally with ``edits``.
 
@@ -416,19 +443,67 @@ class Service(Generic[T, K]):
         raise NotImplementedError
 
 
-def assert_real_actions(name: str, actions: frozenset[Any]) -> None:
-    """Assert every member of a dynamically built action set is a real :class:`Action`.
+def as_action(action: Action | str) -> Action | str:
+    """The :class:`Action` member a string names, or the string itself.
+
+    ``Action`` is a ``StrEnum``, so ``"create"`` and ``Action.CREATE`` are the
+    same value but not the same object; comparing with ``==`` alone would treat
+    a bare string as unknown. Normalising here means a policy, a route builder
+    and a stored grant all agree on which action was asked for, while a custom
+    action name (which names no member) passes through unchanged.
+    """
+    if isinstance(action, Action):
+        return action
+    try:
+        return Action(action)
+    except ValueError:
+        return action
+
+
+def assert_real_actions(
+    name: str, actions: frozenset[Any], custom_actions: frozenset[Any] = frozenset()
+) -> None:
+    """Assert every member of a dynamically built action set is a declared action.
 
     ``Action`` is a ``StrEnum``, so a correctly spelled string compares equal to
     a member and a typo silently drops a route rather than failing. This is the
     startup check that turns that silent drop into a loud error.
+
+    An action is declared when it is a standard :class:`Action` member **or**
+    one of ``custom_actions``. A name outside both sets is a typo, and the error
+    names both sets so the missing declaration is obvious.
     """
-    unknown = sorted(str(a) for a in actions if not isinstance(a, Action))
+    standard = _ACTION_MEMBERS
+    declared = standard | frozenset(as_action(a) for a in custom_actions)
+    unknown = sorted(str(a) for a in actions if as_action(a) not in declared)
     if unknown:
         raise ServiceError(
             f"{name}.get_supported_actions() contained {unknown}; every member must be an "
-            "Action (a typo would otherwise silently drop a route)."
+            f"Action {sorted(a.value for a in standard)} or one of the resource's declared "
+            f"custom actions {sorted(str(a) for a in declared - standard)} (a typo would "
+            "otherwise silently drop a route)."
         )
+
+
+def assert_valid_custom_actions(name: str, custom_actions: frozenset[Any]) -> None:
+    """Assert a resource's declared custom actions are well-formed and non-standard.
+
+    A custom action is a name scoped to one resource, so two rules apply at
+    declaration time: it must be a lowercase identifier, and it must not
+    collide with a standard :class:`Action` value — ``"read"`` as a custom
+    action would be ambiguous against the standard one in a stored policy.
+    """
+    for action in sorted(str(a) for a in custom_actions):
+        if as_action(action) in _ACTION_MEMBERS:
+            raise ResourceyConfigError(
+                f"{name}.get_custom_actions() declared {action!r}, which is already a "
+                "standard action; a custom action must not shadow one."
+            )
+        if not CUSTOM_ACTION_PATTERN.fullmatch(action):
+            raise ResourceyConfigError(
+                f"{name}.get_custom_actions() declared {action!r}, which is not a valid "
+                f"custom action name; expected {CUSTOM_ACTION_PATTERN.pattern!r}."
+            )
 
 
 # The singular action a batch action is a batch *of*. A batch action cannot

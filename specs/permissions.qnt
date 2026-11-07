@@ -28,10 +28,24 @@
 //   - principalIndependentSetsStayShared: a policy set drawn from the built-ins
 //     (all principal-independent) is never caller-scoped, so a response under it
 //     keeps its shared-cache optimisation.
+//
+// Custom actions (issue #187): a resource may declare capabilities outside the
+// standard seven (e.g. `use`) via `get_custom_actions()`. They are modelled as
+// `Custom(name)`, a payload variant, because a resource declares an open set of
+// names rather than a fixed enum. A custom action is by-id — it is checked
+// against one row, like read / update / delete — so a denial hides the row
+// (Hidden) rather than reporting a forbidden operation. `ReadOnly` grants only
+// the read-like standard actions, so it denies every custom action; a custom
+// action never implies a standard one, and vice versa.
 
 module permissions {
-  // The standard resource actions, mirroring core/service.Action.
-  type Action = Create | Read | Update | Delete | Search | Count | BatchRead
+  // The standard resource actions, mirroring core/service.Action, plus the
+  // open-ended `Custom(name)` vocabulary a resource declares itself.
+  type Action = Create | Read | Update | Delete | Search | Count | BatchRead | Custom(str)
+
+  // The standard seven, i.e. everything that is not a custom action.
+  pure val standardActions: Set[Action] =
+    Set(Create, Read, Update, Delete, Search, Count, BatchRead)
 
   // A filter over rows: All (match everything) or None (match nothing). Mirrors
   // the SearchFilter vocabulary (AllFilter / NoMatchFilter). Suffixed with F to
@@ -62,6 +76,9 @@ module permissions {
     if (act == Count) Search
     else if (act == BatchRead) Read
     else act
+
+  // Whether an action is one of the standard seven rather than a custom one.
+  pure def isStandard(act: Action): bool = standardActions.contains(act)
 
   // Reduce a single policy to its Filter for an action.
   pure def reducePolicy(p: Policy, act: Action): Filter =
@@ -110,6 +127,9 @@ module permissions {
       Read => Hidden |
       Update => Hidden |
       Delete => Hidden |
+      // A custom action is a by-id capability: a denied row is hidden, so the
+      // caller cannot tell a non-permitted id from an absent one.
+      Custom(_) => Hidden |
       _ => Empty  // Search / Count / BatchRead -> empty / None positions
     }
 
@@ -145,9 +165,12 @@ module permissions {
         Set(AllowAll, DenyAll), Set(AllowAll, ReadOnly), Set(DenyAll, ReadOnly),
         Set(AllowAll, DenyAll, ReadOnly))
 
-  // Every action.
+  // Every standard action.
   pure val allActions: Set[Action] =
     Set(Create, Read, Update, Delete, Search, Count, BatchRead)
+
+  // A representative custom action, as an app would declare it.
+  pure val useAction: Action = Custom("use")
 
   // Tests
 
@@ -157,6 +180,45 @@ module permissions {
 
   run denyAllIsNoneForEveryAction = {
     allActions.forall(a => reducePolicy(DenyAll, a) == NoneF)
+  }
+
+  // A custom action is not standard, and is never reduced to one.
+  run customActionsAreOutsideTheStandardSet = {
+    all {
+      assert(not(isStandard(useAction))),
+      assert(isStandard(Read) and isStandard(BatchRead)),
+      assert(normalizeAction(useAction) == useAction),
+    }
+  }
+
+  // ReadOnly grants only the read-like standard actions, so it denies every
+  // custom action: "may read" does not imply "may use".
+  run readOnlyDeniesCustomActions = {
+    val ps = Map("alice" -> Set(ReadOnly))
+    all {
+      assert(reducePolicy(ReadOnly, useAction) == NoneF),
+      assert(not(isPermitted("alice", useAction, ps))),
+      // The same principal may still read, so the two are independent.
+      assert(isPermitted("alice", Read, ps)),
+    }
+  }
+
+  // A custom action is enforced as a by-id capability: a denial hides the row.
+  run customActionDenialIsHidden = {
+    all {
+      assert(enforce(useAction, NoneF) == Hidden),
+      assert(enforce(useAction, AllF) == Allowed),
+    }
+  }
+
+  // AllowAll and DenyAll reduce a custom action exactly like a standard one.
+  run customActionsFollowTheUnionModel = {
+    val ps = Map("alice" -> Set(DenyAll, AllowAll))
+    all {
+      assert(reducePolicy(AllowAll, useAction) == AllF),
+      assert(reducePolicy(DenyAll, useAction) == NoneF),
+      assert(isPermitted("alice", useAction, ps)),
+    }
   }
 
   run readOnlyGrantsReadLikeAndDeniesTheRest = {

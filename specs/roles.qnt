@@ -39,8 +39,10 @@
 //     principal-independent built-ins is not.
 
 module roles {
-  // The standard resource actions, mirroring core/service.Action.
+  // The standard resource actions, mirroring core/service.Action, plus the
+  // open-ended `Custom(name)` vocabulary a resource declares itself (#187).
   type Action = Create | Read | Update | Delete | Search | Count | BatchRead
+             | Custom(str)
 
   // A filter over rows: the chain NoMatchF <= OwnF <= AllF.
   type Filter = NoMatchF | OwnF | AllF
@@ -53,6 +55,9 @@ module roles {
     if (act == Count) Search
     else if (act == BatchRead) Read
     else act
+
+  // A representative custom action, as an app would declare it.
+  pure val useAction: Action = Custom("use")
 
   // Whether an action reads (ReadOnly grants these).
   pure def isReadLike(act: Action): bool = {
@@ -175,6 +180,19 @@ module roles {
       assert(normalizeAction(Count) == Search),
       assert(normalizeAction(BatchRead) == Read),
       assert(normalizeAction(Create) == Create),
+    }
+  }
+
+  // A custom action is not read-like, so ReadOnly denies it; Owner treats it
+  // like any other by-id capability -- own rows only.
+  run customActionsScopeLikeByIDCapabilities = {
+    all {
+      assert(not(isReadLike(useAction))),
+      assert(reducePolicy(ReadOnly, useAction, true) == NoMatchF),
+      assert(reducePolicy(Owner, useAction, true) == OwnF),
+      assert(reducePolicy(Owner, useAction, false) == NoMatchF),
+      assert(reducePolicy(AllowAll, useAction, true) == AllF),
+      assert(reducePolicy(DenyAll, useAction, true) == NoMatchF),
     }
   }
 
