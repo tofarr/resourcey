@@ -233,6 +233,14 @@ class AuthorizedService(Service[T, K], Generic[T, K]):
 
         Note that this is a check, not a grant of the standard actions: holding
         ``read`` does not imply any custom action, and vice versa.
+
+        The returned row is **unprojected**: it is the inner resource's DTO, so
+        it still carries every field the resource stores — including fields a
+        :class:`~resourcey.view.resource_view.ResourceView` hides from its read
+        response. Projection is a transport concern that only the generated
+        routes apply. A hand-written route that serialises this row must project
+        it through ``resource.get_rest_models().read_response`` itself, or it
+        will serve hidden fields.
         """
         declared = {str(a) for a in self._custom_actions}
         if str(action) not in declared:
