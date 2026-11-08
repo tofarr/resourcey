@@ -27,7 +27,7 @@ SqlResource(
     session_factory=...,          # escape hatch, wins
     session_manager=..., name=...,# else the process-wide manager + connection
     path=None,                    # default: pluralized kebab DTO name
-    encryption_service=None,
+    encryption_service=None,        # SecretStr at rest + cursors
 )
 ```
 

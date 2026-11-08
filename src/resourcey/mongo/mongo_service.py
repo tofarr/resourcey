@@ -36,6 +36,7 @@ from resourcey.core.service import (
     StorageKey,
     Update,
 )
+from resourcey.encryption.encryption_fields import decrypt_fields, encrypt_fields, unwrap_secret
 from resourcey.util.cursor import decode_cursor, encode_cursor
 from resourcey.util.missing import MISSING
 from resourcey.util.search_filter import SearchFilter
@@ -96,6 +97,7 @@ class MongoService(Service[T, K]):
         self._ctx = ctx
         self._collection = collection
         self._storage_key = storage_key
+        self._encrypted_fields = resource.get_encrypted_fields()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -424,14 +426,15 @@ class MongoService(Service[T, K]):
     # ------------------------------------------------------------------
 
     def _to_document(self, data: dict[str, Any]) -> dict[str, Any]:
-        """Rename DTO field keys to Mongo field names and encode their values."""
+        """Rename DTO field keys to Mongo field names, encrypting and encoding their values."""
+        data = encrypt_fields(self._encryption(), data, self._encrypted_fields)
         return {
-            self._resource.mongo_field_for(name): _encode_value(value)
+            self._resource.mongo_field_for(name): _encode_value(unwrap_secret(value))
             for name, value in data.items()
         }
 
     def _raw_dto(self, document: dict[str, Any]) -> dict[str, Any]:
-        """A document's fields keyed by DTO attribute name (values left encoded)."""
+        """A document's fields keyed by DTO attribute name (secrets decrypted, others left encoded)."""
         id_field = self._resource.get_id_field()
         values: dict[str, Any] = {}
         for name in self._resource.get_dto_declaration().__dto_fields__:
@@ -440,7 +443,7 @@ class MongoService(Service[T, K]):
                 values[name] = document[mongo_field]
         if "_id" in document:
             values[id_field] = document["_id"]
-        return values
+        return decrypt_fields(self._encryption(), values, self._encrypted_fields)
 
     def _from_document(self, document: dict[str, Any]) -> T:
         """Project a Mongo document into a DTO, running the migration-on-read hook."""

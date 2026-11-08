@@ -490,9 +490,14 @@ def _is_secret_annotation(annotation: Any) -> bool:
 
     A ``Mapped[SecretStr]`` / ``Optional[SecretStr]`` annotation reduces to
     ``SecretStr`` through the same ``_strip_annotated`` the model builder uses,
-    so a secret column is recognized however it was declared.
+    so a secret column is recognized however it was declared. A nullable secret
+    (``SecretStr | None``) is still a secret.
     """
-    return _strip_annotated(annotation) is SecretStr
+    stripped = _strip_annotated(annotation)
+    if _is_union(stripped):
+        members = [arg for arg in get_args(stripped) if arg is not type(None)]
+        return bool(members) and all(arg is SecretStr for arg in members)
+    return stripped is SecretStr
 
 
 def _secret_field_names(
@@ -504,6 +509,20 @@ def _secret_field_names(
         for field_name, (annotation, config) in fields.items()
         if _is_secret_annotation(annotation) and (flag is None or getattr(config, flag))
     }
+
+
+def secret_field_names(dto: type[DTO]) -> frozenset[str]:
+    """The names of the ``SecretStr`` fields a DTO declaration holds."""
+    return frozenset(_secret_field_names(dto.__dto_fields__))
+
+
+def secret_fields_of_model(model: type[BaseModel]) -> frozenset[str]:
+    """The ``SecretStr`` fields of a Pydantic model (e.g. a read response)."""
+    return frozenset(
+        name
+        for name, field in model.model_fields.items()
+        if _is_secret_annotation(field.annotation)
+    )
 
 
 def _secret_base(secret_names: set[str]) -> type[BaseModel]:

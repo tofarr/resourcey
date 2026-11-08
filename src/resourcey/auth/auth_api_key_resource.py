@@ -156,7 +156,14 @@ class StoredApiKeyResource(SqlResource[Any, Any]):
     Builds a ``StoredApiKeyService`` (which adds ``find_by_key`` and the
     one-time reveal). The import is deferred to :meth:`make_service` to avoid a
     module cycle.
+
+    The key column holds a one-way digest that ``find_by_key`` matches by
+    equality, so it is exempt from at-rest encryption (a random-nonce ciphertext
+    could not be looked up).
     """
+
+    def get_encrypted_fields(self) -> frozenset[str]:
+        return frozenset()
 
     def make_service(self, ctx: Any, session_factory: Any) -> Any:
         from resourcey.auth.auth_api_key_service import StoredApiKeyService

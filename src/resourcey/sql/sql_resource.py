@@ -25,7 +25,7 @@ from sqlalchemy import Column
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from resourcey.cache.cache_defaults import DefaultCacheStrategyMixin
-from resourcey.core.dto import DTO, RestModels
+from resourcey.core.dto import DTO, RestModels, secret_field_names, secret_fields_of_model
 from resourcey.core.errors import InvalidInputError
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action, Service, ServiceError, StorageKey, storage_key
@@ -68,8 +68,8 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         name: The connection name to resolve from ``session_manager`` (default:
             the first configured connection).
         path: An explicit REST path segment (defaults to the model name, pluralized).
-        encryption_service: The service used to encrypt/decrypt pagination
-            cursors. Defaults to the process-wide
+        encryption_service: The service used to encrypt/decrypt ``SecretStr``
+            fields at rest and pagination cursors. Defaults to the process-wide
             :func:`~resourcey.encryption.encryption_service.get_encryption_service`
             (built from ``APP_ENCRYPTION_KEY_*``); pass one to override.
     """
@@ -130,13 +130,24 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
     # → optimistic, else last-modified when ``updated_at`` is readable, else
     # ETag. Override it here to change the policy for this resource.
 
+    def get_encrypted_fields(self) -> frozenset[str]:
+        """The DTO fields stored as ciphertext: every ``SecretStr`` field.
+
+        Override to opt a field out when it is stored as a one-way digest
+        instead (and so must stay equality-searchable by that digest).
+        """
+        return secret_field_names(self._dto)
+
     def get_queryable_fields(self) -> frozenset[str]:
-        """Every field the read model exposes — the default query surface.
+        """Every non-secret field the read model exposes — the default query surface.
 
         Derived from ``read_response``, so a field projected away is not
-        filterable and ``?secret__eq=`` cannot disclose it.
+        filterable and ``?secret__eq=`` cannot disclose it. A ``SecretStr``
+        field is never queryable: it is encrypted at rest with a random nonce,
+        so equality, ordering and range tests on it cannot be answered.
         """
-        return frozenset(self.get_rest_models().read_response.model_fields)
+        read_model = self.get_rest_models().read_response
+        return frozenset(read_model.model_fields) - secret_fields_of_model(read_model)
 
     def get_filter_operators(self) -> Mapping[str, frozenset[str]]:
         """The derived filter surface: each queryable field's allowed operators.
@@ -145,7 +156,12 @@ class SqlResource(DefaultCacheStrategyMixin, Resource[T, K]):
         narrow it.
         """
         fields = self.get_rest_models().read_response.model_fields
-        return {name: operators_for_annotation(field.annotation) for name, field in fields.items()}
+        queryable = self.get_queryable_fields()
+        return {
+            name: operators_for_annotation(field.annotation)
+            for name, field in fields.items()
+            if name in queryable
+        }
 
     def get_search_filter_type(self) -> type[SearchFilter[Any]] | None:
         """A declared object-filter class, or ``None`` (derive from the read model)."""

@@ -187,6 +187,26 @@ the storage boundary) or `expose_secrets` (plaintext) from the pydantic context
 and otherwise redacts; **encryption wins over exposure**. See
 `specs/secret_serialization.qnt`.
 
+**At rest.** A `SecretStr` field is encrypted by the storage backend, not the
+DTO layer: `SqlService` / `MongoService` call `encrypt_fields` on write and
+`decrypt_fields` on read (`encryption/encryption_fields.py`), for the fields named
+by `resource.get_encrypted_fields()` (default: every `SecretStr`, via
+`secret_field_names`). The in-memory DTO keeps plaintext in a `SecretStr`;
+ciphertext exists only in storage. Consequences to keep in mind:
+
+* Encryption uses a random nonce, so a secret field is **never queryable or
+  sortable** (`get_queryable_fields` drops it; a filter or sort on it is a 400).
+  Hash when you only need to verify a presented value (`find_by_key`); encrypt
+  when you need the value back later. A hashed field opts out of encryption by
+  overriding `get_encrypted_fields` to exclude it (`StoredApiKeyResource`).
+* A stored value that is not ciphertext (a row written before encryption) reads
+  back as-is and is encrypted the next time that field is written. Ciphertext that
+  fails authentication, or names a key no longer in `decryption_keys`, raises.
+* Ciphertext is longer than plaintext (about 4/3 of the plaintext plus ~150 characters of header), so size
+  the column accordingly. `ListResource` stores nothing and does not encrypt.
+
+`specs/secret_at_rest.qnt`.
+
 ## Manifest
 
 ```python
