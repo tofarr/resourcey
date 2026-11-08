@@ -45,7 +45,7 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 from pydantic import BaseModel
 
 from resourcey.cache.cache_defaults import default_cache_strategy
-from resourcey.core.dto import DTO, RestModels, derive_dto
+from resourcey.core.dto import DTO, RestModels, derive_dto, secret_fields_of_model
 from resourcey.core.errors import InvalidInputError, ResourceyConfigError
 from resourcey.core.resource import Resource
 from resourcey.core.service import (
@@ -262,13 +262,23 @@ class ResourceView(Resource[T, K], Generic[T, K]):
     # ------------------------------------------------------------------
 
     def get_queryable_fields(self) -> frozenset[str]:
-        """Every field the view's read model exposes - the query surface."""
-        return frozenset(self.get_rest_models().read_response.model_fields)
+        """Every non-secret field the view's read model exposes - the query surface.
+
+        A ``SecretStr`` field is never queryable: the inner resource stores it
+        encrypted (or as a digest it does not expose for search).
+        """
+        read_model = self.get_rest_models().read_response
+        return frozenset(read_model.model_fields) - secret_fields_of_model(read_model)
 
     def get_filter_operators(self) -> Mapping[str, frozenset[str]]:
         """The derived filter surface: each queryable field's allowed operators."""
         fields = self.get_rest_models().read_response.model_fields
-        return {name: operators_for_annotation(field.annotation) for name, field in fields.items()}
+        queryable = self.get_queryable_fields()
+        return {
+            name: operators_for_annotation(field.annotation)
+            for name, field in fields.items()
+            if name in queryable
+        }
 
     def get_search_filter_type(self) -> type[SearchFilter[Any]] | None:
         """The inner's declared object filter (validated at construction)."""

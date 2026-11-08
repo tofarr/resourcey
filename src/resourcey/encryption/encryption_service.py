@@ -164,6 +164,19 @@ class EncryptionService:
             registry=_JWE_REGISTRY,
         )
 
+    @staticmethod
+    def is_ciphertext(value: str) -> bool:
+        """Whether ``value`` has the shape of a ciphertext this service produces.
+
+        A shape test only (JWE compact form with a ``kid`` header); it does not
+        authenticate. Lets a reader tell a legacy plaintext value from ciphertext.
+        """
+        try:
+            _jwe_kid(value)
+        except ValueError:
+            return False
+        return True
+
     def decrypt_value(self, ciphertext: str) -> str:
         """Decrypt a JWE compact ciphertext back to the original plaintext."""
         key_id = _jwe_kid(ciphertext)

@@ -36,6 +36,7 @@ from resourcey.core.service import (
     Update,
     storage_key,
 )
+from resourcey.encryption.encryption_fields import decrypt_fields, encrypt_fields, unwrap_secret
 from resourcey.sql.cursor import decode_cursor, encode_cursor, keyset_predicate
 from resourcey.util.missing import MISSING
 from resourcey.util.search_filter import SearchFilter
@@ -76,6 +77,7 @@ class SqlService(Service[T, K]):
         self._ctx = ctx
         self._session_factory = session_factory
         self._storage_key = storage_key("sql", sql_storage_identity(session_factory))
+        self._encrypted_fields = resource.get_encrypted_fields()
         self._session: AsyncSession | None = None
         self._owns_storage = False
 
@@ -260,11 +262,10 @@ class SqlService(Service[T, K]):
         """
         session = self._active_session()
         rows = (await session.execute(select(self._resource.table))).mappings().all()
-        dto_type = self._resource.get_dto_type()
         surviving = [
             row[self._resource.id_column.name]
             for row in rows
-            if search_filter.matches(dto_type.model_validate(_row_values(self._resource, row)))
+            if search_filter.matches(self._to_dto(row))
         ]
         return stmt.where(self._resource.id_column.in_(surviving))
 
@@ -414,29 +415,26 @@ class SqlService(Service[T, K]):
     def _to_columns(self, data: dict[str, Any]) -> dict[str, Any]:
         """Rename DTO field (attribute) keys to their table column names.
 
-        A ``SecretStr`` value is unwrapped at this storage boundary: the DBAPI
-        cannot bind one.
+        ``SecretStr`` values are unwrapped here, and the resource's encrypted
+        fields are encrypted: this is the storage boundary.
         """
+        data = encrypt_fields(self._encryption(), data, self._encrypted_fields)
         return {
-            self._resource._column_for_attr.get(name, name): _unbind_secret(value)
+            self._resource._column_for_attr.get(name, name): unwrap_secret(value)
             for name, value in data.items()
         }
 
     def _to_dto(self, row: Any) -> T:
         """Build a DTO instance from a result row mapping (column names -> fields)."""
-        return self._resource.get_dto_type().model_validate(_row_values(self._resource, row))
+        values = decrypt_fields(
+            self._encryption(), _row_values(self._resource, row), self._encrypted_fields
+        )
+        return self._resource.get_dto_type().model_validate(values)
 
 
 def _row_values(resource: Any, row: Any) -> dict[str, Any]:
     """Map a result row's column names back to DTO attribute names."""
     return {resource._attr_for_column.get(name, name): value for name, value in row.items()}
-
-
-def _unbind_secret(value: Any) -> Any:
-    """Unwrap a :class:`~pydantic.SecretStr` to its plaintext for DBAPI binding."""
-    from pydantic import SecretStr
-
-    return value.get_secret_value() if isinstance(value, SecretStr) else value
 
 
 def _payload_values(payload: Any) -> dict[str, Any]:

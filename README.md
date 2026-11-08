@@ -357,6 +357,26 @@ wrapper script to populate the environment. A pluggable medium or channel is
 chosen by name with a `LazyField` (`APP_MEDIUM_CLASS`, `APP_CHANNEL_CLASS`), so
 swapping the implementation needs no code change.
 
+### Secrets at rest
+
+A `SecretStr` field is encrypted by the SQL and Mongo backends when written and
+decrypted when read, using the process-wide `EncryptionService`. The DTO keeps
+the plaintext in a `SecretStr`; a `SELECT *` or a database dump shows only JWE
+ciphertext. Three consequences:
+
+* **Not searchable.** Encryption uses a random nonce, so a `SecretStr` field is
+  not filterable or sortable (`?api_secret__eq=` and `?sort=api_secret` are
+  `400`). *Hash* a value you only need to verify (API keys do this) and *encrypt*
+  one you need back later.
+* **Size the column.** Ciphertext is about 4/3 of the plaintext plus ~150
+  characters.
+* **Existing rows.** A stored value that is not ciphertext reads back unchanged
+  and is encrypted the next time that field is written. Rotate keys by adding the
+  old key to `APP_DECRYPTION_KEYS_<n>_*`.
+
+A resource whose field holds a digest overrides `get_encrypted_fields()` to
+exclude it. `ListResource` stores nothing and does not encrypt.
+
 ## Stack
 
 | Concern | Tool |

@@ -198,7 +198,7 @@ def test_the_config_files_exist_without_an_init():
 def test_the_encryption_files_exist_without_an_init():
     encryption = FRAMEWORK_DIR / "encryption"
     names = {p.name for p in sorted(encryption.glob("*.py"))}
-    assert names == {"encryption_config.py", "encryption_service.py"}
+    assert names == {"encryption_config.py", "encryption_fields.py", "encryption_service.py"}
     assert not (encryption / "__init__.py").exists()
 
 

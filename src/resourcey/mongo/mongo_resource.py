@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 from pydantic import BaseModel
 
 from resourcey.cache.cache_defaults import DefaultCacheStrategyMixin
-from resourcey.core.dto import DTO, RestModels
+from resourcey.core.dto import DTO, RestModels, secret_field_names, secret_fields_of_model
 from resourcey.core.errors import InvalidInputError
 from resourcey.core.resource import Resource
 from resourcey.core.service import Action, Service, ServiceError, StorageKey, storage_key
@@ -78,7 +78,8 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
             be entered (via the manifest) before the first service is built.
         name: The connection name to resolve from ``client_manager``.
         path: An explicit REST path segment (defaults to the DTO name, pluralized).
-        encryption_service: The service used to encrypt pagination cursors.
+        encryption_service: The service used to encrypt ``SecretStr`` fields at
+            rest and pagination cursors.
         client: An explicit client (the escape hatch) — wins over ``client_manager``.
         database_name: The database to select on ``client``.
         collection_name: An explicit collection name (defaults to the DTO name,
@@ -139,18 +140,34 @@ class MongoResource(DefaultCacheStrategyMixin, Resource[T, K]):
     # get_cache_strategy is inherited from DefaultCacheStrategyMixin: read-only
     # → optimistic, else last-modified when ``updated_at`` is readable, else ETag.
 
+    def get_encrypted_fields(self) -> frozenset[str]:
+        """The DTO fields stored as ciphertext: every ``SecretStr`` field.
+
+        Override to opt a field out when it is stored as a one-way digest
+        instead (and so must stay equality-searchable by that digest).
+        """
+        return secret_field_names(self._dto)
+
     def get_queryable_fields(self) -> frozenset[str]:
-        """Every field the read model exposes — the default query surface.
+        """Every non-secret field the read model exposes — the default query surface.
 
         Derived from ``read_response``, so a field projected away is not
-        filterable.
+        filterable. A ``SecretStr`` field is never queryable: it is encrypted at
+        rest with a random nonce, so equality, ordering and range tests on it
+        cannot be answered.
         """
-        return frozenset(self.get_rest_models().read_response.model_fields)
+        read_model = self.get_rest_models().read_response
+        return frozenset(read_model.model_fields) - secret_fields_of_model(read_model)
 
     def get_filter_operators(self) -> Mapping[str, frozenset[str]]:
         """The derived filter surface: each queryable field's allowed operators."""
         fields = self.get_rest_models().read_response.model_fields
-        return {name: operators_for_annotation(field.annotation) for name, field in fields.items()}
+        queryable = self.get_queryable_fields()
+        return {
+            name: operators_for_annotation(field.annotation)
+            for name, field in fields.items()
+            if name in queryable
+        }
 
     def get_search_filter_type(self) -> type[SearchFilter[Any]] | None:
         """A declared object-filter class, or ``None`` (derive from the read model)."""

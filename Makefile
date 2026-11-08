@@ -27,6 +27,7 @@ specs:
 	quint typecheck specs/api_key.qnt
 	quint typecheck specs/auth.qnt
 	quint typecheck specs/secret_serialization.qnt
+	quint typecheck specs/secret_at_rest.qnt
 	quint typecheck specs/principal_store.qnt
 	quint typecheck specs/dto_defaults.qnt
 	quint test specs/resource_actions.qnt --main=resource_actions --match "^(createThenRead|createUpdateDelete|batchReadAndEdit|searchEmptyFilterMatchesAll|searchEqualityPredicate|searchInPredicate|searchEmptyInMatchesNothing|searchAndCombinesPredicates|searchNoFilterDeclaredRejectsNonEmptyFilter|countEmptyFilterCountsAll|countEqualityPredicate|countNoFilterDeclaredRejectsNonEmptyFilter|customActionsAreAdditive|aDeclaredCustomActionMustBeWellFormedAndNotShadowAStandardOne|aWrapperMayNarrowCustomActionsButNotWidenThem|readOnlyResourceExposesReadSubset|writableResourceExposesAllActions|readOnlyResourceServesReads|defensiveReadIsolated|nonDefensiveServesStore|searchLimitCapBoundary|searchDefaultLimitClamped|batchReadCapBoundary)$$"
@@ -36,6 +37,7 @@ specs:
 	quint test specs/api_key.qnt --main=api_key --match "^(keyIsAbsentFromTheWriteModels|keyIsAbsentFromTheReadModel|onlyCreateDisclosesTheKey|querySurfaceExcludesTheKey|storedValueIsOnlyTheDigest|createRevealsTheStoredKey|presentedKeyAuthenticatesByDigest|updateCannotRotateTheKey|invariantsHold)$$"
 	quint test specs/auth.qnt --main=auth --match "^(emptyStoreDeniesEverything|absentAndInvalidAreIndistinguishable|aValidKeyGrantsAccess|theCheckRunsBeforeTargetStorage|theKeyServiceOwnsItsOwnContext|thePipelineClassifiesThreeWays|oneResultDerivesBothTiers|theCompositeFollowsFirstWins|invariantsHold|principalPipelineInvariantsHold)$$"
 	quint test specs/secret_serialization.qnt --main=secret_serialization --match "^(defaultRedacts|exposeRevealsThePlaintext|encryptionTakesPrecedence|outputDependsOnlyOnTheContext|encryptionRoundTrips|invariantsHold)$$"
+	quint test specs/secret_at_rest.qnt --main=secret_at_rest --match "^(storedValueIsNeverThePlaintext|readingReturnsTheWrittenPlaintext|plainFieldsAreUnaffected|absentSecretStaysAbsent|legacyRowStillReads|querySurfaceExcludesSecrets|invariantsHold)$$"
 	quint test specs/principal_store.qnt --main=principal_store --match "^(unmatchedKeyIsInvalid|absentIsNotInvalidTest|enabledStoredPrincipalAuthenticates|disabledPrincipalIsRejected|missingPrincipalIsRejected|noStoreTrustsTheCredentialTest|invariantsHold)$$"
 	quint typecheck specs/oauth.qnt
 	quint test specs/oauth.qnt --main=oauth --match "^(failClosedOnNoClientTest|aValidTokenAuthenticates|issuerAndAudienceAreChecked|expiryIsChecked|algorithmIsPinnedNoConfusion|identityIsFailClosed|localUserStoreIsAuthoritativeTest|absentIsNotInvalidTest|refreshSerializesAcrossCallers|invariantsHold)$$"
