@@ -170,6 +170,37 @@ policy's reduction depends on *who* is asking. `AllowAll` / `DenyAll` /
 `response_is_private()`, which the transport uses to force `private` onto the
 cache header.
 
+### Custom policies (supported extension point)
+
+An app subclasses `Policy` in its own code; there is no registration. Pinned by
+`tests/unit/test_authorization.py` (`LabelPolicy`) and documented in the README
+("Custom policies").
+
+* Discovery is by **loaded subclass**: the defining module must be imported
+  before a stored row is read (else `policy_from_rows` logs and skips the kind).
+  `kind` is the **class name**, so a rename orphans stored rows.
+* A custom policy nests inside a built-in (`GroupMember(on_match=Mine(...))`) and
+  round-trips both kinds. Policy kinds and custom action names are data, not
+  schema (`RolePermission.permission` is JSON).
+* `group_ids` is inherited bookkeeping, in every dump, ignored unless the policy
+  is membership-aware.
+* `scopes_to_caller` defaults to `True`; a row-narrowing policy must keep it or a
+  shared cache can replay one caller's slice to another.
+* `to_search_filter` must return a `SearchFilter` (a predicate over the row's own
+  columns) and gets no session. Facts the row lacks are resolved in the
+  `PolicyResolver` and carried as policy fields (#193 was closed as unnecessary).
+* A rule the row cannot answer returns a **custom filter node**: either with a
+  converter rule via `get_filter_rules()` (an `EXISTS`, which also works on a
+  conditional write), or with a custom service from `make_service` that splits
+  the node out of the top-level `AND`, pushes the rest down, and applies the node
+  itself (`tests/unit/test_custom_node_service.py`). For the service rung: keep
+  `allow_filter_iteration` off on the inner resource; let check errors propagate
+  (never `False`, a `NotFilter` would invert it to fail-open); `matches` runs on
+  the event loop; raise for a node under `OR` / `NOT`; refuse a write whose
+  condition carries the node; cache `None` or private; `count()` scans or raises.
+  A declared filter class does not lower the query, so a query param cannot emit
+  a custom node.
+
 ### Enforcement
 
 `AuthorizedService` wraps a resource's own service and enforces the reduced

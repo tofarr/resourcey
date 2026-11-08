@@ -61,17 +61,24 @@ class Policy(DiscriminatedUnionMixin, ABC):
     subclass. :meth:`to_search_filter` answers the one question the enforcement
     layer asks: *which rows may this principal touch, for this action?* An
     ``AllFilter`` means every row; a ``NoMatchFilter`` means none.
+
+    Subclassing is a supported extension point: an app-defined policy is found by
+    ``kind`` (its class name) once its module is imported, with no registration.
     """
 
     # Whether this policy's reduction depends on *who* is asking. Defaults to
-    # ``True`` (safe), so a narrowed response is marked caller-private. Not a
+    # ``True`` (safe), so a narrowed response is marked caller-private and a shared
+    # cache cannot replay it to another caller. A custom policy that narrows rows
+    # must keep the default; only a principal-agnostic one may set ``False``. Not a
     # pydantic field -- a class-level fact about the policy kind.
     scopes_to_caller: ClassVar[bool] = True
 
     group_ids: list[uuid.UUID] = Field(default_factory=list)
     """The group ids a membership policy applies to (its *target* groups).
 
-    A plain policy ignores this. A ``list`` (not a ``frozenset``) so a stored
+    Inherited bookkeeping, present in every dump: it lives on the base so the
+    store and resolver can treat every stored policy uniformly. A policy that is
+    not membership-aware ignores it. A ``list`` (not a ``frozenset``) so a stored
     policy serializes to JSON.
     """
 
@@ -88,7 +95,12 @@ class Policy(DiscriminatedUnionMixin, ABC):
         ``is``: a custom action arrives as a plain string, and an app may pass
         its own ``StrEnum`` member.
 
-        Async so a future policy may consult storage; the built-ins are pure.
+        Async so a policy may compute its answer without blocking, but the result
+        must be a :class:`SearchFilter`: a predicate over the row's own columns.
+        A policy gets no session, so a rule that needs facts the row does not
+        carry resolves them in the ``PolicyResolver`` and holds them as fields, or
+        returns a custom filter node a service enforces (see "Custom policies" in
+        the README).
         """
         raise NotImplementedError
 
