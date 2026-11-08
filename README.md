@@ -414,6 +414,99 @@ the whole subsystem in one call and `register_oauth_routes` mounts the
 interactive login / callback / refresh flow (BFF session, PKCE). See
 [`examples/07_oauth`](https://github.com/tofarr/resourcey/tree/main/examples/07_oauth).
 
+### Custom policies
+
+Subclassing `Policy` is a supported extension point; no framework change is
+needed. Define the class in app code, give it its own fields, and implement
+`to_search_filter(user_id, action)`:
+
+```python
+class TenantScoped(Policy):
+    tenant_id: str
+
+    async def to_search_filter(self, user_id, action):
+        return attr("tenant_id", EqFilter(value=self.tenant_id))
+```
+
+* **Discovery is by loaded subclass.** Nothing is registered, so the module that
+  defines the class must be imported before a stored policy is read back. An
+  unknown `kind` is skipped (and logged once per kind) by the RBAC store rather
+  than crashing.
+* **`kind` is the class name.** A stored row holds it, so renaming or moving a
+  policy class orphans every row that names it. Treat the name as schema.
+* **It composes.** `GroupMember(on_match=TenantScoped(...), on_mismatch=DenyAll())`
+  round-trips with both kinds intact; a built-in does not need to know about
+  yours. `RolePermission.permission` is JSON and `resource` a plain string, so a
+  new policy kind or custom action name is data, not a migration.
+* **`group_ids` is inherited.** Every policy dumps a `group_ids` list because
+  the store and resolver bind membership uniformly. A policy that is not
+  membership-aware ignores it.
+* **`scopes_to_caller` defaults to `True`.** It says whether the reduction
+  depends on who is asking, and drives the `Cache-Control: private` the
+  transport emits. A policy that narrows rows must keep the default, or a shared
+  cache could serve one caller's slice to another. Set it to `False` only for a
+  principal-agnostic policy, as `AllowAll` / `DenyAll` / `ReadOnly` do.
+* **The return value must be a `SearchFilter`.** `to_search_filter` is `async`
+  and may compute anything, but it returns a predicate over the row's own
+  columns, and it gets no session or context. A rule that needs a fact the row
+  does not carry resolves it in the app's `PolicyResolver` and holds it as a
+  policy field. A rule that must ask a question the row cannot answer returns a
+  custom filter node (below).
+
+#### Beyond column predicates
+
+Two rungs, in order of preference. Neither needs a framework API.
+
+1. **Custom node and converter rule.** The policy returns an app-defined
+   `SearchFilter` node that carries only data (say a `user_id`), and a rule
+   added through `SqlResource.get_filter_rules()` turns it into a correlated
+   `EXISTS`. It also works on a conditional write, because the `EXISTS` is
+   evaluated atomically with the write. See `tests/unit/test_custom_filter_nodes.py`.
+2. **Custom node and custom service**, for a predicate no backend can express
+   (an external service). The node's `matches` does the check. A service
+   returned from `Resource.get_service()` (override `make_service` on a
+   `SqlResource`) wraps the SQL service: `search` splits the node out of the
+   filter, pushes the rest down, and applies the node itself. `AuthorizedService`
+   wraps it like any other `Service`. Paging needs no custom cursor: each round
+   asks the inner service for `limit - len(found)` rows and checks them, so a
+   round never overshoots and, when the loop stops, the inner `next_cursor`
+   already points past the last row examined. Stop when the page is full or the
+   inner results run out, and cap the number of rounds, returning a short page
+   *with* its cursor if the cap is hit. The worked example is
+   `tests/unit/test_custom_node_service.py`.
+
+Rules for rung 2:
+
+* **Keep `allow_filter_iteration` off on the inner resource.** If it is on and
+  the node leaks through, the fallback calls `matches` on every row: one
+  external call per row of the table.
+* **Let errors propagate; never return `False` on a failed check.** A
+  `NotFilter` around the node would turn the failure into `True` (fail-open).
+* **`matches` runs on the event loop.** `AuthorizedService.read`, `batch_read`
+  and `authorize`, and the realtime path, call `filt.matches` directly, so it
+  must be quick. If it cannot be, have the service enforce the node itself
+  (calling blocking code through `asyncio.to_thread`) instead of putting the node
+  in a policy.
+* **Only split top-level `AND` conjuncts.** A node under an `OR` or `NOT` must
+  make the service raise (`UnsupportedFilterError`), not guess.
+* **Refuse a write whose condition carries the node.** The inner service already
+  raises `UnsupportedFilterError`; keep it that way, and do not intercept the
+  write to evaluate the node in Python (that reopens the check-then-write race).
+* **Cache and count.** The resource's cache strategy must be `None` or private,
+  because the external state is not in the DTO. `count()` either scans or
+  raises; the service decides, and should say which in its error.
+* **Wire exposure.** A wire condition resolves any registered `SearchFilter`
+  subclass by `kind`, so a client can name your node in a `POST /batch-edit`
+  `condition`. Every built-in backend refuses a node it has no conversion for
+  before any check runs (`501`), so today this is inert. A custom service that
+  evaluates a write condition itself would make a node that does I/O
+  client-triggerable; restrict it.
+* **Query surface.** A declared filter class
+  (`get_search_filter_type`) names the `<field>__<op>` *surface* only; the
+  request is lowered to standard nodes by the transport, not through the
+  declared class. A declared `is_damned__eq` therefore cannot emit your node. Use
+  a hand-written route that builds the node and calls the service.
+
 ## Configuration
 
 A typed environment-variable parser is bundled in `resourcey.util.env_parser`

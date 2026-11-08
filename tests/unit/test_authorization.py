@@ -88,7 +88,11 @@ class Item(AuthzBase):
 
 
 class LabelPolicy(Policy):
-    """A policy that scopes rows to a fixed ``label`` — a stand-in for ``Owner``.
+    """An app-defined policy that scopes rows to a fixed ``label``.
+
+    Defined here, outside ``src/``, it is the fixture for the custom-``Policy``
+    contract (issue #191): discovery, round-trip, nesting, and the safe
+    ``scopes_to_caller`` default all hold for a policy the framework never saw.
 
     Its reduction is a narrowing ``AttrFilter`` (not ``All`` / ``NoMatch``), which
     is the case that proves the policy filter is folded into the write's own
@@ -189,6 +193,45 @@ def test_policies_are_discriminated_and_round_trip():
         dumped = policy.model_dump()
         assert dumped["kind"] == type(policy).__name__
         assert isinstance(Policy.model_validate(dumped), type(policy))
+
+
+# ---------------------------------------------------------------------------
+# Custom policies are a supported extension point (issue #191)
+# ---------------------------------------------------------------------------
+
+
+def test_an_app_defined_policy_is_discovered_and_round_trips():
+    policy = LabelPolicy(label="mine")
+    dumped = policy.model_dump()
+    assert dumped == {"group_ids": [], "label": "mine", "kind": "LabelPolicy"}
+    # ``dict(...)``: validating must not depend on the caller's dict surviving intact.
+    restored = Policy.model_validate(dict(dumped))
+    assert isinstance(restored, LabelPolicy)
+    assert restored == policy
+    assert dumped == {"group_ids": [], "label": "mine", "kind": "LabelPolicy"}
+
+
+def test_an_app_defined_policy_nests_inside_a_built_in():
+    nested = GroupMember(on_match=LabelPolicy(label="mine"), on_mismatch=DenyAll())
+    restored = Policy.model_validate(dict(nested.model_dump()))
+    assert isinstance(restored, GroupMember)
+    assert isinstance(restored.on_match, LabelPolicy)
+    assert restored.on_match.label == "mine"
+    assert isinstance(restored.on_mismatch, DenyAll)
+
+
+async def test_a_nested_app_defined_policy_reduces_through_its_parent():
+    nested = GroupMember(on_match=LabelPolicy(label="mine"), group_ids=[uuid4()])
+    member = bind_member_groups(nested, frozenset(nested.group_ids))
+    reduced = await member.to_search_filter(None, Action.READ)
+    assert reduced == attr("label", EqFilter(value="mine"))
+    assert isinstance(await nested.to_search_filter(None, Action.READ), NoMatchFilter)
+
+
+def test_a_policy_is_caller_scoped_unless_it_says_otherwise():
+    assert LabelPolicy.scopes_to_caller is True
+    assert LabelPolicy(label="mine").scopes_to_caller is True
+    assert AllowAll.scopes_to_caller is False
 
 
 # ---------------------------------------------------------------------------
